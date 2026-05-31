@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="2300" viewBox="0 0 1900 2300" role="img" aria-labelledby="title desc">
+  <title id="title">OMP Guardrail Vertical Swimlane Workflow</title>
+  <desc id="desc">Vertical swimlane diagram for the OMP guardrail control workflow.</desc>
+  <defs>
+    <style>
+      .bg{fill:#f7f8fc}.panel{fill:#fff;stroke:#d7deea;stroke-width:2}.lane-a{fill:#f6f8fc}.lane-b{fill:#eef3fa}.lane-c{fill:#f6f8fc}.lane-d{fill:#eef3fa}
+      .grid{stroke:#d7deea;stroke-width:2}.node{fill:#fff;stroke:#667085;stroke-width:2.2}.explore{fill:#eef4ff;stroke:#3b6fd8}.pending{fill:#fff8e8;stroke:#c48511}
+      .implement{fill:#edf9f1;stroke:#27834b}.audit{fill:#f4efff;stroke:#7957bf}.stop{fill:#fff0f0;stroke:#c23b3b}.complete{fill:#e9f8f7;stroke:#167a78}
+      .decision{fill:#fff;stroke:#667085;stroke-width:2.2}.title{font:700 40px "Segoe UI","Microsoft YaHei",sans-serif;fill:#172033}
+      .subtitle{font:400 19px "Segoe UI","Microsoft YaHei",sans-serif;fill:#586174}.lane-label{font:700 21px "Segoe UI","Microsoft YaHei",sans-serif;fill:#344054;text-anchor:middle}
+      .label{font:700 18px "Segoe UI","Microsoft YaHei",sans-serif;fill:#202a3b;text-anchor:middle}.small{font:400 15px "Segoe UI","Microsoft YaHei",sans-serif;fill:#596579;text-anchor:middle}
+      .edge-label{font:700 14px "Segoe UI","Microsoft YaHei",sans-serif;fill:#475467;text-anchor:middle}.arrow{fill:none;stroke:#65758b;stroke-width:2.6;marker-end:url(#arrow)}
+      .arrow-stop{fill:none;stroke:#c23b3b;stroke-width:2.8;marker-end:url(#arrow-stop)}.arrow-ask{fill:none;stroke:#c48511;stroke-width:2.8;marker-end:url(#arrow-ask)}
+      .arrow-allow{fill:none;stroke:#27834b;stroke-width:2.8;marker-end:url(#arrow-allow)}.dashed{stroke-dasharray:9 8}
+      .rule-title{font:700 18px "Segoe UI","Microsoft YaHei",sans-serif;fill:#344054}.rule{font:400 15px "Segoe UI","Microsoft YaHei",sans-serif;fill:#596579}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5 0 7Z" fill="#65758b"/></marker>
+    <marker id="arrow-stop" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5 0 7Z" fill="#c23b3b"/></marker>
+    <marker id="arrow-ask" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5 0 7Z" fill="#c48511"/></marker>
+    <marker id="arrow-allow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto"><path d="M0 0L10 3.5 0 7Z" fill="#27834b"/></marker>
+  </defs>
+
+  <rect class="bg" width="1900" height="2300"/>
+  <text class="title" x="70" y="72">OMP 围栏控制工作流</text>
+  <text class="subtitle" x="72" y="108">纵向泳道图：模型提出动作，控制层验证动作，人类授予权限，审计系统决定能否继续。</text>
+
+  <rect class="panel" x="50" y="145" width="1800" height="1765" rx="22"/>
+  <rect class="lane-a" x="70" y="165" width="430" height="1725"/>
+  <rect class="lane-b" x="500" y="165" width="470" height="1725"/>
+  <rect class="lane-c" x="970" y="165" width="430" height="1725"/>
+  <rect class="lane-d" x="1400" y="165" width="430" height="1725"/>
+  <path class="grid" d="M500 165V1890M970 165V1890M1400 165V1890"/>
+  <path class="grid" d="M70 245H1830"/>
+  <text class="lane-label" x="285" y="215">实现模型</text>
+  <text class="lane-label" x="735" y="215">OMP Hook / Rust Control CLI</text>
+  <text class="lane-label" x="1185" y="215">机器审计 + Reviewer</text>
+  <text class="lane-label" x="1615" y="215">人类</text>
+
+  <rect class="node explore" x="165" y="285" width="240" height="92" rx="16"/>
+  <text class="label" x="285" y="319">Explore</text>
+  <text class="small" x="285" y="347">新会话默认只读</text>
+
+  <rect class="node pending" x="145" y="455" width="280" height="102" rx="16"/>
+  <text class="label" x="285" y="490">Implementation Proposal</text>
+  <text class="small" x="285" y="518">能力、scope、围栏</text>
+  <text class="small" x="285" y="540">验证命令</text>
+
+  <rect class="node pending" x="610" y="455" width="250" height="102" rx="16"/>
+  <text class="label" x="735" y="490">Pending Contract</text>
+  <text class="small" x="735" y="518">冻结结构化提案</text>
+  <text class="small" x="735" y="540">等待人类决策</text>
+
+  <rect class="node pending" x="1490" y="455" width="250" height="102" rx="16"/>
+  <text class="label" x="1615" y="490">审批 Proposal</text>
+  <text class="small" x="1615" y="518">/guardrails-approve</text>
+  <text class="small" x="1615" y="540">或 reject</text>
+
+  <rect class="node implement" x="610" y="645" width="250" height="102" rx="16"/>
+  <text class="label" x="735" y="680">Implement Lease</text>
+  <text class="small" x="735" y="708">限定 capability、scope</text>
+  <text class="small" x="735" y="730">和有效期</text>
+
+  <rect class="node implement" x="155" y="645" width="260" height="102" rx="16"/>
+  <text class="label" x="285" y="680">实现一个批次</text>
+  <text class="small" x="285" y="708">修改、验证</text>
+  <text class="small" x="285" y="730">提交 evidence</text>
+
+  <polygon class="decision" points="735,815 855,885 735,955 615,885"/>
+  <text class="label" x="735" y="879">动作是否合法？</text>
+  <text class="small" x="735" y="905">实时 policy 拦截</text>
+
+  <rect class="node complete" x="610" y="1040" width="250" height="92" rx="16"/>
+  <text class="label" x="735" y="1074">记录 Evidence</text>
+  <text class="small" x="735" y="1102">diff、命令、退出码</text>
+
+  <rect class="node pending" x="1490" y="815" width="250" height="102" rx="16"/>
+  <text class="label" x="1615" y="850">审批 scope 扩展</text>
+  <text class="small" x="1615" y="878">Pending Expansion</text>
+  <text class="small" x="1615" y="900">批准或拒绝</text>
+
+  <rect class="node stop" x="1490" y="1010" width="250" height="102" rx="16"/>
+  <text class="label" x="1615" y="1045">STOP</text>
+  <text class="small" x="1615" y="1073">硬围栏命中</text>
+  <text class="small" x="1615" y="1095">锁定自动执行</text>
+
+  <polygon class="decision" points="735,1190 855,1260 735,1330 615,1260"/>
+  <text class="label" x="735" y="1254">触发审计？</text>
+  <text class="small" x="735" y="1280">批次、失败、完成声明</text>
+
+  <rect class="node audit" x="610" y="1405" width="250" height="102" rx="16"/>
+  <text class="label" x="735" y="1440">Audit Hold</text>
+  <text class="small" x="735" y="1468">自动切换只读</text>
+  <text class="small" x="735" y="1490">模型不能自行恢复</text>
+
+  <rect class="node audit" x="1060" y="1405" width="250" height="102" rx="16"/>
+  <text class="label" x="1185" y="1440">确定性机器审计</text>
+  <text class="small" x="1185" y="1468">schema、path、diff</text>
+  <text class="small" x="1185" y="1490">依赖、gate、验证结果</text>
+
+  <rect class="node audit" x="1060" y="1575" width="250" height="92" rx="16"/>
+  <text class="label" x="1185" y="1609">Reviewer 子智能体</text>
+  <text class="small" x="1185" y="1637">只读语义审查</text>
+
+  <polygon class="decision" points="1185,1730 1305,1800 1185,1870 1065,1800"/>
+  <text class="label" x="1185" y="1794">审计结论</text>
+  <text class="small" x="1185" y="1820">STOP / ASK / ALLOW</text>
+
+  <rect class="node complete" x="155" y="1749" width="260" height="102" rx="16"/>
+  <text class="label" x="285" y="1784">Final ALLOW</text>
+  <text class="small" x="285" y="1812">生成完成报告</text>
+  <text class="small" x="285" y="1834">收回 lease，返回 Explore</text>
+
+  <rect class="node pending" x="1490" y="1600" width="250" height="102" rx="16"/>
+  <text class="label" x="1615" y="1635">ASK</text>
+  <text class="small" x="1615" y="1663">等待人类决策</text>
+  <text class="small" x="1615" y="1685">resume 或 reject</text>
+
+  <rect class="node stop" x="1490" y="1749" width="250" height="102" rx="16"/>
+  <text class="label" x="1615" y="1784">STOP</text>
+  <text class="small" x="1615" y="1812">解释规则、证据</text>
+  <text class="small" x="1615" y="1834">等待重规划或例外审批</text>
+
+  <path class="arrow" d="M285 377V455"/>
+  <path class="arrow" d="M425 506H610"/>
+  <path class="arrow" d="M860 506H1490"/>
+  <path class="arrow-allow" d="M1490 525H1380V696H860"/>
+  <path class="arrow" d="M610 696H415"/>
+  <path class="arrow" d="M285 747V785H735V815"/>
+  <path class="arrow-allow" d="M735 955V1040"/>
+  <path class="arrow-ask" d="M855 885H1490"/>
+  <path class="arrow-stop" d="M855 910H1420V1061H1490"/>
+  <path class="arrow-allow dashed" d="M1490 885H1380V696H860"/>
+  <path class="arrow" d="M735 1132V1190"/>
+  <path class="arrow" d="M735 1330V1405"/>
+  <path class="arrow" d="M860 1456H1060"/>
+  <path class="arrow" d="M1185 1507V1575"/>
+  <path class="arrow" d="M1185 1667V1730"/>
+  <path class="arrow-ask" d="M1305 1780H1415V1651H1490"/>
+  <path class="arrow-stop" d="M1305 1820H1490"/>
+  <path class="arrow-allow" d="M1065 1800H415"/>
+  <path class="arrow dashed" d="M615 1260H520V696H610"/>
+  <path class="arrow-allow dashed" d="M1490 1651H1380V696H860"/>
+  <path class="arrow dashed" d="M285 1749V400H230V377"/>
+
+  <text class="edge-label" x="313" y="420">分析</text>
+  <text class="edge-label" x="518" y="493">提交</text>
+  <text class="edge-label" x="1175" y="493">请求审批</text>
+  <text class="edge-label" x="1285" y="681">批准</text>
+  <text class="edge-label" x="515" y="683">执行</text>
+  <text class="edge-label" x="760" y="998">合法</text>
+  <text class="edge-label" x="1155" y="870">REVIEW 边界</text>
+  <text class="edge-label" x="1372" y="940">硬围栏</text>
+  <text class="edge-label" x="765" y="1368">是</text>
+  <text class="edge-label" x="545" y="1247">否：继续批次</text>
+  <text class="edge-label" x="1405" y="1640">ASK</text>
+  <text class="edge-label" x="1400" y="1807">STOP</text>
+  <text class="edge-label" x="730" y="1787">Final ALLOW</text>
+  <text class="edge-label" x="1397" y="728">resume</text>
+
+  <rect class="panel" x="50" y="1940" width="1800" height="300" rx="22"/>
+  <text class="rule-title" x="85" y="1985">不可绕过的规则</text>
+  <rect class="node explore" x="90" y="2020" width="400" height="165" rx="16"/>
+  <text class="label" x="290" y="2056">默认最小权限</text>
+  <text class="small" x="290" y="2088">新会话必须从 Explore 开始</text>
+  <text class="small" x="290" y="2113">普通文本 Approve 不构成授权</text>
+  <text class="small" x="290" y="2138">lease 完成后自动收回</text>
+
+  <rect class="node pending" x="530" y="2020" width="400" height="165" rx="16"/>
+  <text class="label" x="730" y="2056">人类只审批 Proposal</text>
+  <text class="small" x="730" y="2088">模型生成结构化 scope 建议</text>
+  <text class="small" x="730" y="2113">扩大 scope 必须重新审批</text>
+  <text class="small" x="730" y="2138">模型不能自行授权或重试猜测</text>
+
+  <rect class="node audit" x="970" y="2020" width="400" height="165" rx="16"/>
+  <text class="label" x="1170" y="2056">机器审计优先</text>
+  <text class="small" x="1170" y="2088">确定性检查先于模型判断</text>
+  <text class="small" x="1170" y="2113">Reviewer 只补充语义审查</text>
+  <text class="small" x="1170" y="2138">Reviewer 无权解除 Audit Hold</text>
+
+  <rect class="node stop" x="1410" y="2020" width="400" height="165" rx="16"/>
+  <text class="label" x="1610" y="2056">STOP 必须真的停止</text>
+  <text class="small" x="1610" y="2088">禁止 ALLOW WITH WARNING</text>
+  <text class="small" x="1610" y="2113">验证缺失时不能声称完成</text>
+  <text class="small" x="1610" y="2138">恢复只能由人类显式批准</text>
+</svg>

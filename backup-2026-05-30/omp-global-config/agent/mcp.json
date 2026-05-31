@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "zai-vision": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["-y", "@z_ai/mcp-server@latest"],
+      "env": {
+        "Z_AI_API_KEY": "<YOUR_ZAI_API_KEY>",
+        "Z_AI_MODE": "ZAI"
+      }
+    },
+    "zai-web-search": {
+      "type": "http",
+      "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_ZAI_API_KEY>"
+      }
+    },
+    "zai-web-reader": {
+      "type": "http",
+      "url": "https://api.z.ai/api/mcp/web_reader/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_ZAI_API_KEY>"
+      }
+    },
+    "zai-zread": {
+      "type": "http",
+      "url": "https://api.z.ai/api/mcp/zread/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_ZAI_API_KEY>"
+      }
+    }
+  }
+}

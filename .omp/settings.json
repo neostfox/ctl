@@ -1,0 +1,41 @@
+{
+  "modelRoles": {
+    "default": "zai/glm-5.1",
+    "task": "zai/glm-5.1"
+  },
+  "tools": {
+    "approvalMode": "yolo"
+  },
+  "extensions": [
+    "./.omp/hooks/pre/guardrails.ts"
+  ],
+  "async": {
+    "enabled": false
+  },
+  "bash": {
+    "autoBackground": {
+      "enabled": false
+    },
+    "env": {
+      "PATH": "C:\\Users\\shaob\\.cargo\\bin;%PATH%"
+    }
+  },
+  "task": {
+    "eager": false,
+    "isolation": {
+      "mode": "none"
+    }
+  },
+  "fetch": {
+    "enabled": false
+  },
+  "web_search": {
+    "enabled": false
+  },
+  "browser": {
+    "enabled": false
+  },
+  "github": {
+    "enabled": false
+  }
+}

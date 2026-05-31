@@ -1,0 +1,99 @@
+{
+  "event_envelope": {
+    "missing_actor": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "type": "task_created",
+      "payload": {}
+    },
+    "bad_uuid": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "not-a-uuid",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {}
+    },
+    "zero_seq": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 0,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {}
+    },
+    "unknown_event_type": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "unknown_event",
+      "payload": {}
+    },
+    "extra_field": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {},
+      "unexpected_field": "should be rejected"
+    },
+    "wrong_schema_id": {
+      "schema": "control.wrong-schema.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {}
+    }
+  },
+  "task_definition": {
+    "missing_objective": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "gates": ["check"]
+    },
+    "missing_gates": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test"
+    },
+    "bad_mode": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "extra-large",
+      "objective": "test",
+      "gates": ["check"]
+    },
+    "extra_field": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "gates": ["check"],
+      "unknown": true
+    }
+  }
+}

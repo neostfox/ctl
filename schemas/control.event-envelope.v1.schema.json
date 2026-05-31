@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control.event-envelope.v1.schema.json",
+  "title": "EventEnvelope",
+  "description": "Canonical event envelope for the AI Dev Control Plane.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "control.event-envelope.v1"
+    },
+    "event_id": {
+      "description": "Unique event identifier (UUIDv4).",
+      "type": "string",
+      "format": "uuid"
+    },
+    "command_id": {
+      "description": "Idempotent command identifier.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "task_id": {
+      "description": "Target task identifier.",
+      "type": "string"
+    },
+    "seq": {
+      "description": "Strictly increasing sequence number.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "occurred_at": {
+      "description": "ISO 8601 timestamp.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "description": "Who triggered the event (human, agent, system).",
+      "type": "string"
+    },
+    "type": {
+      "description": "Event type name.",
+      "type": "string",
+      "enum": [
+        "task_created",
+        "task_marked_ready",
+        "task_started",
+        "task_submitted_for_review",
+        "task_reopened",
+        "task_completed",
+        "task_cancelled",
+        "hold_entered",
+        "hold_exited",
+        "boundary_violation_recorded",
+        "gate_checked"
+      ]
+    },
+    "payload": {
+      "description": "Event-specific payload.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "event_id",
+    "command_id",
+    "task_id",
+    "seq",
+    "occurred_at",
+    "actor",
+    "type",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "gate_checked" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["gate_id", "passed", "evidence", "checked_at"],
+            "properties": {
+              "gate_id": {
+                "description": "Identifier of the gate that was checked.",
+                "type": "string",
+                "minLength": 1
+              },
+              "passed": {
+                "description": "Whether the gate passed.",
+                "type": "boolean"
+              },
+              "evidence": {
+                "description": "Human-readable evidence of the gate result.",
+                "type": "string",
+                "minLength": 1
+              },
+              "checked_at": {
+                "description": "ISO 8601 timestamp of when the gate was checked.",
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

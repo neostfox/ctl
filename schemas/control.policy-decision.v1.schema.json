@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control.policy-decision.v1.schema.json",
+  "title": "PolicyDecision",
+  "description": "Result of a policy check.",
+  "type": "object",
+  "properties": {
+    "allowed": {
+      "type": "boolean"
+    },
+    "rule_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "approval_required": {
+      "type": "boolean"
+    }
+  },
+  "required": ["allowed", "rule_ids", "diagnostics", "approval_required"],
+  "unevaluatedProperties": false
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control.task-definition.v1.schema.json",
+  "title": "TaskDefinition",
+  "description": "Defines the scope, gates, and initial state of a task.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "control.task-definition.v1"
+    },
+    "id": {
+      "description": "Task identifier (e.g., 05-30-m0-init).",
+      "type": "string"
+    },
+    "mode": {
+      "description": "Risk control level.",
+      "type": "string",
+      "enum": ["small", "medium", "large"]
+    },
+    "objective": {
+      "description": "Clear goal of the task.",
+      "type": "string"
+    },
+    "baseline_commit": {
+      "description": "Git commit hash before task starts.",
+      "type": "string"
+    },
+    "read_scope": {
+      "description": "Files/dirs allowed to read.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "write_allow": {
+      "description": "Files/dirs allowed to modify.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "write_deny": {
+      "description": "Explicitly denied files/dirs.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "risk_triggers": {
+      "description": "Conditions that trigger hold.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "description": "List of gate identifiers to run.",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "mode",
+    "objective",
+    "gates"
+  ],
+  "unevaluatedProperties": false
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "control.event-envelope.v1",
+  "event_id": "not-a-uuid",
+  "command_id": "550e8400-e29b-41d4-a716-446655440001",
+  "task_id": "t1",
+  "seq": 1,
+  "occurred_at": "2026-05-30T10:00:00Z",
+  "actor": "human",
+  "type": "task_created",
+  "payload": {}
+}
