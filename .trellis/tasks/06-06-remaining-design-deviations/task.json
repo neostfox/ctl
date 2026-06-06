@@ -1,0 +1,30 @@
+{
+  "id": "remaining-design-deviations",
+  "name": "remaining-design-deviations",
+  "title": "Resolve remaining design deviations",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "shaobolua",
+  "assignee": "shaobolua",
+  "createdAt": "2026-06-06",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "06-06-m1-canonical-task-ledger",
+    "06-06-m2-gate-policy-boundary",
+    "06-06-m3-manual-loop-mvp"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
