@@ -39,3 +39,36 @@ Reviewed M0 against docs, fixed all STOP/HIGH issues (schema validation, protect
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: M3 Manual Loop MVP implementation
+
+**Date**: 2026-06-06
+**Task**: M3 Manual Loop MVP implementation
+**Branch**: `master`
+
+### Summary
+
+Implemented M3 manual loop MVP: assignment export, manual result ingest with scope validation, deterministic audit report, task summary report, evidence events in reducer, hardened submit/finish with full completion interlock. 104 tests pass, architecture check clean. Archived M3 task and parent design-deviations task.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ec83962` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
