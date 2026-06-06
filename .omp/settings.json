@@ -6,9 +6,6 @@
   "tools": {
     "approvalMode": "yolo"
   },
-  "extensions": [
-    "./.omp/hooks/pre/guardrails.ts"
-  ],
   "async": {
     "enabled": false
   },
@@ -37,5 +34,10 @@
   },
   "github": {
     "enabled": false
+  },
+  "skills": {
+    "autoLoad": [
+      ".omp/skills/control-guard/SKILL.md"
+    ]
   }
 }
