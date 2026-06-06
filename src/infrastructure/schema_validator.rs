@@ -125,6 +125,19 @@ impl SchemaValidator {
             }
         }
 
+        if let (Some(min_items), Some(arr)) = (schema.get("minItems"), instance.as_array()) {
+            if let Some(min) = min_items.as_u64() {
+                if arr.len() < min as usize {
+                    return Err(anyhow!(
+                        "Array at {} has too few items: {} < {}",
+                        path,
+                        arr.len(),
+                        min
+                    ));
+                }
+            }
+        }
+
         if let (Some(req), Some(obj)) = (schema.get("required"), instance.as_object()) {
             if let Some(req_arr) = req.as_array() {
                 for field in req_arr {
@@ -156,17 +169,16 @@ impl SchemaValidator {
                 }
             }
         }
-        // additionalProperties: false — reject undeclared properties
-        if let (Some(obj), Some(props), Some(false)) = (
+        // additionalProperties: false — reject undeclared properties.
+        // When a schema omits `properties`, the allowed set is empty.
+        if let (Some(obj), Some(false)) = (
             instance.as_object(),
-            schema.get("properties"),
             schema.get("additionalProperties").and_then(|v| v.as_bool()),
         ) {
-            if let Some(props_obj) = props.as_object() {
-                for key in obj.keys() {
-                    if !props_obj.contains_key(key) {
-                        return Err(anyhow!("Additional property at {}: {}", path, key));
-                    }
+            let props_obj = schema.get("properties").and_then(|v| v.as_object());
+            for key in obj.keys() {
+                if props_obj.is_none_or(|props| !props.contains_key(key)) {
+                    return Err(anyhow!("Additional property at {}: {}", path, key));
                 }
             }
         }

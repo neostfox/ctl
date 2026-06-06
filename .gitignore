@@ -1,7 +1,11 @@
 /target
-Cargo.lock
+# Cargo.lock should be committed for binary crates
+# Cargo.lock
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
 .env
+.idea/
+.vscode/

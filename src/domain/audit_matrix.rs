@@ -22,11 +22,71 @@ mod tests {
             "command_id": "550e8400-e29b-41d4-a716-446655440001",
             "task_id": "t1", "seq": 1,
             "occurred_at": "2026-05-30T10:00:00Z",
-            "actor": "human", "type": "task_created", "payload": {}
+            "actor": "human", "type": "task_created", "payload": task_payload(
+                "Test",
+                &["src/"],
+                &["src/"],
+                &["cargo_check"]
+            )
         });
         assert!(validator
             .validate_instance(&valid, "control.event-envelope.v1")
             .is_ok());
+    }
+
+    #[test]
+    fn schema_rejects_empty_boundary_arrays() {
+        let validator = SchemaValidator::new("schemas/").unwrap();
+        let empty_read_scope = json!({
+            "schema": "control.event-envelope.v1",
+            "event_id": "550e8400-e29b-41d4-a716-446655440000",
+            "command_id": "550e8400-e29b-41d4-a716-446655440001",
+            "task_id": "t1", "seq": 1,
+            "occurred_at": "2026-05-30T10:00:00Z",
+            "actor": "human", "type": "task_created", "payload": task_payload(
+                "Test",
+                &[],
+                &["src/"],
+                &["cargo_check"]
+            )
+        });
+        assert!(validator
+            .validate_instance(&empty_read_scope, "control.event-envelope.v1")
+            .is_err());
+
+        let empty_write_allow = json!({
+            "schema": "control.event-envelope.v1",
+            "event_id": "550e8400-e29b-41d4-a716-446655440000",
+            "command_id": "550e8400-e29b-41d4-a716-446655440001",
+            "task_id": "t1", "seq": 1,
+            "occurred_at": "2026-05-30T10:00:00Z",
+            "actor": "human", "type": "task_created", "payload": task_payload(
+                "Test",
+                &["src/"],
+                &[],
+                &["cargo_check"]
+            )
+        });
+        assert!(validator
+            .validate_instance(&empty_write_allow, "control.event-envelope.v1")
+            .is_err());
+
+        let empty_gates = json!({
+            "schema": "control.event-envelope.v1",
+            "event_id": "550e8400-e29b-41d4-a716-446655440000",
+            "command_id": "550e8400-e29b-41d4-a716-446655440001",
+            "task_id": "t1", "seq": 1,
+            "occurred_at": "2026-05-30T10:00:00Z",
+            "actor": "human", "type": "task_created", "payload": task_payload(
+                "Test",
+                &["src/"],
+                &["src/"],
+                &[]
+            )
+        });
+        assert!(validator
+            .validate_instance(&empty_gates, "control.event-envelope.v1")
+            .is_err());
     }
 
     #[test]
@@ -158,9 +218,10 @@ mod tests {
     fn reducer_full_lifecycle() {
         let state = replay("t-lifecycle", "fixtures/reducer_lifecycle.jsonl");
         assert_eq!(state.phase, Phase::Completed);
-        // 9 events: 6 lifecycle transitions + 2 gate_checked + task_completed
-        assert_eq!(state.history.len(), 9);
-        assert_eq!(state.last_seq, 9);
+        assert!(state.is_archived);
+        // 10 events: 6 lifecycle + 2 gate_checked + task_completed + task_archived
+        assert_eq!(state.history.len(), 10);
+        assert_eq!(state.last_seq, 10);
     }
 
     #[test]
@@ -169,6 +230,91 @@ mod tests {
         assert_eq!(state.phase, Phase::Completed);
         // 8 events: 6 hold transitions + gate_checked + task_completed
         assert_eq!(state.history.len(), 8);
+    }
+
+    #[test]
+    fn reducer_rejects_legacy_scope_boundary() {
+        let mut state = TaskState::new("t-legacy");
+        let result = apply(
+            &mut state,
+            &ev(
+                1,
+                "t-legacy",
+                "task_created",
+                json!({
+                    "objective": "legacy",
+                    "scope": ["src/"],
+                    "read_scope": ["src/"],
+                    "write_allow": ["src/"],
+                    "write_deny": [],
+                    "risk_triggers": [],
+                    "gates": ["cargo_check"]
+                }),
+            ),
+        );
+        assert!(
+            result.is_err(),
+            "legacy scope must not enter canonical state"
+        );
+    }
+
+    #[test]
+    fn reducer_stores_boundary_fields_in_deterministic_order() {
+        let mut state = TaskState::new("t-boundary");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t-boundary",
+                "task_created",
+                json!({
+                    "objective": "ordered",
+                    "read_scope": ["z/", "a/", "z/"],
+                    "write_allow": ["src/b.rs", "src/a.rs"],
+                    "write_deny": ["target/", ".git/"],
+                    "risk_triggers": ["deps", "schema"],
+                    "gates": ["cargo_test", "cargo_check"]
+                }),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state
+                .read_scope
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["a/", "z/"]
+        );
+        assert_eq!(
+            state
+                .write_allow
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+        assert_eq!(
+            state
+                .write_deny
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![".git/", "target/"]
+        );
+        assert_eq!(
+            state
+                .risk_triggers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["deps", "schema"]
+        );
+        assert_eq!(
+            state.gates.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["cargo_check", "cargo_test"]
+        );
     }
 
     // ============================================================
@@ -184,7 +330,7 @@ mod tests {
                 1,
                 "t-sp",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -200,7 +346,7 @@ mod tests {
                 1,
                 "t-sip",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -218,7 +364,7 @@ mod tests {
                 1,
                 "t-spl",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -238,7 +384,7 @@ mod tests {
                 1,
                 "t-sr",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -259,7 +405,7 @@ mod tests {
                 1,
                 "t-cp",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -275,7 +421,7 @@ mod tests {
                 1,
                 "t-cip",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -293,7 +439,7 @@ mod tests {
                 1,
                 "t-rp",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -309,7 +455,7 @@ mod tests {
                 1,
                 "t-cc",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -320,7 +466,7 @@ mod tests {
             &ev(4, "t-cc", "task_submitted_for_review", json!({})),
         )
         .unwrap();
-        apply(&mut s, &ev(5, "t-cc", "gate_checked", json!({"gate_id":"g","passed":true,"evidence":"ok","checked_at":"2026-05-30T12:00:00Z"}))).unwrap();
+        apply(&mut s, &ev(5, "t-cc", "gate_checked", json!({"gate_id":"cargo_check","passed":true,"evidence":"ok","checked_at":"2026-05-30T12:00:00Z"}))).unwrap();
         apply(&mut s, &ev(6, "t-cc", "task_completed", json!({}))).unwrap();
         assert!(apply(&mut s, &ev(7, "t-cc", "task_cancelled", json!({}))).is_err());
     }
@@ -334,7 +480,7 @@ mod tests {
                 1,
                 "t-canc",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -345,49 +491,37 @@ mod tests {
     #[test]
     fn reject_ready_without_objective() {
         let mut s = TaskState::new("t-no");
-        apply(
-            &mut s,
-            &ev(
-                1,
-                "t-no",
-                "task_created",
-                json!({"scope":["s"],"gates":["g"]}),
-            ),
-        )
-        .unwrap();
-        assert!(apply(&mut s, &ev(2, "t-no", "task_marked_ready", json!({}))).is_err());
+        s.read_scope.insert("src/".into());
+        s.write_allow.insert("src/".into());
+        s.gates.insert("cargo_check".into());
+        assert!(apply(&mut s, &ev(1, "t-no", "task_marked_ready", json!({}))).is_err());
     }
 
     #[test]
     fn reject_ready_without_gates() {
         let mut s = TaskState::new("t-ng");
-        apply(
-            &mut s,
-            &ev(
-                1,
-                "t-ng",
-                "task_created",
-                json!({"objective":"t","scope":["s"]}),
-            ),
-        )
-        .unwrap();
-        assert!(apply(&mut s, &ev(2, "t-ng", "task_marked_ready", json!({}))).is_err());
+        s.objective = Some("t".into());
+        s.read_scope.insert("src/".into());
+        s.write_allow.insert("src/".into());
+        assert!(apply(&mut s, &ev(1, "t-ng", "task_marked_ready", json!({}))).is_err());
     }
 
     #[test]
-    fn reject_ready_without_scope() {
-        let mut s = TaskState::new("t-ns");
-        apply(
-            &mut s,
-            &ev(
-                1,
-                "t-ns",
-                "task_created",
-                json!({"objective":"t","gates":["g"]}),
-            ),
-        )
-        .unwrap();
-        assert!(apply(&mut s, &ev(2, "t-ns", "task_marked_ready", json!({}))).is_err());
+    fn reject_ready_without_read_scope() {
+        let mut s = TaskState::new("t-nrs");
+        s.objective = Some("t".into());
+        s.write_allow.insert("src/".into());
+        s.gates.insert("cargo_check".into());
+        assert!(apply(&mut s, &ev(1, "t-nrs", "task_marked_ready", json!({}))).is_err());
+    }
+
+    #[test]
+    fn reject_ready_without_write_allow() {
+        let mut s = TaskState::new("t-nwa");
+        s.objective = Some("t".into());
+        s.read_scope.insert("src/".into());
+        s.gates.insert("cargo_check".into());
+        assert!(apply(&mut s, &ev(1, "t-nwa", "task_marked_ready", json!({}))).is_err());
     }
 
     // ============================================================
@@ -401,7 +535,7 @@ mod tests {
             1,
             "t-idem",
             "task_created",
-            json!({"objective":"t","scope":["s"],"gates":["g"]}),
+            task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
         );
         apply(&mut s, &e).unwrap();
         apply(&mut s, &e).unwrap();
@@ -417,7 +551,7 @@ mod tests {
                 1,
                 "t-seq",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -444,7 +578,7 @@ mod tests {
                 1,
                 "t-mine",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -460,7 +594,7 @@ mod tests {
                 1,
                 "t-unk",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -476,7 +610,7 @@ mod tests {
                 1,
                 "t-dup",
                 "task_created",
-                json!({"objective":"first","scope":["s"],"gates":["g"]}),
+                task_payload("first", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -486,7 +620,7 @@ mod tests {
                 2,
                 "t-dup",
                 "task_created",
-                json!({"objective":"second","scope":["s"],"gates":["g"]}),
+                task_payload("second", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .is_err());
@@ -505,7 +639,7 @@ mod tests {
                 1,
                 "t-hs",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -523,7 +657,7 @@ mod tests {
                 1,
                 "t-hsub",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -546,7 +680,7 @@ mod tests {
                 1,
                 "t-bv",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -574,7 +708,7 @@ mod tests {
                 1,
                 "t-he",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -628,7 +762,12 @@ mod tests {
                 1,
                 "t-ci1",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt","test"]}),
+                task_payload(
+                    "t",
+                    &["src/"],
+                    &["src/"],
+                    &["cargo_fmt_check", "cargo_test"],
+                ),
             ),
         )
         .unwrap();
@@ -661,7 +800,12 @@ mod tests {
                 1,
                 "t-ci2",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt","test"]}),
+                task_payload(
+                    "t",
+                    &["src/"],
+                    &["src/"],
+                    &["cargo_fmt_check", "cargo_test"],
+                ),
             ),
         )
         .unwrap();
@@ -679,7 +823,7 @@ mod tests {
                 5,
                 "t-ci2",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"ok","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"ok","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         )
         .unwrap();
@@ -698,7 +842,7 @@ mod tests {
                 1,
                 "t-ci3",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -716,7 +860,7 @@ mod tests {
                 5,
                 "t-ci3",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":false,"evidence":"errors found","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":false,"evidence":"errors found","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         )
         .unwrap();
@@ -732,7 +876,12 @@ mod tests {
                 1,
                 "t-ci4",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt","test"]}),
+                task_payload(
+                    "t",
+                    &["src/"],
+                    &["src/"],
+                    &["cargo_fmt_check", "cargo_test"],
+                ),
             ),
         )
         .unwrap();
@@ -749,7 +898,7 @@ mod tests {
                 5,
                 "t-ci4",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         )
         .unwrap();
@@ -759,7 +908,7 @@ mod tests {
                 6,
                 "t-ci4",
                 "gate_checked",
-                json!({"gate_id":"test","passed":true,"evidence":"56 passed","checked_at":"2026-05-30T12:01:00Z"}),
+                json!({"gate_id":"cargo_test","passed":true,"evidence":"56 passed","checked_at":"2026-05-30T12:01:00Z"}),
             ),
         )
         .unwrap();
@@ -775,7 +924,7 @@ mod tests {
                 1,
                 "t-gr",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -786,11 +935,11 @@ mod tests {
                 2,
                 "t-gr",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":false,"evidence":"errors","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":false,"evidence":"errors","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         )
         .unwrap();
-        assert_eq!(s.gate_results.get("fmt").unwrap().passed, false);
+        assert!(!s.gate_results.get("cargo_fmt_check").unwrap().passed);
         // Second check: passed — overwrites
         apply(
             &mut s,
@@ -798,12 +947,15 @@ mod tests {
                 3,
                 "t-gr",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:01:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:01:00Z"}),
             ),
         )
         .unwrap();
-        assert_eq!(s.gate_results.get("fmt").unwrap().passed, true);
-        assert_eq!(s.gate_results.get("fmt").unwrap().evidence, "clean");
+        assert!(s.gate_results.get("cargo_fmt_check").unwrap().passed);
+        assert_eq!(
+            s.gate_results.get("cargo_fmt_check").unwrap().evidence,
+            "clean"
+        );
     }
     #[test]
     fn cancel_from_planning_succeeds() {
@@ -814,7 +966,7 @@ mod tests {
                 1,
                 "t-canp",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["g"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_check"]),
             ),
         )
         .unwrap();
@@ -831,7 +983,7 @@ mod tests {
                 1,
                 "t-gch",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -846,11 +998,11 @@ mod tests {
                 5,
                 "t-gch",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"clean","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         )
         .unwrap();
-        assert_eq!(s.gate_results.get("fmt").unwrap().passed, true);
+        assert!(s.gate_results.get("cargo_fmt_check").unwrap().passed);
     }
     #[test]
     fn gate_checked_rejects_empty_gate_id() {
@@ -861,7 +1013,7 @@ mod tests {
                 1,
                 "t-egid",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -885,7 +1037,7 @@ mod tests {
                 1,
                 "t-ugid",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -909,7 +1061,7 @@ mod tests {
                 1,
                 "t-eev",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -919,7 +1071,7 @@ mod tests {
                 2,
                 "t-eev",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"","checked_at":"2026-05-30T12:00:00Z"}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"","checked_at":"2026-05-30T12:00:00Z"}),
             ),
         );
         assert!(result.is_err(), "Must reject empty evidence");
@@ -933,7 +1085,7 @@ mod tests {
                 1,
                 "t-eca",
                 "task_created",
-                json!({"objective":"t","scope":["s"],"gates":["fmt"]}),
+                task_payload("t", &["src/"], &["src/"], &["cargo_fmt_check"]),
             ),
         )
         .unwrap();
@@ -943,7 +1095,7 @@ mod tests {
                 2,
                 "t-eca",
                 "gate_checked",
-                json!({"gate_id":"fmt","passed":true,"evidence":"ok","checked_at":""}),
+                json!({"gate_id":"cargo_fmt_check","passed":true,"evidence":"ok","checked_at":""}),
             ),
         );
         assert!(result.is_err(), "Must reject empty checked_at");
@@ -952,7 +1104,7 @@ mod tests {
     // Baseline manifest (AUDIT-005: fixed-set regression)
     // ============================================================
     /// Audit matrix version — bump when test structure changes.
-    const AUDIT_MATRIX_VERSION: u32 = 2;
+    const AUDIT_MATRIX_VERSION: u32 = 5;
     const BASELINE_SCHEMA_FILES: &[&str] = &[
         "control.event-envelope.v1.schema.json",
         "control.task-definition.v1.schema.json",
@@ -963,6 +1115,7 @@ mod tests {
         "reducer_test.jsonl",
         "reducer_lifecycle.jsonl",
         "reducer_hold.jsonl",
+        "reducer_revise.jsonl",
         "schema_counter_examples.json",
         "invalid.json",
     ];
@@ -975,7 +1128,7 @@ mod tests {
     #[test]
     fn baseline_audit_matrix_version() {
         assert_eq!(
-            AUDIT_MATRIX_VERSION, 2,
+            AUDIT_MATRIX_VERSION, 5,
             "Audit matrix version must be explicitly bumped on structural changes"
         );
     }
@@ -1044,6 +1197,22 @@ mod tests {
             event_type: event_type.into(),
             payload,
         }
+    }
+
+    fn task_payload(
+        objective: &str,
+        read_scope: &[&str],
+        write_allow: &[&str],
+        gates: &[&str],
+    ) -> serde_json::Value {
+        json!({
+            "objective": objective,
+            "read_scope": read_scope,
+            "write_allow": write_allow,
+            "write_deny": [],
+            "risk_triggers": [],
+            "gates": gates
+        })
     }
 
     fn replay(task_id: &str, path: &str) -> TaskState {

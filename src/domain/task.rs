@@ -1,6 +1,6 @@
 use crate::domain::event::Event;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -37,8 +37,11 @@ pub struct TaskState {
     pub is_held: bool,
     pub is_archived: bool,
     pub objective: Option<String>,
-    pub scope: Vec<String>,
-    pub gates: HashSet<String>,
+    pub read_scope: BTreeSet<String>,
+    pub write_allow: BTreeSet<String>,
+    pub write_deny: BTreeSet<String>,
+    pub risk_triggers: BTreeSet<String>,
+    pub gates: BTreeSet<String>,
     /// Latest gate results keyed by gate_id. Each gate retains only the most recent result.
     pub gate_results: HashMap<String, GateResult>,
     pub history: Vec<String>,
@@ -55,14 +58,75 @@ impl TaskState {
             is_held: false,
             is_archived: false,
             objective: None,
-            scope: Vec::new(),
-            gates: HashSet::new(),
+            read_scope: BTreeSet::new(),
+            write_allow: BTreeSet::new(),
+            write_deny: BTreeSet::new(),
+            risk_triggers: BTreeSet::new(),
+            gates: BTreeSet::new(),
             gate_results: HashMap::new(),
             history: Vec::new(),
             last_seq: 0,
             processed_commands: HashSet::new(),
         }
     }
+}
+
+struct TaskBoundary {
+    objective: String,
+    read_scope: BTreeSet<String>,
+    write_allow: BTreeSet<String>,
+    write_deny: BTreeSet<String>,
+    risk_triggers: BTreeSet<String>,
+    gates: BTreeSet<String>,
+}
+
+fn decode_task_boundary(payload: &serde_json::Value) -> Result<TaskBoundary, String> {
+    if payload.get("scope").is_some() {
+        return Err(
+            "Legacy scope is not accepted; use read_scope/write_allow/write_deny/risk_triggers/gates"
+                .into(),
+        );
+    }
+
+    let objective = payload
+        .get("objective")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "objective is required and must be a string".to_string())?;
+    if objective.is_empty() {
+        return Err("objective is required and must not be empty".into());
+    }
+
+    Ok(TaskBoundary {
+        objective: objective.to_string(),
+        read_scope: string_set(payload, "read_scope", true)?,
+        write_allow: string_set(payload, "write_allow", true)?,
+        write_deny: string_set(payload, "write_deny", false)?,
+        risk_triggers: string_set(payload, "risk_triggers", false)?,
+        gates: string_set(payload, "gates", true)?,
+    })
+}
+
+fn string_set(
+    payload: &serde_json::Value,
+    field: &str,
+    require_non_empty: bool,
+) -> Result<BTreeSet<String>, String> {
+    let values = payload
+        .get(field)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{field} is required and must be an array"))?;
+    if require_non_empty && values.is_empty() {
+        return Err(format!("{field} is required and must not be empty"));
+    }
+
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        let item = value
+            .as_str()
+            .ok_or_else(|| format!("{field} entries must be strings"))?;
+        normalized.insert(item.to_string());
+    }
+    Ok(normalized)
 }
 
 #[allow(dead_code)]
@@ -97,35 +161,47 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             if state.last_seq > 0 {
                 return Err("Cannot re-create task: already has events".into());
             }
+            let boundary = decode_task_boundary(&event.payload)?;
             state.phase = Phase::Planning;
-            if let Some(obj) = event.payload.get("objective") {
-                // R4: Use as_str() to avoid JSON double-quoting
-                state.objective = obj.as_str().map(String::from);
+            state.objective = Some(boundary.objective);
+            state.read_scope = boundary.read_scope;
+            state.write_allow = boundary.write_allow;
+            state.write_deny = boundary.write_deny;
+            state.risk_triggers = boundary.risk_triggers;
+            state.gates = boundary.gates;
+        }
+        "task_revised" => {
+            if state.phase != Phase::Planning {
+                return Err(format!(
+                    "Can only revise in Planning, current phase: {:?}",
+                    state.phase
+                ));
             }
-            if let Some(gates) = event.payload.get("gates") {
-                if let Some(arr) = gates.as_array() {
-                    for g in arr {
-                        if let Some(s) = g.as_str() {
-                            state.gates.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-            if let Some(scope) = event.payload.get("scope") {
-                if let Some(arr) = scope.as_array() {
-                    state.scope = arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
-                }
-            }
+            let boundary = decode_task_boundary(&event.payload)?;
+            state.objective = Some(boundary.objective);
+            state.read_scope = boundary.read_scope;
+            state.write_allow = boundary.write_allow;
+            state.write_deny = boundary.write_deny;
+            state.risk_triggers = boundary.risk_triggers;
+            state.gates = boundary.gates;
         }
         "task_marked_ready" => {
             if state.phase != Phase::Planning {
                 return Err("Can only mark ready from Planning".into());
             }
-            if state.objective.is_none() || state.gates.is_empty() || state.scope.is_empty() {
-                return Err("Missing objective, scope, or gates for Ready".into());
+            let missing_objective = state
+                .objective
+                .as_ref()
+                .map(|objective| objective.is_empty())
+                .unwrap_or(true);
+            if missing_objective
+                || state.read_scope.is_empty()
+                || state.write_allow.is_empty()
+                || state.gates.is_empty()
+            {
+                return Err(
+                    "Missing objective, read_scope, write_allow, or gates for Ready".into(),
+                );
             }
             state.phase = Phase::Ready;
         }
@@ -186,6 +262,15 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 ));
             }
             state.phase = Phase::Cancelled;
+        }
+        "task_archived" => {
+            if state.phase != Phase::Completed && state.phase != Phase::Cancelled {
+                return Err(format!(
+                    "Can only archive from terminal phase, current: {:?}",
+                    state.phase
+                ));
+            }
+            state.is_archived = true;
         }
         "hold_entered" => {
             state.is_held = true;

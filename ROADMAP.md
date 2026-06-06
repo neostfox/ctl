@@ -195,7 +195,7 @@ output_hashes
 ```text
 schemas/
   control.task-definition.v1.schema.json
-  control.task-event.v1.schema.json
+  control.event-envelope.v1.schema.json
   control.task-view.v1.schema.json
 
 control schema validate
@@ -212,6 +212,7 @@ control architecture check
 - 默认拒绝和 hard forbid 规则。
 - proposal、scoped lease、`audit_hold`、completion interlock 与 baseline manifest 的协议。
 - 固定审计矩阵及 `PASS / ASK / STOP / UNVERIFIED` 判定规则。
+- proposal、approval、scoped lease、assignment、evidence、audit report、completion interlock 与 drift report 的最小 schema 方案；本阶段只冻结文档设计，不修改 `schemas/**`。
 
 **退出条件**
 
@@ -332,6 +333,7 @@ control report
 - `manual` 是第一个正式 adapter，不是临时兜底。
 - 人或任意 AI 工具读取 `assignment.json`，工作后提交 `agent-output.json`。
 - 控制层独立检查实际 diff、gate 和证据 hash。
+- `assignment.json` 和 `agent-output.json` 是后续 OMP adapter 的 contract test 基线；自动执行器不得另建隐式协议。
 - `small / medium / large` 是风险控制级别，不只是文档数量选项。
 - 允许显式升级模式，禁止静默降级。
 
@@ -409,6 +411,7 @@ control next-action
 - 相同 evidence 和规则必须生成相同决策。
 - 未知信号默认不能放宽权限。
 - drift 升高只能触发暂停或重规划，不能自动扩权。
+- `replan` 和 `rescope` 只生成结构化 proposal，并停止当前执行；不得自动修改 scope、批准 lease 或启动新任务。
 
 **退出条件**
 
@@ -440,6 +443,7 @@ control workspace merge-candidate
 
 - 这时再拆出独立 `AgentRun` aggregate。
 - 每个写入 agent 使用独立 worktree 和 capability lease。
+- 每个写入 agent 必须有独立 scoped lease；lease 的 write scope 不能与其他写入 agent 重叠。
 - 重叠写 scope 必须拒绝。
 - 只读任务可以并发。
 - 合并候选仍需人工确认。

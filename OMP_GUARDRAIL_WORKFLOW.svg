@@ -103,10 +103,10 @@
 
   <polygon class="decision" points="1185,1730 1305,1800 1185,1870 1065,1800"/>
   <text class="label" x="1185" y="1794">审计结论</text>
-  <text class="small" x="1185" y="1820">STOP / ASK / ALLOW</text>
+  <text class="small" x="1185" y="1820">PASS / ASK / STOP / UNVERIFIED</text>
 
   <rect class="node complete" x="155" y="1749" width="260" height="102" rx="16"/>
-  <text class="label" x="285" y="1784">Final ALLOW</text>
+  <text class="label" x="285" y="1784">Final PASS</text>
   <text class="small" x="285" y="1812">生成完成报告</text>
   <text class="small" x="285" y="1834">收回 lease，返回 Explore</text>
 
@@ -154,7 +154,7 @@
   <text class="edge-label" x="545" y="1247">否：继续批次</text>
   <text class="edge-label" x="1405" y="1640">ASK</text>
   <text class="edge-label" x="1400" y="1807">STOP</text>
-  <text class="edge-label" x="730" y="1787">Final ALLOW</text>
+  <text class="edge-label" x="730" y="1787">Final PASS</text>
   <text class="edge-label" x="1397" y="728">resume</text>
 
   <rect class="panel" x="50" y="1940" width="1800" height="300" rx="22"/>
@@ -179,7 +179,7 @@
 
   <rect class="node stop" x="1410" y="2020" width="400" height="165" rx="16"/>
   <text class="label" x="1610" y="2056">STOP 必须真的停止</text>
-  <text class="small" x="1610" y="2088">禁止 ALLOW WITH WARNING</text>
+  <text class="small" x="1610" y="2088">禁止 PASS WITH WARNING</text>
   <text class="small" x="1610" y="2113">验证缺失时不能声称完成</text>
   <text class="small" x="1610" y="2138">恢复只能由人类显式批准</text>
 </svg>

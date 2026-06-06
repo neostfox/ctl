@@ -23,6 +23,8 @@
 
 后续设计与实现必须遵守：[ARCHITECTURE_GUARDRAILS.md](./ARCHITECTURE_GUARDRAILS.md)。
 
+使用 OMP `/glob` 分阶段推进实现时，参考：[`GLOB_WORKFLOW.md`](./GLOB_WORKFLOW.md)。
+
 这个项目首先要解决的不是“让 agent 做更多事情”，而是明确：
 
 ```text
@@ -131,7 +133,7 @@ Claude/Codex/OpenCode = 兼容目标或备用执行器
 让 OMP、Codex、Claude、OpenCode 都能读。
 ```
 
-当前仓库已经先落地 OMP 项目级围栏支持，使用说明见：[.omp/README.md](./.omp/README.md)。
+当前仓库已经先落地 OMP 项目级围栏配置，入口为：[.omp/settings.json](./.omp/settings.json)。
 
 ---
 
@@ -376,6 +378,50 @@ Markdown 只做人类可读解释：
 ```text
 prd.md / design.md / implement.md / research/*.md
 ```
+
+---
+
+## Agent 驱动工作流
+
+CLI 是底层能力；日常使用不需要手动敲命令。OMP agent 通过 `.omp/skills/control-guard/SKILL.md` 自动执行以下循环：
+
+```text
+用户请求 → agent 判断是否是任务
+  → 是：agent 推断边界 → 展示提案 → 用户确认/调整 → 自动创建 control task
+  → 否：跳过 control，自由工作
+→ agent 在 write_allow 范围内实现
+→ agent 自动运行 gates (fmt/check/test/clippy)
+→ agent 检查 completion readiness
+→ 用户确认完成
+```
+
+用户只需要在 agent 提案时回答 yes/adjust/skip，其余全自动。
+
+### 当前可用的 agent 行为（M1）
+
+| Agent 自动做的事 | 命令 |
+|---|---|
+| 检测任务请求，推断 objective/scope/gates | agent 内部推理 |
+| 展示任务提案，等待人类确认 | agent 对话 |
+| 创建 control task | `control init` + `control task create` + `control task ready` |
+| 检查写入是否在 scope 内 | `control boundary check --path <path>` |
+| 验证事件流 | `control validate` |
+| 运行全部 gates | `cargo fmt/check/test/clippy` |
+| 架构合规 | `control architecture check` |
+| 展示完成摘要 | `control task status --id <id>` |
+| 重建投影 | `control replay --task <id>` |
+
+### 需要 M2/M3 才能自动化的
+
+| 未来的 agent 行为 | 里程碑 |
+|---|---|
+| 自动执行 gate runner | M2 |
+| 自动构建 context snapshot | M2 |
+| 自动比对 touched files vs write_allow | M3 |
+| 自动 ingest evidence | M3 |
+| 自动完成 interlock 检查 | M3 |
+| 自动生成审计报告 | M3 |
+| OMP adapter 直接调用 control | M4+ |
 
 ---
 
@@ -735,7 +781,68 @@ task / archive / spec / journal / context manifest
 
 ---
 
+## 控制闭环协议冻结
+
+控制论术语必须落到项目对象上，避免只停留在比喻：
+
+| 控制论组件 | 本项目对象 | 说明 |
+|---|---|---|
+| Set Point | `TaskDefinition` + PRD/design/spec + required gates | 目标状态必须同时包含人类意图和机器验收。 |
+| Plant | repository / disposable worktree | 被控对象是实际代码树；worktree 是隔离手段，不是安全边界。 |
+| Sensor | diff、tests、LSP、deps、gate output、review evidence | 传感器只产生观测，不产生事实。 |
+| Observer | evidence ingest | 把不可信输出归档、hash、标注来源和 trust level。 |
+| Comparator | boundary check、gate check、drift compute | 比较 target 与 actual，输出 rule IDs 和 evidence IDs。 |
+| Controller | reducer + reconcile + completion interlock | 只有控制层能生成 canonical event 和完成判定。 |
+| Actuator | manual / OMP / Codex / Claude adapter | 执行器只消费 assignment，提交 evidence。 |
+| Feedback | `events.jsonl` + `telemetry.jsonl` + new proposal | 反馈不能自动扩权；重规划必须形成新的 proposal。 |
+
+### 状态关系
+
+`Task phase` 表达任务生命周期；执行协议表达一次受控执行授权；`Assignment` / `AgentRun` 表达执行单元。三者不能互相替代：
+
+| Task phase | 允许的执行协议状态 | Assignment / AgentRun 语义 |
+|---|---|---|
+| `planning` | `proposal` / `pending_approval` | 可创建 draft assignment，不得执行写入。 |
+| `ready` | approved proposal 可生成 `scoped_lease` | 可导出 assignment；lease 绑定 task、run、动作、资源、TTL、max_uses。 |
+| `in_progress` | `implement` / `audit_hold` | M3 只有 manual run；M4 只有单 OMP run；M6 前禁止多个写入 run 并发。 |
+| `review` | `audit_hold` / deterministic audit | 只允许 evidence ingest、只读检查和 allowlist gate。 |
+| `completed` / `cancelled` | `completed` / `stopped` | 只能归档或报告，不得继续写入。 |
+
+### Evidence 到 Event 的转换
+
+执行器输出、reviewer 结论和 telemetry 都是 evidence。控制层必须先验证，再决定是否追加 canonical event：
+
+```text
+adapter output / human output / gate output
+  -> evidence ingest
+  -> schema + hash + source + scope validation
+  -> boundary / gate / baseline / interlock checks
+  -> verified domain command
+  -> canonical event append
+```
+
+验证失败时只能记录 audit evidence 或 `boundary_violation_recorded`，不能把失败输出折叠成成功事件。
+
+### 后续 schema 方案
+
+本节只冻结设计方向，不在当前批次修改 `schemas/**`。后续 schema 变更需要单独 REVIEW：
+
+| Schema | 最小字段 |
+|---|---|
+| `control.proposal.v1` | `proposal_id`, `task_id`, `objective`, `milestone`, `requested_scope`, `forbidden_changes`, `expected_schema_changes`, `expected_dependency_changes`, `required_gates`, `risk_triggers` |
+| `control.approval.v1` | `approval_id`, `proposal_id`, `approver`, `decision`, `approved_scope`, `expires_at`, `reason` |
+| `control.scoped-lease.v1` | `lease_id`, `task_id`, `run_id`, `subject`, `actions`, `resources`, `issued_at`, `expires_at`, `max_uses`, `revoked_at` |
+| `control.assignment.v1` | `assignment_id`, `task_id`, `adapter`, `contract`, `scopes`, `context_hashes`, `required_capabilities`, `acceptance`, `lease_id` |
+| `control.evidence.v1` | `evidence_id`, `run_id`, `source`, `command`, `exit_code`, `touched_files`, `input_hashes`, `output_hashes`, `artifact_hashes`, `self_report`, `trust_level` |
+| `control.audit-report.v1` | `audit_id`, `task_id`, `trigger`, `observed_files`, `dependency_changes`, `schema_changes`, `gate_results`, `baseline_result`, `verdict`, `rule_ids` |
+| `control.completion-interlock.v1` | `task_id`, `required_evidence`, `satisfied_evidence`, `pending_approvals`, `baseline_status`, `gate_status`, `verdict` |
+| `control.drift-report.v1` | `task_id`, `evidence_ids`, `signals`, `score`, `action`, `explanation`, `generated_proposal_id` |
+
+`drift-report` 的 `generated_proposal_id` 只能指向待审批 proposal；drift 不能自动扩大 scope、启动执行或解除 hold。
+
 ## 子智能体设计
+> 阶段边界：本节描述 M6 的受限多智能体目标模型。M3 只验证 manual `assignment.json` / `agent-output.json` 合同；M4 只允许单 OMP 执行器在 disposable worktree 中运行；M6 前不得把多个写入子智能体并发接入执行路径。
+
 
 子智能体必须是一等公民，不是简单“并发提示词”。它们应被控制系统调度、观测、记录，并纳入 drift 计算。
 

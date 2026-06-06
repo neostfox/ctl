@@ -1,21 +1,29 @@
-# AI Dev Control Plane - M0 Milestone Report
+# AI Dev Control Plane - M0 Review Report
 
-## Status: COMPLETED ✅
+## Status: M0 boundary protocol implementation
 
 ### Deliverables
-1. **Rust CLI Skeleton**: Initialized with `clap` and minimal dependencies (compliant with `DEP-002`).
-2. **JSON Schemas**: 
+1. **Rust CLI Skeleton**: M0 surface is limited to schema, boundary, and architecture checks.
+2. **JSON Schemas**:
    - `control.event-envelope.v1.schema.json`
    - `control.task-definition.v1.schema.json`
    - `control.task-view.v1.schema.json`
-3. **Domain Logic**: Pure functional reducer (`apply`) for task state transitions.
-4. **Path Normalization**: Implementation for Windows path canonicalization and protection.
-5. **Fixtures**: Reducer test data (`fixtures/reducer_test.jsonl`).
+   - `control.policy-decision.v1.schema.json`
+3. **Domain Logic**: Pure reducer for task state transitions.
+4. **Path Normalization**: Windows-aware canonicalization and protected-path rejection.
+5. **Fixtures**: Reducer lifecycle, hold, revise, and schema counter-example fixtures.
+6. **Audit Matrix**: Unit tests pin schema, fixture, required-gate, and transition coverage.
 
 ### Verification
-- **Schema Validation**: `cargo run -- schema validate --file <path>` works.
-- **State Machine**: Reducer correctly transitions states and rejects invalid moves.
-- **Boundary**: Path normalizer rejects `..`, absolute paths, and protected paths.
+Use the project gates before declaring a milestone result:
 
-### Next Steps
-Proceed to **M1: Local Task Ledger** upon approval.
+```text
+cargo fmt --check
+cargo check
+cargo test
+cargo clippy -- -D warnings
+cargo run -- architecture check
+```
+
+### Next Step
+Proceed to M1 only after the M0 gates above pass on the current tree.

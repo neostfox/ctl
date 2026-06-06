@@ -16,6 +16,8 @@ impl PathNormalizer {
             protected_paths: vec![
                 ".git".into(),
                 ".trellis".into(),
+                ".trellis/tasks".into(),
+                ".control".into(),
                 "schemas".into(),
                 "Cargo.toml".into(),
                 "Cargo.lock".into(),
@@ -132,6 +134,7 @@ mod tests {
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join(".git")).unwrap();
         fs::create_dir_all(dir.join(".trellis")).unwrap();
+        fs::create_dir_all(dir.join(".control")).unwrap();
         fs::create_dir_all(dir.join("schemas")).unwrap();
         fs::write(dir.join("Cargo.toml"), "").unwrap();
         fs::write(dir.join("Cargo.lock"), "").unwrap();
@@ -218,6 +221,20 @@ mod tests {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
         assert!(norm.normalize(".trellis/control/events.jsonl").is_err());
+    }
+    #[test]
+    fn reject_canonical_task_events_path() {
+        let root = PathBuf::from(".");
+        let norm = PathNormalizer::new(root);
+        assert!(norm
+            .normalize(".trellis/tasks/example-task/events.jsonl")
+            .is_err());
+    }
+    #[test]
+    fn reject_protected_control_events() {
+        let root = PathBuf::from(".");
+        let norm = PathNormalizer::new(root);
+        assert!(norm.normalize(".control/events.jsonl").is_err());
     }
     #[test]
     fn reject_protected_schemas() {

@@ -53,10 +53,10 @@
       "actor": "human",
       "type": "task_created",
       "payload": {},
-      "unexpected_field": "should be rejected"
+      "unexpected_field": "nope"
     },
     "wrong_schema_id": {
-      "schema": "control.wrong-schema.v1",
+      "schema": "control.event-envelope.v0",
       "event_id": "550e8400-e29b-41d4-a716-446655440000",
       "command_id": "550e8400-e29b-41d4-a716-446655440001",
       "task_id": "t1",
@@ -65,6 +65,144 @@
       "actor": "human",
       "type": "task_created",
       "payload": {}
+    },
+    "legacy_scope": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "scope": ["src/"],
+        "read_scope": ["src/"],
+        "write_allow": ["src/"],
+        "write_deny": [],
+        "risk_triggers": [],
+        "gates": ["cargo_check"]
+      }
+    },
+    "empty_task_read_scope": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "read_scope": [],
+        "write_allow": ["src/"],
+        "write_deny": [],
+        "risk_triggers": [],
+        "gates": ["cargo_check"]
+      }
+    },
+    "empty_task_write_allow": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "read_scope": ["src/"],
+        "write_allow": [],
+        "write_deny": [],
+        "risk_triggers": [],
+        "gates": ["cargo_check"]
+      }
+    },
+    "empty_task_gates": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "read_scope": ["src/"],
+        "write_allow": ["src/"],
+        "write_deny": [],
+        "risk_triggers": [],
+        "gates": []
+      }
+    },
+    "missing_write_deny": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "read_scope": ["src/"],
+        "write_allow": ["src/"],
+        "risk_triggers": [],
+        "gates": ["cargo_check"]
+      }
+    },
+    "missing_risk_triggers": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 1,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_created",
+      "payload": {
+        "objective": "bad",
+        "read_scope": ["src/"],
+        "write_allow": ["src/"],
+        "write_deny": [],
+        "gates": ["cargo_check"]
+      }
+    },
+    "empty_revised_gates": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 2,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "human",
+      "type": "task_revised",
+      "payload": {
+        "objective": "bad",
+        "read_scope": ["src/"],
+        "write_allow": ["src/"],
+        "write_deny": [],
+        "risk_triggers": [],
+        "gates": []
+      }
+    },
+    "hold_exited_extra_payload": {
+      "schema": "control.event-envelope.v1",
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_id": "550e8400-e29b-41d4-a716-446655440001",
+      "task_id": "t1",
+      "seq": 3,
+      "occurred_at": "2026-05-30T10:00:00Z",
+      "actor": "system",
+      "type": "hold_exited",
+      "payload": {
+        "reason": "not allowed"
+      }
     }
   },
   "task_definition": {
@@ -72,28 +210,97 @@
       "schema": "control.task-definition.v1",
       "id": "t1",
       "mode": "small",
-      "gates": ["check"]
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": ["cargo_check"]
     },
     "missing_gates": {
       "schema": "control.task-definition.v1",
       "id": "t1",
       "mode": "small",
-      "objective": "test"
+      "objective": "test",
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": []
     },
     "bad_mode": {
       "schema": "control.task-definition.v1",
       "id": "t1",
       "mode": "extra-large",
       "objective": "test",
-      "gates": ["check"]
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": ["cargo_check"]
     },
     "extra_field": {
       "schema": "control.task-definition.v1",
       "id": "t1",
       "mode": "small",
       "objective": "test",
-      "gates": ["check"],
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": ["cargo_check"],
       "unknown": true
+    },
+    "empty_read_scope": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "read_scope": [],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": ["cargo_check"]
+    },
+    "empty_write_allow": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "read_scope": ["src/"],
+      "write_allow": [],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": ["cargo_check"]
+    },
+    "empty_gates": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "risk_triggers": [],
+      "gates": []
+    },
+    "missing_write_deny": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "risk_triggers": [],
+      "gates": ["cargo_check"]
+    },
+    "missing_risk_triggers": {
+      "schema": "control.task-definition.v1",
+      "id": "t1",
+      "mode": "small",
+      "objective": "test",
+      "read_scope": ["src/"],
+      "write_allow": ["src/"],
+      "write_deny": [],
+      "gates": ["cargo_check"]
     }
   }
 }

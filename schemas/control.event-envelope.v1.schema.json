@@ -42,12 +42,14 @@
       "type": "string",
       "enum": [
         "task_created",
+        "task_revised",
         "task_marked_ready",
         "task_started",
         "task_submitted_for_review",
         "task_reopened",
         "task_completed",
         "task_cancelled",
+        "task_archived",
         "hold_entered",
         "hold_exited",
         "boundary_violation_recorded",
@@ -104,6 +106,291 @@
                 "format": "date-time"
               }
             },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_revised" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "objective",
+              "read_scope",
+              "write_allow",
+              "write_deny",
+              "risk_triggers",
+              "gates"
+            ],
+            "properties": {
+              "objective": {
+                "description": "Updated objective.",
+                "type": "string",
+                "minLength": 1
+              },
+              "read_scope": {
+                "description": "Updated files/dirs allowed to read.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_allow": {
+                "description": "Updated files/dirs allowed to modify.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_deny": {
+                "description": "Updated explicitly denied files/dirs.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "risk_triggers": {
+                "description": "Updated conditions that trigger hold.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "gates": {
+                "description": "Updated gate list.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_created" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "objective",
+              "read_scope",
+              "write_allow",
+              "write_deny",
+              "risk_triggers",
+              "gates"
+            ],
+            "properties": {
+              "objective": {
+                "description": "Task objective.",
+                "type": "string",
+                "minLength": 1
+              },
+              "read_scope": {
+                "description": "Files/dirs allowed to read.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_allow": {
+                "description": "Files/dirs allowed to modify.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_deny": {
+                "description": "Explicitly denied files/dirs.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "risk_triggers": {
+                "description": "Conditions that trigger hold.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "gates": {
+                "description": "Required gate IDs.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_marked_ready" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_started" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_submitted_for_review" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_reopened" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_completed" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_cancelled" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_archived" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "hold_entered" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "description": "Optional human-readable hold reason.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "hold_exited" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "boundary_violation_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
             "additionalProperties": false
           }
         }

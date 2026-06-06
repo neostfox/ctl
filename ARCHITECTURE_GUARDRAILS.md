@@ -197,6 +197,80 @@ proposal
 | `AUDIT-007` | REVIEW | 修改 baseline manifest、审计矩阵、完成闸门或审计触发器必须单独审查，不能由实现任务顺带修改。 |
 | `AUDIT-008` | REVIEW | 自动 reviewer 接入只能在 adapter 协议和 evidence ingest 已冻结后进行。自动 reviewer 不能成为唯一验收来源。 |
 
+### 协议冻结表
+
+M0 文档层必须冻结以下协议对象。后续写入 `schemas/**` 时必须单独 REVIEW；在 schema 落地前，本文档是设计基线。
+
+| 对象 | 最小字段 | 规则 |
+|---|---|---|
+| `proposal` | `proposal_id`, `task_id`, `objective`, `milestone`, `requested_scope`, `forbidden_changes`, `expected_schema_changes`, `expected_dependency_changes`, `required_gates`, `risk_triggers` | 自然语言授权不能替代 proposal。 |
+| `approval` | `approval_id`, `proposal_id`, `approver`, `decision`, `approved_scope`, `expires_at`, `reason` | 只能批准 proposal 中明确列出的资源和动作。 |
+| `scoped_lease` | `lease_id`, `task_id`, `run_id`, `subject`, `actions`, `resources`, `issued_at`, `expires_at`, `max_uses`, `revoked_at` | 写入前必须存在未过期、未撤销、未耗尽的 lease。 |
+| `assignment` | `assignment_id`, `task_id`, `adapter`, `contract`, `scopes`, `context_hashes`, `required_capabilities`, `acceptance`, `lease_id` | adapter 只能消费 assignment，不能自行推断 scope。 |
+| `evidence` | `evidence_id`, `run_id`, `source`, `command`, `exit_code`, `touched_files`, `input_hashes`, `output_hashes`, `artifact_hashes`, `self_report`, `trust_level` | evidence 不是真相；必须经控制层验证。 |
+| `audit_report` | `audit_id`, `task_id`, `trigger`, `observed_files`, `dependency_changes`, `schema_changes`, `gate_results`, `baseline_result`, `verdict`, `rule_ids` | audit report 可以解释判定，不能绕过 interlock。 |
+| `completion_interlock` | `task_id`, `required_evidence`, `satisfied_evidence`, `pending_approvals`, `baseline_status`, `gate_status`, `verdict` | 只有 `verdict=allow` 才能生成完成事件。 |
+| `drift_report` | `task_id`, `evidence_ids`, `signals`, `score`, `action`, `explanation`, `generated_proposal_id` | drift 只能生成暂停、说明或新 proposal，不能自动扩权。 |
+
+### Canonical event 类别
+
+完整事件表在 schema 冻结时落地；设计层先固定事件类别：
+
+| 类别 | 示例 | 说明 |
+|---|---|---|
+| Task lifecycle | `task_created`, `task_marked_ready`, `task_started`, `task_submitted_for_review`, `task_completed`, `task_cancelled`, `task_archived` | 改变 Task phase 或 archived 属性。 |
+| Boundary / hold | `boundary_violation_recorded`, `hold_entered`, `hold_exited` | 表达越界、暂停和解除；hold 不是 phase。 |
+| Gate / evidence verified | `gate_checked`, `evidence_accepted`, `evidence_rejected` | 记录控制层验证后的 evidence 结论。 |
+| Approval / lease | `approval_requested`, `approval_granted`, `approval_denied`, `lease_issued`, `lease_revoked`, `lease_expired` | 表达授权生命周期。 |
+| Audit / completion | `audit_report_recorded`, `completion_interlock_passed`, `completion_interlock_failed` | 记录完成闸门的机器判定。 |
+| Drift / replan | `drift_updated`, `replan_proposed`, `rescope_requested` | 只能提出新控制动作或 proposal，不能直接扩权。 |
+
+### `audit_hold` 触发器
+
+以下信号必须立即进入 `audit_hold`：
+
+```text
+schema 变化
+Cargo.toml 或 Cargo.lock 变化
+新增 runtime dependency
+新增顶层模块或 crate
+scope 扩大或实际 diff 越界
+受保护路径变更
+required gate 变化
+baseline manifest 回退
+gate 失败或无法执行
+completion interlock evidence 缺失
+新增 shell、Git、网络、进程或文件系统副作用类型
+引入当前 milestone 之外的能力
+```
+
+解除 `audit_hold` 只能通过控制层记录结构化结果：
+
+```text
+human_resume      = 人类确认继续，但不扩大 scope
+replan_proposed   = 当前 lease 停止，生成新的 proposal
+stopped           = 当前执行终止
+completed         = completion interlock 通过后生成完成事件
+```
+
+`audit_hold` 中禁止新增 approval、扩大 scope、修改 gate 或继续写入。
+
+### Completion interlock 固定证据清单
+
+完成事件前必须独立检查：
+
+```text
+1. Task phase 是 review，且没有 hold
+2. 所有 required gate 最新结果为 PASS
+3. 实际 touched_files 全部落在 approved scope 内
+4. 无 pending approval、过期 lease、已撤销 lease、已耗尽 lease、跨 task lease 或重复 lease
+5. baseline manifest 未回退
+6. schema、依赖、受保护路径、required gate 变化均已按 REVIEW/approval 处理
+7. evidence hash、input_hashes、output_hashes 可解析且与报告一致
+8. reviewer / agent / telemetry 的 PASS 未被当作唯一验收来源
+```
+
+
 ## Adapter 围栏
 
 | ID | 级别 | 规则 |
@@ -208,6 +282,9 @@ proposal
 | `ADAPTER-005` | STOP | `M6` 前禁止多个 agent 并发写入；`M6` 后重叠写 scope 仍然拒绝。 |
 | `ADAPTER-006` | REVIEW | 新 adapter 必须通过与 `manual` 相同的 contract tests。 |
 | `ADAPTER-007` | STOP | 在控制层提供专用 wrapper 前，OMP RPC / ACP host execution 只能用于只读检查，不能作为受围栏保护的执行入口。 |
+
+M6 前不得把 `AgentRun` 拆成独立 aggregate。M3/M4 中的 run 只是 `Task` aggregate 下的 evidence source；adapter output 永远不能直接追加 canonical event，必须经 evidence ingest、scope check、gate check 和 interlock 验证。
+
 
 ## 依赖围栏
 
@@ -266,6 +343,9 @@ test fixtures
 | `> 0.6` | stop and ask human |
 
 drift 升高只能触发暂停、解释或重规划，不能自动扩大权限。
+
+SDD 风格的 `effort_delta`、`super_delta`、`unplanned_deps` 可以作为 telemetry evidence 进入 drift report，但不能替代硬围栏，也不能自动生成 approval。它们的唯一作用是解释 `annotate`、`replan_proposed` 或 `rescope_requested` 为什么发生。
+
 
 ## 例外协议
 

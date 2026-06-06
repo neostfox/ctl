@@ -19,17 +19,53 @@
     "is_held": {
       "type": "boolean"
     },
+    "is_archived": {
+      "type": "boolean"
+    },
     "objective": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
+    },
+    "read_scope": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "write_allow": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "write_deny": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "risk_triggers": {
+      "type": "array",
+      "items": { "type": "string" }
     },
     "gates": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": { "type": "string" },
+      "minItems": 1
     },
     "last_event_seq": {
       "type": "integer"
     }
   },
-  "required": ["schema", "id", "phase", "is_held", "last_event_seq"],
+  "required": [
+    "schema",
+    "id",
+    "phase",
+    "is_held",
+    "is_archived",
+    "objective",
+    "read_scope",
+    "write_allow",
+    "write_deny",
+    "risk_triggers",
+    "gates",
+    "last_event_seq"
+  ],
   "unevaluatedProperties": false
 }

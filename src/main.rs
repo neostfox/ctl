@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+mod adapters;
+#[allow(dead_code)]
+mod application;
 mod cli;
 mod domain;
 mod infrastructure;
@@ -41,7 +45,14 @@ mod tests {
             "occurred_at": "2026-05-30T10:00:00Z",
             "actor": "human",
             "type": "task_created",
-            "payload": {}
+            "payload": {
+                "objective": "Test task",
+                "read_scope": ["src/"],
+                "write_allow": ["src/"],
+                "write_deny": [],
+                "risk_triggers": [],
+                "gates": ["cargo_check"]
+            }
         });
         assert!(validator
             .validate_instance(&valid, "control.event-envelope.v1")
