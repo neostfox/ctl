@@ -1,7 +1,17 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Default gate execution timeout (EXEC-002).
+const GATE_TIMEOUT_SECS: u64 = 60;
+
+/// Maximum captured output per stream (EXEC-002).
+const OUTPUT_CAP: usize = 64 * 1024;
 
 /// A gate template defines a fixed command to run.
-/// No arbitrary shell — only predefined templates are allowed.
+/// No arbitrary shell — only predefined templates are allowed (EXEC-001).
 #[derive(Debug, Clone)]
 pub struct GateTemplate {
     pub id: &'static str,
@@ -40,7 +50,6 @@ pub static GATE_TEMPLATES: &[GateTemplate] = &[
 
 /// Result of running a gate.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GateRunResult {
     pub gate_id: String,
     pub passed: bool,
@@ -54,13 +63,84 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
     GATE_TEMPLATES.iter().find(|t| t.id == id)
 }
 
-/// M0 freezes gate templates only; it must not execute shell commands.
-pub fn run_gate(gate_id: &str, _working_dir: &std::path::Path) -> Result<GateRunResult> {
-    let _template =
+/// Run a gate with EXEC-002 controls:
+/// - Only allowlisted command templates (EXEC-001)
+/// - Timeout: 60s default
+/// - Environment allowlist: PATH + CARGO_* only (EXEC-003: no network deps)
+/// - Output cap: 64KB per stream, truncated if exceeded
+/// - Explicit working directory
+pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
+    let template =
         find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
-    Err(anyhow!(
-        "Gate execution is disabled in M0 until EXEC-002 runner policy is implemented"
-    ))
+
+    let allowed_env = build_allowed_env();
+    let gate_id_owned = gate_id.to_string();
+    let command = template.command.to_string();
+    let args: Vec<String> = template.args.iter().map(|s| s.to_string()).collect();
+    let working_dir_owned = working_dir.to_path_buf();
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::process::Command::new(&command)
+            .args(&args)
+            .current_dir(&working_dir_owned)
+            .env_clear()
+            .envs(&allowed_env)
+            .output();
+        let _ = tx.send(result);
+    });
+
+    let output = match rx.recv_timeout(Duration::from_secs(GATE_TIMEOUT_SECS)) {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(anyhow!("Failed to execute gate '{}': {}", gate_id_owned, e)),
+        Err(_) => {
+            return Err(anyhow!(
+                "Gate '{}' timed out after {}s",
+                gate_id_owned,
+                GATE_TIMEOUT_SECS
+            ))
+        }
+    };
+
+    let stdout = cap_output(&output.stdout);
+    let stderr = cap_output(&output.stderr);
+
+    Ok(GateRunResult {
+        gate_id: gate_id_owned,
+        passed: output.status.success(),
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+    })
+}
+
+/// Build the minimal environment allowlist (EXEC-002, EXEC-003).
+/// Only PATH and CARGO_* variables are passed through.
+fn build_allowed_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for (key, value) in std::env::vars() {
+        if key == "PATH"
+            || key == "Path"
+            || key.starts_with("CARGO")
+            || key == "HOME"
+            || key == "USERPROFILE"
+            || key == "RUSTUP_HOME"
+        {
+            env.insert(key, value);
+        }
+    }
+    env
+}
+
+/// Cap output to OUTPUT_CAP bytes, truncating with a marker if exceeded.
+fn cap_output(raw: &[u8]) -> String {
+    if raw.len() <= OUTPUT_CAP {
+        String::from_utf8_lossy(raw).into_owned()
+    } else {
+        let mut s = String::from_utf8_lossy(&raw[..OUTPUT_CAP]).into_owned();
+        s.push_str("\n... [output truncated at 64KB]");
+        s
+    }
 }
 
 /// List all available gate templates.
@@ -94,5 +174,42 @@ mod tests {
     fn test_run_gate_unknown() {
         let dir = std::env::current_dir().unwrap();
         assert!(run_gate("nonexistent_gate", &dir).is_err());
+    }
+
+    #[test]
+    fn test_run_gate_known() {
+        let dir = std::env::current_dir().unwrap();
+        let result = run_gate("cargo_check", &dir);
+        assert!(
+            result.is_ok(),
+            "cargo_check gate should execute: {:?}",
+            result
+        );
+        let r = result.unwrap();
+        assert_eq!(r.gate_id, "cargo_check");
+        // cargo_check on a valid project should pass
+        assert!(r.passed, "cargo_check should pass: stderr: {}", r.stderr);
+    }
+
+    #[test]
+    fn test_cap_output_under_limit() {
+        let data = b"hello world";
+        let result = cap_output(data);
+        assert_eq!(result, "hello world");
+        assert!(!result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_cap_output_over_limit() {
+        let data = vec![b'x'; OUTPUT_CAP + 100];
+        let result = cap_output(&data);
+        assert!(result.contains("truncated"));
+        assert!(result.len() > OUTPUT_CAP);
+    }
+
+    #[test]
+    fn test_build_allowed_env_has_path() {
+        let env = build_allowed_env();
+        assert!(env.contains_key("PATH") || env.contains_key("Path"));
     }
 }

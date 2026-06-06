@@ -1104,7 +1104,7 @@ mod tests {
     // Baseline manifest (AUDIT-005: fixed-set regression)
     // ============================================================
     /// Audit matrix version — bump when test structure changes.
-    const AUDIT_MATRIX_VERSION: u32 = 5;
+    const AUDIT_MATRIX_VERSION: u32 = 6;
     const BASELINE_SCHEMA_FILES: &[&str] = &[
         "control.event-envelope.v1.schema.json",
         "control.task-definition.v1.schema.json",
@@ -1116,6 +1116,9 @@ mod tests {
         "reducer_lifecycle.jsonl",
         "reducer_hold.jsonl",
         "reducer_revise.jsonl",
+        "reducer_m2_lifecycle.jsonl",
+        "reducer_m3_lifecycle.jsonl",
+        "reducer_boundary_violation.jsonl",
         "schema_counter_examples.json",
         "invalid.json",
     ];
@@ -1128,7 +1131,7 @@ mod tests {
     #[test]
     fn baseline_audit_matrix_version() {
         assert_eq!(
-            AUDIT_MATRIX_VERSION, 5,
+            AUDIT_MATRIX_VERSION, 6,
             "Audit matrix version must be explicitly bumped on structural changes"
         );
     }
@@ -1179,6 +1182,319 @@ mod tests {
             4,
             "Required gate count changed — update this test if intentional"
         );
+    }
+
+    // ============================================================
+    // M3 evidence events
+    // ============================================================
+
+    #[test]
+    fn evidence_accepted_in_progress() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t1",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "ev-1",
+                    "source": "manual",
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(state.phase, Phase::InProgress);
+    }
+
+    #[test]
+    fn evidence_accepted_in_review() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        apply(
+            &mut state,
+            &ev(4, "t1", "task_submitted_for_review", json!({})),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t1",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "ev-1",
+                    "source": "manual",
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(state.phase, Phase::Review);
+    }
+
+    #[test]
+    fn evidence_rejected_in_completed() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        apply(&mut state, &ev(4, "t1", "gate_checked", json!({"gate_id":"cargo_check","passed":true,"evidence":"ok","checked_at":"2026-06-06T10:00:00Z"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(5, "t1", "task_submitted_for_review", json!({})),
+        )
+        .unwrap();
+        apply(&mut state, &ev(6, "t1", "task_completed", json!({}))).unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                7,
+                "t1",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "ev-1",
+                    "source": "manual",
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_accepted_rejects_empty_evidence_id() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t1",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "",
+                    "source": "manual",
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_accepted_rejects_empty_source() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t1",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "ev-1",
+                    "source": "",
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_rejected_records_even_for_completed() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t1", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t1", "task_started", json!({}))).unwrap();
+        apply(&mut state, &ev(4, "t1", "gate_checked", json!({"gate_id":"cargo_check","passed":true,"evidence":"ok","checked_at":"2026-06-06T10:00:00Z"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(5, "t1", "task_submitted_for_review", json!({})),
+        )
+        .unwrap();
+        apply(&mut state, &ev(6, "t1", "task_completed", json!({}))).unwrap();
+        // evidence_rejected should succeed even on completed tasks (it's a record, not a state change)
+        apply(
+            &mut state,
+            &ev(
+                7,
+                "t1",
+                "evidence_rejected",
+                json!({
+                    "evidence_id": "ev-1",
+                }),
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn evidence_rejected_rejects_empty_evidence_id() {
+        let mut state = TaskState::new("t1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t1",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                2,
+                "t1",
+                "evidence_rejected",
+                json!({
+                    "evidence_id": "",
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn m3_full_lifecycle_with_evidence() {
+        let mut state = TaskState::new("t-m3");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t-m3",
+                "task_created",
+                task_payload(
+                    "M3 lifecycle",
+                    &["src/"],
+                    &["src/"],
+                    &["cargo_check", "cargo_test"],
+                ),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, "t-m3", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, "t-m3", "task_started", json!({}))).unwrap();
+        // Accept evidence during implementation
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-m3",
+                "evidence_accepted",
+                json!({
+                    "evidence_id": "ev-m3-1",
+                    "source": "manual",
+                    "touched_files": ["src/main.rs"],
+                }),
+            ),
+        )
+        .unwrap();
+        // Run gates
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-m3",
+                "gate_checked",
+                json!({
+                    "gate_id": "cargo_check",
+                    "passed": true,
+                    "evidence": "exit=0",
+                    "checked_at": "2026-06-06T10:06:00Z"
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                6,
+                "t-m3",
+                "gate_checked",
+                json!({
+                    "gate_id": "cargo_test",
+                    "passed": true,
+                    "evidence": "exit=0",
+                    "checked_at": "2026-06-06T10:07:00Z"
+                }),
+            ),
+        )
+        .unwrap();
+        // Submit
+        apply(
+            &mut state,
+            &ev(7, "t-m3", "task_submitted_for_review", json!({})),
+        )
+        .unwrap();
+        assert_eq!(state.phase, Phase::Review);
+        // Complete
+        apply(&mut state, &ev(8, "t-m3", "task_completed", json!({}))).unwrap();
+        assert_eq!(state.phase, Phase::Completed);
+        // Archive
+        apply(&mut state, &ev(9, "t-m3", "task_archived", json!({}))).unwrap();
+        assert!(state.is_archived);
     }
 
     // ============================================================

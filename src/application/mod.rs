@@ -158,6 +158,22 @@ impl ControlApp {
     // ── Post-M0 lifecycle helpers (not exposed by the M0 CLI) ──
 
     pub fn submit_task(&self, task_id: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.is_held {
+            return Err(anyhow!("Cannot submit: task is held"));
+        }
+        if state.phase != Phase::InProgress {
+            return Err(anyhow!(
+                "Can only submit for review from InProgress, current: {:?}",
+                state.phase
+            ));
+        }
+        // Check for any boundary violations recorded since start
+        let events = self.store.read_for_task(task_id)?;
+        let has_violations = events.iter().any(|e| e.event_type == "boundary_violation_recorded");
+        if has_violations {
+            return Err(anyhow!("Cannot submit: task has boundary violations"));
+        }
         let event =
             self.build_event(task_id, "task_submitted_for_review", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
@@ -172,31 +188,53 @@ impl ControlApp {
         Ok(event)
     }
 
-    /// # UNVERIFIED — completion interlock
-    /// This method does NOT yet verify:
-    /// - agent output presence and hash integrity
-    /// - scope diff against baseline context
-    /// - pending approval requests
-    /// - evidence hash chain
-    ///   This helper is intentionally not exposed by the M0 CLI.
+    /// Completion interlock: phase must be Review, not held, all gates passing,
+    /// and no rejected evidence.
     pub fn finish_task(&self, task_id: &str) -> Result<Event> {
-        // Completion interlock: check gates, hold, scope
         let state = self.replay_task(task_id)?;
+
+        // Phase check
+        if state.phase != Phase::Review {
+            return Err(anyhow!(
+                "Can only finish from Review, current: {:?}",
+                state.phase
+            ));
+        }
+
+        // Hold check
         if state.is_held {
             return Err(anyhow!("Cannot finish: task is held"));
         }
-        // All required gates must have latest passing result
+
+        // Gate interlock: all required gates must have latest passing result
+        let mut failing_gates = Vec::new();
         for gate_id in &state.gates {
             match state.gate_results.get(gate_id) {
                 Some(result) if result.passed => {}
                 _ => {
-                    return Err(anyhow!(
-                        "Completion interlock: gate '{}' has no passing result",
-                        gate_id
-                    ));
+                    failing_gates.push(gate_id.as_str());
                 }
             }
         }
+        if !failing_gates.is_empty() {
+            return Err(anyhow!(
+                "Completion interlock: gates not passing: {:?}",
+                failing_gates
+            ));
+        }
+
+        // Check for rejected evidence
+        let events = self.store.read_for_task(task_id)?;
+        let rejected_evidence = events.iter()
+            .filter(|e| e.event_type == "evidence_rejected")
+            .count();
+        if rejected_evidence > 0 {
+            return Err(anyhow!(
+                "Completion interlock: {} evidence items were rejected",
+                rejected_evidence
+            ));
+        }
+
         let event = self.build_event(task_id, "task_completed", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         self.rebuild_task_view(task_id)?;
@@ -227,6 +265,34 @@ impl ControlApp {
         self.validate_and_append(&event)?;
         self.rebuild_task_view(task_id)?;
         Ok(event)
+    }
+
+    /// Execute a gate through the EXEC-002 runner and record the result
+    /// as a canonical `gate_checked` event.
+    pub fn run_gate_checked(&self, task_id: &str, gate_id: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if !state.gates.contains(gate_id) {
+            return Err(anyhow!(
+                "Gate '{}' is not declared in task gates: {:?}",
+                gate_id,
+                state.gates
+            ));
+        }
+
+        let result = crate::infrastructure::gates::run_gate(gate_id, &self.project_root)?;
+        let evidence = if result.passed {
+            format!("exit={} stdout={}B", result.exit_code, result.stdout.len())
+        } else {
+            // Include stderr for failed gates (truncated for evidence field)
+            let stderr_preview = if result.stderr.len() > 512 {
+                format!("{}...", &result.stderr[..512])
+            } else {
+                result.stderr.clone()
+            };
+            format!("exit={} stderr={}", result.exit_code, stderr_preview)
+        };
+
+        self.record_gate(task_id, gate_id, result.passed, &evidence)
     }
 
     /// Build a context snapshot: hash all files within the task read scope.
@@ -264,6 +330,53 @@ impl ControlApp {
         std::fs::rename(&temp_path, &context_path)?;
 
         Ok(context)
+    }
+
+    /// Export a structured assignment JSON for external execution (M3).
+    /// Reads task state and optional context.json, writes assignment.json atomically.
+    pub fn export_assignment(&self, task_id: &str) -> Result<serde_json::Value> {
+        let state = self.replay_task(task_id)?;
+
+        let objective = state.objective.clone().unwrap_or_default();
+        let read_scope: Vec<&String> = state.read_scope.iter().collect();
+        let write_allow: Vec<&String> = state.write_allow.iter().collect();
+        let write_deny: Vec<&String> = state.write_deny.iter().collect();
+        let risk_triggers: Vec<&String> = state.risk_triggers.iter().collect();
+        let gates: Vec<&String> = state.gates.iter().collect();
+
+        // Read context.json if available
+        let task_dir = self.store.task_dir(task_id)?;
+        let context_path = task_dir.join("context.json");
+        let context_snapshot: serde_json::Value = if context_path.exists() {
+            let raw = std::fs::read_to_string(&context_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            serde_json::Value::Null
+        };
+
+        let assignment = serde_json::json!({
+            "schema": "control.assignment.v1",
+            "assignment_id": generate_uuid(),
+            "task_id": task_id,
+            "adapter": "manual",
+            "objective": objective,
+            "read_scope": read_scope,
+            "write_allow": write_allow,
+            "write_deny": write_deny,
+            "risk_triggers": risk_triggers,
+            "gates": gates,
+            "context_snapshot": context_snapshot,
+            "exported_at": now_iso8601(),
+        });
+
+        // Atomic write: temp + rename
+        let assignment_path = task_dir.join("assignment.json");
+        let temp_path = task_dir.join("assignment.json.tmp");
+        let json_str = serde_json::to_string_pretty(&assignment)?;
+        std::fs::write(&temp_path, &json_str)?;
+        std::fs::rename(&temp_path, &assignment_path)?;
+
+        Ok(assignment)
     }
 
     /// Check workspace modifications against task scope.
@@ -329,6 +442,26 @@ impl ControlApp {
                 .push("No context snapshot found. Run 'control context build' first.".to_string());
         }
 
+        Ok(violations)
+    }
+
+    /// Run boundary check and record any violations as canonical events.
+    /// Returns the list of violation descriptions.
+    /// Per STATE-004 / PATH-004: violations generate `boundary_violation_recorded`
+    /// events and the task enters hold.
+    pub fn boundary_check_and_record(&self, task_id: &str) -> Result<Vec<String>> {
+        let violations = self.boundary_check(task_id)?;
+        for violation in &violations {
+            let payload = serde_json::json!({
+                "violation": violation,
+                "detected_at": now_iso8601(),
+            });
+            let event = self.build_event(task_id, "boundary_violation_recorded", payload)?;
+            self.validate_and_append(&event)?;
+        }
+        if !violations.is_empty() {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(violations)
     }
 
@@ -439,6 +572,118 @@ impl ControlApp {
         Ok(results)
     }
 
+    // ── Audit & Reports (M3) ──
+
+    /// Generate a deterministic audit report from events + evidence.
+    /// The report is deterministic: same events always produce the same report.
+    pub fn generate_audit_report(&self, task_id: &str) -> Result<serde_json::Value> {
+        let state = self.replay_task(task_id)?;
+        let events = self.store.read_for_task(task_id)?;
+
+        // Collect gate results
+        let mut gate_reports = Vec::new();
+        for gate_id in &state.gates {
+            let result = state.gate_results.get(gate_id);
+            gate_reports.push(serde_json::json!({
+                "gate_id": gate_id,
+                "passed": result.map(|r| r.passed).unwrap_or(false),
+                "evidence": result.map(|r| r.evidence.as_str()).unwrap_or("no result"),
+                "checked_at": result.map(|r| r.checked_at.as_str()).unwrap_or("never"),
+            }));
+        }
+
+        // Count evidence events
+        let evidence_accepted_count = events
+            .iter()
+            .filter(|e| e.event_type == "evidence_accepted")
+            .count();
+        let evidence_rejected_count = events
+            .iter()
+            .filter(|e| e.event_type == "evidence_rejected")
+            .count();
+
+        // Check for violations
+        let violation_count = events
+            .iter()
+            .filter(|e| e.event_type == "boundary_violation_recorded")
+            .count();
+
+        // Completion interlock check
+        let all_gates_pass = state.gates.iter().all(|g| {
+            state
+                .gate_results
+                .get(g)
+                .map(|r| r.passed)
+                .unwrap_or(false)
+        });
+        let interlock_verdict =
+            if state.phase == Phase::Review
+                && !state.is_held
+                && all_gates_pass
+                && evidence_rejected_count == 0
+            {
+                "allow"
+            } else if state.phase == Phase::Completed {
+                "completed"
+            } else {
+                "blocked"
+            };
+
+        let report = serde_json::json!({
+            "schema": "control.audit-report.v1",
+            "task_id": task_id,
+            "phase": format!("{:?}", state.phase).to_lowercase(),
+            "is_held": state.is_held,
+            "is_archived": state.is_archived,
+            "objective": state.objective,
+            "total_events": events.len(),
+            "gates": gate_reports,
+            "all_gates_pass": all_gates_pass,
+            "evidence_accepted": evidence_accepted_count,
+            "evidence_rejected": evidence_rejected_count,
+            "violations": violation_count,
+            "completion_interlock": {
+                "phase_is_review": state.phase == Phase::Review,
+                "no_hold": !state.is_held,
+                "all_gates_pass": all_gates_pass,
+                "no_rejected_evidence": evidence_rejected_count == 0,
+                "verdict": interlock_verdict,
+            },
+            "write_scope": state.write_allow.iter().collect::<Vec<_>>(),
+            "write_deny": state.write_deny.iter().collect::<Vec<_>>(),
+            "last_seq": state.last_seq,
+        });
+
+        // Write report file
+        let task_dir = self.store.task_dir(task_id)?;
+        let report_path = task_dir.join("audit-report.json");
+        let temp_path = task_dir.join("audit-report.json.tmp");
+        std::fs::write(&temp_path, serde_json::to_string_pretty(&report)?)?;
+        std::fs::rename(&temp_path, &report_path)?;
+
+        Ok(report)
+    }
+
+    /// Generate a human-readable summary report.
+    pub fn generate_status_report(&self) -> Result<Vec<serde_json::Value>> {
+        let task_ids = self.store.task_ids()?;
+        let mut reports = Vec::new();
+        for task_id in &task_ids {
+            let state = self.replay_task(task_id)?;
+            reports.push(serde_json::json!({
+                "task_id": task_id,
+                "phase": format!("{:?}", state.phase).to_lowercase(),
+                "is_held": state.is_held,
+                "is_archived": state.is_archived,
+                "objective": state.objective,
+                "gates_total": state.gates.len(),
+                "gates_passing": state.gate_results.values().filter(|r| r.passed).count(),
+                "last_seq": state.last_seq,
+            }));
+        }
+        Ok(reports)
+    }
+
     // ── Internal helpers ──
 
     fn replay_task(&self, task_id: &str) -> Result<TaskState> {
@@ -523,7 +768,83 @@ impl ControlApp {
         self.store.write_task_view(task_id, &state)?;
         Ok(())
     }
-}
+
+    pub fn ingest_manual_result(&self, task_id: &str, result_file: &Path) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::InProgress && state.phase != Phase::Review {
+            return Err(anyhow!("Can only ingest results for InProgress or Review tasks, current: {:?}", state.phase));
+        }
+
+        // Read and parse the result file
+        let content = std::fs::read_to_string(result_file)?;
+        let result: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Invalid result file: {}", e))?;
+
+        // Validate required fields
+        let source = result.get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if source != "manual" {
+            return Err(anyhow!("Result file must have source=\"manual\""));
+        }
+
+        let touched_files = result.get("touched_files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Validate all touched files are within write_allow scope
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        for file_entry in &touched_files {
+            let file_path = file_entry.as_str().unwrap_or("");
+            if file_path.is_empty() { continue; }
+            let normalized = normalizer.normalize(file_path)
+                .map_err(|e| anyhow!("Invalid touched file '{}': {}", file_path, e))?;
+            let normalized_str = normalized.to_string_lossy();
+            let in_scope = state.write_allow.iter().any(|scope| {
+                normalized_str.starts_with(scope.as_str()) || normalized_str == scope.as_str()
+            });
+            let in_deny = state.write_deny.iter().any(|scope| {
+                normalized_str.starts_with(scope.as_str()) || normalized_str == scope.as_str()
+            });
+            if !in_scope || in_deny {
+                // Reject evidence: file out of scope
+                let evidence_id = generate_uuid();
+                let payload = serde_json::json!({
+                    "evidence_id": evidence_id,
+                    "source": "manual",
+                    "rejection_reason": format!("File '{}' is out of write scope or in deny list", file_path),
+                    "touched_file": file_path,
+                });
+                let event = self.build_event(task_id, "evidence_rejected", payload)?;
+                self.validate_and_append(&event)?;
+                self.rebuild_task_view(task_id)?;
+                return Err(anyhow!("Evidence rejected: file '{}' is out of write scope or in deny list", file_path));
+            }
+        }
+
+        // Generate evidence_id and write agent-output.json
+        let evidence_id = generate_uuid();
+        let output_path = self.store.task_dir(task_id)?.join("agent-output.json");
+        let temp_path = output_path.with_extension("json.tmp");
+        std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
+        std::fs::rename(&temp_path, &output_path)?;
+
+        let payload = serde_json::json!({
+            "evidence_id": evidence_id,
+            "source": "manual",
+            "result_file": result_file.to_string_lossy(),
+            "touched_files": touched_files,
+            "accepted_at": now_iso8601(),
+        });
+        let event = self.build_event(task_id, "evidence_accepted", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+ }
 
 fn validate_task_definition(
     objective: &str,

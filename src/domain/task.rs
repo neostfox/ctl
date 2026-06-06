@@ -335,6 +335,33 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 },
             );
         }
+        "evidence_accepted" => {
+            // Validate required fields
+            let evidence_id = event.payload.get("evidence_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if evidence_id.is_empty() {
+                return Err("evidence_accepted: evidence_id is required".into());
+            }
+            let source = event.payload.get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if source.is_empty() {
+                return Err("evidence_accepted: source is required".into());
+            }
+            // Evidence can be accepted in any phase except terminal states
+            if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
+                return Err("Cannot accept evidence for terminal task".into());
+            }
+        }
+        "evidence_rejected" => {
+            let evidence_id = event.payload.get("evidence_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if evidence_id.is_empty() {
+                return Err("evidence_rejected: evidence_id is required".into());
+            }
+        }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }
 

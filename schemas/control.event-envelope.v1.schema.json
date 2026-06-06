@@ -391,6 +391,19 @@
         "properties": {
           "payload": {
             "type": "object",
+            "properties": {
+              "violation": {
+                "description": "Description of the boundary violation.",
+                "type": "string",
+                "minLength": 1
+              },
+              "detected_at": {
+                "description": "ISO 8601 timestamp when the violation was detected.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["violation"],
             "additionalProperties": false
           }
         }

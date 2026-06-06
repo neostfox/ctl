@@ -23,7 +23,7 @@ struct Cli {
 enum Commands {
     /// Initialize the local task ledger
     Init,
-    /// M1 task lifecycle commands
+    /// Task lifecycle commands (create through archive)
     Task {
         #[command(subcommand)]
         command: TaskCommands,
@@ -34,6 +34,8 @@ enum Commands {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Rebuild all task views from canonical events
+    Reconcile,
     /// Validate canonical task event logs
     Validate,
     /// Diagnose local task ledger health
@@ -48,10 +50,38 @@ enum Commands {
         #[command(subcommand)]
         command: BoundaryCommands,
     },
+    /// Gate execution and recording (M2)
+    Gate {
+        #[command(subcommand)]
+        command: GateCommands,
+    },
+    /// Context snapshot commands (M2)
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
+    /// Assignment export commands (M3)
+    Assignment {
+        #[command(subcommand)]
+        command: AssignmentCommands,
+    },
     /// Architecture compliance checks
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommands,
+    },
+    /// Generate audit report for a task (M3)
+    Audit {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Show summary report of all tasks (M3)
+    Report,
+    /// Manual adapter run commands (M3)
+    Run {
+        #[command(subcommand)]
+        command: RunCommands,
     },
 }
 
@@ -117,6 +147,42 @@ enum TaskCommands {
         #[arg(long)]
         id: String,
     },
+    /// Start a Ready task (transition to InProgress)
+    Start {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Submit an InProgress task for review
+    Submit {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Reopen a Review task back to InProgress
+    Reopen {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Finish a Review task (completion interlock: all gates must pass)
+    Finish {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Cancel a non-terminal task
+    Cancel {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Archive a completed or cancelled task
+    Archive {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,11 +207,81 @@ enum BoundaryCommands {
         #[arg(short, long)]
         path: String,
     },
+    /// Check a task's workspace against its declared write scope
+    CheckById {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GateCommands {
+    /// Execute a gate and record the result as a canonical event
+    Run {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Gate template ID to execute
+        #[arg(long)]
+        gate: String,
+    },
+    /// Record an externally-verified gate result
+    Record {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Gate template ID
+        #[arg(long)]
+        gate: String,
+        /// Whether the gate passed
+        #[arg(long)]
+        passed: bool,
+        /// Evidence description
+        #[arg(long)]
+        evidence: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// Build a context snapshot (hash all files in read scope)
+    Build {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssignmentCommands {
+    /// Export a structured assignment JSON for external execution
+    Export {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum ArchitectureCommands {
     Check,
+}
+
+#[derive(Subcommand)]
+enum RunCommands {
+    /// Ingest a manual execution result as evidence
+    Ingest {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Adapter type (must be "manual")
+        #[arg(long, default_value = "manual")]
+        adapter: String,
+        /// Path to the result file
+        #[arg(long)]
+        result: String,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -154,10 +290,17 @@ pub fn run() -> Result<()> {
         Commands::Init => cmd_init(),
         Commands::Task { command } => cmd_task(command),
         Commands::Replay { task } => cmd_replay(task.as_deref()),
+        Commands::Reconcile => cmd_reconcile(),
         Commands::Validate => cmd_validate(),
         Commands::Doctor => cmd_doctor(),
         Commands::Schema { command } => cmd_schema(command),
         Commands::Boundary { command } => cmd_boundary(command),
+        Commands::Gate { command } => cmd_gate(command),
+        Commands::Context { command } => cmd_context(command),
+        Commands::Assignment { command } => cmd_assignment(command),
+        Commands::Audit { id } => cmd_audit(id),
+        Commands::Report => cmd_report(),
+        Commands::Run { command } => cmd_run(command),
         Commands::Architecture { command } => cmd_architecture(command),
     }
 }
@@ -227,6 +370,30 @@ fn cmd_task(command: &TaskCommands) -> Result<()> {
             let state = app.get_status(id)?;
             print_task_state(&state)?;
         }
+        TaskCommands::Start { id } => {
+            let event = app.start_task(id)?;
+            println!("Started task '{}' at seq {}.", id, event.seq);
+        }
+        TaskCommands::Submit { id } => {
+            let event = app.submit_task(id)?;
+            println!("Submitted task '{}' for review at seq {}.", id, event.seq);
+        }
+        TaskCommands::Reopen { id } => {
+            let event = app.reopen_task(id)?;
+            println!("Reopened task '{}' at seq {}.", id, event.seq);
+        }
+        TaskCommands::Finish { id } => {
+            let event = app.finish_task(id)?;
+            println!("Finished task '{}' at seq {}.", id, event.seq);
+        }
+        TaskCommands::Cancel { id } => {
+            let event = app.cancel_task(id)?;
+            println!("Cancelled task '{}' at seq {}.", id, event.seq);
+        }
+        TaskCommands::Archive { id } => {
+            let event = app.archive_task(id)?;
+            println!("Archived task '{}' at seq {}.", id, event.seq);
+        }
     }
     Ok(())
 }
@@ -251,6 +418,13 @@ fn cmd_replay(task_id: Option<&str>) -> Result<()> {
             println!("Replayed {} task projection(s).", rebuilt.len());
         }
     }
+    Ok(())
+}
+
+fn cmd_reconcile() -> Result<()> {
+    let app = app_open()?;
+    let rebuilt = app.reconcile()?;
+    println!("Rebuilt {} task projection(s).", rebuilt.len());
     Ok(())
 }
 
@@ -281,6 +455,61 @@ fn cmd_doctor() -> Result<()> {
     }
     if has_error {
         return Err(anyhow::anyhow!("Doctor found task ledger errors"));
+    }
+    Ok(())
+}
+
+fn cmd_audit(id: &str) -> Result<()> {
+    let app = app_open()?;
+    let report = app.generate_audit_report(id)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn cmd_report() -> Result<()> {
+    let app = app_open()?;
+    let reports = app.generate_status_report()?;
+    if reports.is_empty() {
+        println!("No tasks found.");
+    } else {
+        for report in &reports {
+            let task_id = report
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("?");
+            let objective = report
+                .get("objective")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let archived = report
+                .get("is_archived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let status = if archived { " (archived)" } else { "" };
+            println!("{}: {} [{}]{}", task_id, objective, phase, status);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_run(command: &RunCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        RunCommands::Ingest {
+            id,
+            adapter,
+            result,
+        } => {
+            if adapter != "manual" {
+                return Err(anyhow::anyhow!("Only 'manual' adapter is supported in M3"));
+            }
+            let event = app.ingest_manual_result(id, std::path::Path::new(result))?;
+            println!(
+                "Ingested manual result for task '{}' at seq {}.",
+                id, event.seq
+            );
+        }
     }
     Ok(())
 }
@@ -340,7 +569,96 @@ fn cmd_boundary(command: &BoundaryCommands) -> Result<()> {
             }
         }
         BoundaryCommands::Explain { path } => boundary_explain(path),
+        BoundaryCommands::CheckById { id } => {
+            let app = app_open()?;
+            let violations = app.boundary_check_and_record(id)?;
+            if violations.is_empty() {
+                println!("No boundary violations detected for task '{}'.", id);
+            } else {
+                println!("Boundary violations for task '{}':", id);
+                for v in &violations {
+                    println!("  {}", v);
+                }
+                return Err(anyhow::anyhow!(
+                    "Task '{}' has {} boundary violation(s)",
+                    id,
+                    violations.len()
+                ));
+            }
+            Ok(())
+        }
     }
+}
+
+fn cmd_gate(command: &GateCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        GateCommands::Run { id, gate } => {
+            let event = app.run_gate_checked(id, gate)?;
+            println!(
+                "Gate '{}' for task '{}': {} (seq {})",
+                gate,
+                id,
+                if event
+                    .payload
+                    .get("passed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    "PASS"
+                } else {
+                    "FAIL"
+                },
+                event.seq
+            );
+        }
+        GateCommands::Record {
+            id,
+            gate,
+            passed,
+            evidence,
+        } => {
+            let event = app.record_gate(id, gate, *passed, evidence)?;
+            println!(
+                "Recorded gate '{}' for task '{}': {} (seq {})",
+                gate,
+                id,
+                if *passed { "PASS" } else { "FAIL" },
+                event.seq
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_context(command: &ContextCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        ContextCommands::Build { id } => {
+            let context = app.build_context(id)?;
+            let file_count = context
+                .get("file_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!(
+                "Built context snapshot for task '{}': {} files hashed.",
+                id, file_count
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_assignment(command: &AssignmentCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        AssignmentCommands::Export { id } => {
+            let assignment = app.export_assignment(id)?;
+            println!("Exported assignment for task '{}'.", id);
+            let _ = assignment; // used for side effect of writing file
+        }
+    }
+    Ok(())
 }
 
 fn cmd_architecture(command: &ArchitectureCommands) -> Result<()> {
@@ -562,6 +880,9 @@ fn check_baseline_manifest() -> Result<()> {
         "reducer_lifecycle.jsonl",
         "reducer_hold.jsonl",
         "reducer_revise.jsonl",
+        "reducer_m2_lifecycle.jsonl",
+        "reducer_m3_lifecycle.jsonl",
+        "reducer_boundary_violation.jsonl",
         "schema_counter_examples.json",
         "invalid.json",
     ];
@@ -600,6 +921,18 @@ fn check_state_transitions() -> Result<()> {
         (
             "fixtures/reducer_revise.jsonl",
             "t-revise",
+            Phase::InProgress,
+            4,
+        ),
+        (
+            "fixtures/reducer_m2_lifecycle.jsonl",
+            "t-m2",
+            Phase::Completed,
+            8,
+        ),
+        (
+            "fixtures/reducer_boundary_violation.jsonl",
+            "t-violation",
             Phase::InProgress,
             4,
         ),
@@ -665,10 +998,17 @@ fn check_milestone_scope() -> Result<()> {
             "init",
             "task",
             "replay",
+            "reconcile",
             "validate",
             "doctor",
             "schema",
             "boundary",
+            "gate",
+            "context",
+            "assignment",
+            "run",
+            "audit",
+            "report",
             "architecture",
         ],
     )?;
@@ -676,22 +1016,18 @@ fn check_milestone_scope() -> Result<()> {
     let task_command = command
         .get_subcommands()
         .find(|cmd| cmd.get_name() == "task")
-        .ok_or_else(|| anyhow::anyhow!("Missing M1 task command"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing task command"))?;
     assert_exact_subcommands(
         "task CLI",
         task_command.get_subcommands().map(|cmd| cmd.get_name()),
-        ["create", "revise", "ready", "status"],
+        [
+            "create", "revise", "ready", "status", "start", "submit", "reopen", "finish", "cancel",
+            "archive",
+        ],
     )?;
 
+    // M3+ commands that must not appear in M2
     let forbidden = [
-        "context",
-        "gate",
-        "run",
-        "reconcile",
-        "assignment",
-        "ingest",
-        "audit",
-        "report",
         "workspace",
         "approval",
         "adapter",
@@ -701,18 +1037,13 @@ fn check_milestone_scope() -> Result<()> {
         "nextaction",
         "schedule",
         "agent",
-        "start",
-        "cancel",
-        "submit",
-        "finish",
-        "archive",
     ];
     let mut names = Vec::new();
     collect_subcommand_names(&command, &mut names);
     for forbidden_cmd in &forbidden {
         if names.iter().any(|name| name == forbidden_cmd) {
             return Err(anyhow::anyhow!(
-                "Milestone scope violation: CLI exposes non-M1 command '{}'",
+                "Milestone scope violation: CLI exposes post-M2 command '{}'",
                 forbidden_cmd
             ));
         }
