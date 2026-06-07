@@ -3,7 +3,7 @@
   "name": "m4-omp-isolated-exec",
   "title": "M4: OMP Single-Executor Isolated Execution",
   "description": "",
-  "status": "planning",
+  "status": "implemented",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -20,7 +20,40 @@
   "subtasks": [],
   "children": [],
   "parent": null,
-  "relatedFiles": [],
-  "notes": "",
-  "meta": {}
+  "relatedFiles": [
+    "schemas/control.event-envelope.v1.schema.json",
+    "src/domain/lease.rs",
+    "src/domain/approval.rs",
+    "src/domain/task.rs",
+    "src/domain/mod.rs",
+    "src/infrastructure/workspace/mod.rs",
+    "src/infrastructure/mod.rs",
+    "src/adapters/mod.rs",
+    "src/adapters/omp/mod.rs",
+    "src/application/mod.rs",
+    "src/cli/mod.rs",
+    "src/domain/audit_matrix.rs",
+    "fixtures/reducer_m4_lifecycle.jsonl"
+  ],
+  "notes": "Phase 1-5 of implement.md complete. Schema, domain, infrastructure, adapters, application, CLI all implemented. All 5 mechanical gates pass (fmt/check/test/clippy/architecture). Remaining: contract tests (AC1-7, AC13), cross-task lease check (AC4), 10 real dogfood tasks (AC14).",
+  "meta": {
+    "phases_complete": ["Phase 1: Foundation", "Phase 2: Workspace", "Phase 3: Lease+Approval (domain)", "Phase 4: OMP Adapter", "Phase 5: CLI", "Phase 6: Fixtures (partial)"],
+    "phases_remaining": ["Phase 6: Contract tests + integration tests", "Phase 7: Dogfood 10 real tasks"],
+    "acceptance_criteria_status": {
+      "AC1_omp_resume": "infrastructure_ready_no_test",
+      "AC2_out_of_scope_rejected": "implemented_no_test",
+      "AC3_expired_lease_rejected": "implemented_no_test",
+      "AC4_cross_task_lease": "not_implemented",
+      "AC5_duplicate_lease": "implemented_no_test",
+      "AC6_high_risk_no_approval": "implemented_no_test",
+      "AC7_structured_approval_only": "enforced_by_schema",
+      "AC8_fmt": "pass",
+      "AC9_check": "pass",
+      "AC10_test": "pass_104_tests",
+      "AC11_clippy": "pass",
+      "AC12_architecture": "pass",
+      "AC13_omp_contract_tests": "not_done",
+      "AC14_20_real_tasks": "not_done"
+    }
+  }
 }

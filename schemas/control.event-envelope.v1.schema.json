@@ -55,7 +55,22 @@
         "boundary_violation_recorded",
         "gate_checked",
         "evidence_accepted",
-        "evidence_rejected"
+        "evidence_rejected",
+        "workspace_created",
+        "workspace_cleaned",
+        "workspace_diff_computed",
+        "workspace_applied",
+        "run_started",
+        "run_completed",
+        "run_failed",
+        "lease_created",
+        "lease_used",
+        "lease_expired",
+        "lease_revoked",
+        "approval_requested",
+        "approval_granted",
+        "approval_denied",
+        "approval_expired"
       ]
     },
     "payload": {
@@ -481,6 +496,445 @@
               "touched_file": {
                 "description": "The offending file path.",
                 "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "workspace_created" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["worktree_path", "branch"],
+            "properties": {
+              "worktree_path": {
+                "description": "Path to the created git worktree.",
+                "type": "string",
+                "minLength": 1
+              },
+              "branch": {
+                "description": "Branch name used for the worktree.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "workspace_cleaned" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["worktree_path"],
+            "properties": {
+              "worktree_path": {
+                "description": "Path to the cleaned worktree.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "workspace_diff_computed" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["files_added", "files_modified", "files_deleted", "high_risk"],
+            "properties": {
+              "files_added": {
+                "description": "Files added in worktree.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "files_modified": {
+                "description": "Files modified in worktree.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "files_deleted": {
+                "description": "Files deleted in worktree.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "high_risk": {
+                "description": "High-risk change descriptions.",
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "workspace_applied" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["files_applied"],
+            "properties": {
+              "files_applied": {
+                "description": "Files applied from worktree to main workspace.",
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_started" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id", "adapter", "lease_id"],
+            "properties": {
+              "run_id": {
+                "description": "Unique run identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter": {
+                "description": "Adapter name (e.g., 'omp').",
+                "type": "string",
+                "minLength": 1
+              },
+              "lease_id": {
+                "description": "Capability lease bound to this run.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_completed" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {
+              "run_id": {
+                "description": "Unique run identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_failed" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id", "reason"],
+            "properties": {
+              "run_id": {
+                "description": "Unique run identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "description": "Failure reason.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "lease_created" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["lease_id", "run_id", "resource_path", "action", "ttl_seconds", "max_uses"],
+            "properties": {
+              "lease_id": {
+                "description": "Unique lease identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "run_id": {
+                "description": "Run this lease is bound to.",
+                "type": "string",
+                "minLength": 1
+              },
+              "resource_path": {
+                "description": "Resource path the lease grants access to.",
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "description": "Action type (read/write).",
+                "type": "string",
+                "minLength": 1
+              },
+              "ttl_seconds": {
+                "description": "Time-to-live in seconds.",
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_uses": {
+                "description": "Maximum number of uses.",
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "lease_used" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["lease_id"],
+            "properties": {
+              "lease_id": {
+                "description": "Lease identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "lease_expired" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["lease_id", "reason"],
+            "properties": {
+              "lease_id": {
+                "description": "Lease identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "description": "Expiration reason (ttl or max_uses).",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "lease_revoked" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["lease_id"],
+            "properties": {
+              "lease_id": {
+                "description": "Lease identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "approval_requested" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["request_id", "reason", "scope", "ttl_seconds"],
+            "properties": {
+              "request_id": {
+                "description": "Unique approval request identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "description": "Structured reason for the approval request.",
+                "type": "string",
+                "minLength": 1
+              },
+              "scope": {
+                "description": "JSON scope describing affected files/changes.",
+                "type": "object"
+              },
+              "ttl_seconds": {
+                "description": "Time-to-live in seconds before auto-expiry.",
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "approval_granted" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["request_id"],
+            "properties": {
+              "request_id": {
+                "description": "Approval request identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "approval_denied" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["request_id"],
+            "properties": {
+              "request_id": {
+                "description": "Approval request identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "approval_expired" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["request_id"],
+            "properties": {
+              "request_id": {
+                "description": "Approval request identifier.",
+                "type": "string",
+                "minLength": 1
               }
             },
             "additionalProperties": false

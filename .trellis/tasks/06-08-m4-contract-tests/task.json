@@ -1,0 +1,33 @@
+{
+  "id": "m4-contract-tests",
+  "name": "m4-contract-tests",
+  "title": "M4 Verification: Contract Tests + Acceptance Criteria",
+  "description": "验证 M4 全部验收标准，补齐 AC4（跨 task lease），完成 AC13（contract tests）和 AC14（dogfood 10 任务）",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "shaobolua",
+  "assignee": "shaobolua",
+  "createdAt": "2026-06-08",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "m4-omp-isolated-exec",
+  "relatedFiles": [
+    "src/domain/audit_matrix.rs",
+    "src/domain/task.rs",
+    "src/adapters/omp/mod.rs",
+    "src/adapters/mod.rs",
+    "src/application/mod.rs",
+    "src/cli/mod.rs"
+  ],
+  "notes": "",
+  "meta": {}
+}

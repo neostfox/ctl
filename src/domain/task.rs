@@ -1,4 +1,6 @@
+use crate::domain::approval::{ApprovalState, ApprovalStatus};
 use crate::domain::event::Event;
+use crate::domain::lease::{LeaseState, LeaseStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -29,6 +31,15 @@ pub struct GateResult {
     pub checked_at: String,
 }
 
+/// Active run information tracked by the task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunInfo {
+    pub run_id: String,
+    pub adapter: String,
+    pub lease_id: String,
+    pub started_at_seq: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct TaskState {
@@ -44,6 +55,12 @@ pub struct TaskState {
     pub gates: BTreeSet<String>,
     /// Latest gate results keyed by gate_id. Each gate retains only the most recent result.
     pub gate_results: HashMap<String, GateResult>,
+    /// M4: Active run (at most one per task).
+    pub active_run: Option<RunInfo>,
+    /// M4: Capability leases keyed by lease_id.
+    pub leases: HashMap<String, LeaseState>,
+    /// M4: Pending/approved/denied approval requests keyed by request_id.
+    pub pending_approvals: HashMap<String, ApprovalState>,
     pub history: Vec<String>,
     pub last_seq: i64,
     pub processed_commands: HashSet<String>,
@@ -64,6 +81,9 @@ impl TaskState {
             risk_triggers: BTreeSet::new(),
             gates: BTreeSet::new(),
             gate_results: HashMap::new(),
+            active_run: None,
+            leases: HashMap::new(),
+            pending_approvals: HashMap::new(),
             history: Vec::new(),
             last_seq: 0,
             processed_commands: HashSet::new(),
@@ -367,6 +387,320 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             if evidence_id.is_empty() {
                 return Err("evidence_rejected: evidence_id is required".into());
             }
+        }
+        // ── M4: Workspace events ──
+        "workspace_created" => {
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "Can only create workspace in InProgress, current: {:?}",
+                    state.phase
+                ));
+            }
+            let worktree_path = event
+                .payload
+                .get("worktree_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if worktree_path.is_empty() {
+                return Err("workspace_created: worktree_path is required".into());
+            }
+        }
+        "workspace_cleaned" => {
+            let worktree_path = event
+                .payload
+                .get("worktree_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if worktree_path.is_empty() {
+                return Err("workspace_cleaned: worktree_path is required".into());
+            }
+        }
+        "workspace_diff_computed" => {
+            // Diff computed is informational; no state mutation.
+            // Validate required arrays exist.
+            for field in [
+                "files_added",
+                "files_modified",
+                "files_deleted",
+                "high_risk",
+            ] {
+                if event
+                    .payload
+                    .get(field)
+                    .and_then(|v| v.as_array())
+                    .is_none()
+                {
+                    return Err(format!(
+                        "workspace_diff_computed: '{}' must be an array",
+                        field
+                    ));
+                }
+            }
+        }
+        "workspace_applied" => {
+            let files = event
+                .payload
+                .get("files_applied")
+                .and_then(|v| v.as_array());
+            if files.is_none() {
+                return Err("workspace_applied: files_applied must be an array".into());
+            }
+        }
+        // ── M4: Run lifecycle events ──
+        "run_started" => {
+            if state.active_run.is_some() {
+                return Err("Cannot start run: another run is already active".into());
+            }
+            let run_id = event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let adapter = event
+                .payload
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if run_id.is_empty() || adapter.is_empty() || lease_id.is_empty() {
+                return Err("run_started: run_id, adapter, and lease_id are required".into());
+            }
+            state.active_run = Some(RunInfo {
+                run_id: run_id.to_string(),
+                adapter: adapter.to_string(),
+                lease_id: lease_id.to_string(),
+                started_at_seq: event.seq,
+            });
+        }
+        "run_completed" => {
+            if state.active_run.is_none() {
+                return Err("Cannot complete run: no active run".into());
+            }
+            state.active_run = None;
+        }
+        "run_failed" => {
+            // run_failed clears active_run regardless of state
+            state.active_run = None;
+        }
+        // ── M4: Lease events ──
+        "lease_created" => {
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if lease_id.is_empty() {
+                return Err("lease_created: lease_id is required".into());
+            }
+            if state.leases.contains_key(lease_id) {
+                return Err(format!("Duplicate lease_id: {}", lease_id));
+            }
+            let run_id = event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let resource_path = event
+                .payload
+                .get("resource_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let action = event
+                .payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ttl_seconds = event
+                .payload
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let max_uses = event
+                .payload
+                .get("max_uses")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if run_id.is_empty() || resource_path.is_empty() || action.is_empty() {
+                return Err("lease_created: run_id, resource_path, and action are required".into());
+            }
+            if ttl_seconds == 0 || max_uses == 0 {
+                return Err("lease_created: ttl_seconds and max_uses must be > 0".into());
+            }
+            state.leases.insert(
+                lease_id.to_string(),
+                LeaseState {
+                    lease_id: lease_id.to_string(),
+                    run_id: run_id.to_string(),
+                    resource_path: resource_path.to_string(),
+                    action: action.to_string(),
+                    ttl_seconds,
+                    max_uses,
+                    remaining_uses: max_uses,
+                    created_at_seq: event.seq,
+                    status: LeaseStatus::Active,
+                },
+            );
+        }
+        "lease_used" => {
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if lease_id.is_empty() {
+                return Err("lease_used: lease_id is required".into());
+            }
+            let lease = state
+                .leases
+                .get_mut(lease_id)
+                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
+            if lease.status != LeaseStatus::Active {
+                return Err(format!("Lease '{}' is not active", lease_id));
+            }
+            if lease.remaining_uses == 0 {
+                return Err(format!("Lease '{}' has no remaining uses", lease_id));
+            }
+            lease.remaining_uses -= 1;
+            if lease.remaining_uses == 0 {
+                lease.status = LeaseStatus::Expired;
+            }
+        }
+        "lease_expired" => {
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if lease_id.is_empty() {
+                return Err("lease_expired: lease_id is required".into());
+            }
+            let lease = state
+                .leases
+                .get_mut(lease_id)
+                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
+            lease.status = LeaseStatus::Expired;
+        }
+        "lease_revoked" => {
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if lease_id.is_empty() {
+                return Err("lease_revoked: lease_id is required".into());
+            }
+            let lease = state
+                .leases
+                .get_mut(lease_id)
+                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
+            lease.status = LeaseStatus::Revoked;
+        }
+        // ── M4: Approval events ──
+        "approval_requested" => {
+            let request_id = event
+                .payload
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if request_id.is_empty() {
+                return Err("approval_requested: request_id is required".into());
+            }
+            if state.pending_approvals.contains_key(request_id) {
+                return Err(format!("Duplicate approval request_id: {}", request_id));
+            }
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let scope = event
+                .payload
+                .get("scope")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let ttl_seconds = event
+                .payload
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if reason.is_empty() {
+                return Err("approval_requested: reason is required".into());
+            }
+            if ttl_seconds == 0 {
+                return Err("approval_requested: ttl_seconds must be > 0".into());
+            }
+            state.pending_approvals.insert(
+                request_id.to_string(),
+                ApprovalState {
+                    request_id: request_id.to_string(),
+                    reason: reason.to_string(),
+                    scope,
+                    ttl_seconds,
+                    requested_at_seq: event.seq,
+                    status: ApprovalStatus::Pending,
+                },
+            );
+        }
+        "approval_granted" => {
+            let request_id = event
+                .payload
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if request_id.is_empty() {
+                return Err("approval_granted: request_id is required".into());
+            }
+            let approval = state
+                .pending_approvals
+                .get_mut(request_id)
+                .ok_or_else(|| format!("Unknown approval request_id: {}", request_id))?;
+            if approval.status != ApprovalStatus::Pending {
+                return Err(format!(
+                    "Approval '{}' is not pending (status: {:?})",
+                    request_id, approval.status
+                ));
+            }
+            approval.status = ApprovalStatus::Granted;
+        }
+        "approval_denied" => {
+            let request_id = event
+                .payload
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if request_id.is_empty() {
+                return Err("approval_denied: request_id is required".into());
+            }
+            let approval = state
+                .pending_approvals
+                .get_mut(request_id)
+                .ok_or_else(|| format!("Unknown approval request_id: {}", request_id))?;
+            if approval.status != ApprovalStatus::Pending {
+                return Err(format!(
+                    "Approval '{}' is not pending (status: {:?})",
+                    request_id, approval.status
+                ));
+            }
+            approval.status = ApprovalStatus::Denied;
+        }
+        "approval_expired" => {
+            let request_id = event
+                .payload
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if request_id.is_empty() {
+                return Err("approval_expired: request_id is required".into());
+            }
+            let approval = state
+                .pending_approvals
+                .get_mut(request_id)
+                .ok_or_else(|| format!("Unknown approval request_id: {}", request_id))?;
+            approval.status = ApprovalStatus::Expired;
         }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }

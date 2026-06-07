@@ -1112,15 +1112,16 @@ mod tests {
         "control.policy-decision.v1.schema.json",
     ];
     const BASELINE_FIXTURE_FILES: &[&str] = &[
-        "reducer_test.jsonl",
-        "reducer_lifecycle.jsonl",
+        "invalid.json",
+        "reducer_boundary_violation.jsonl",
         "reducer_hold.jsonl",
-        "reducer_revise.jsonl",
+        "reducer_lifecycle.jsonl",
         "reducer_m2_lifecycle.jsonl",
         "reducer_m3_lifecycle.jsonl",
-        "reducer_boundary_violation.jsonl",
+        "reducer_m4_lifecycle.jsonl",
+        "reducer_revise.jsonl",
+        "reducer_test.jsonl",
         "schema_counter_examples.json",
-        "invalid.json",
     ];
     const BASELINE_REQUIRED_GATES: &[&str] = &[
         "cargo_fmt_check",

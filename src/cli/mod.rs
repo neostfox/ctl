@@ -78,10 +78,25 @@ enum Commands {
     },
     /// Show summary report of all tasks (M3)
     Report,
-    /// Manual adapter run commands (M3)
+    /// Run commands (M3 manual + M4 OMP)
     Run {
         #[command(subcommand)]
         command: RunCommands,
+    },
+    /// Workspace isolation commands (M4)
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
+    /// Approval commands (M4)
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommands,
+    },
+    /// Adapter capability queries (M4)
+    Adapter {
+        #[command(subcommand)]
+        command: AdapterCommands,
     },
 }
 
@@ -278,12 +293,93 @@ enum RunCommands {
         /// Task identifier
         #[arg(long)]
         id: String,
-        /// Adapter type (must be "manual")
+        /// Adapter type ("manual" or "omp")
         #[arg(long, default_value = "manual")]
         adapter: String,
         /// Path to the result file
         #[arg(long)]
         result: String,
+    },
+    /// Start an OMP adapter run with worktree isolation (M4)
+    Start {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Adapter type (must be "omp")
+        #[arg(long, default_value = "omp")]
+        adapter: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// Create an isolated git worktree for a task (M4)
+    Create {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Compute diff between worktree and HEAD (M4)
+    Diff {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Apply verified worktree changes to main workspace (M4)
+    Apply {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+    /// Remove a worktree (M4)
+    Cleanup {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommands {
+    /// Create an approval request (M4)
+    Request {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Reason for the approval request
+        #[arg(long)]
+        reason: String,
+        /// TTL in seconds (default 86400)
+        #[arg(long, default_value_t = 86400)]
+        ttl: u64,
+    },
+    /// Grant an approval request (M4)
+    Grant {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Approval request ID
+        #[arg(long)]
+        request: String,
+    },
+    /// Deny an approval request (M4)
+    Deny {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Approval request ID
+        #[arg(long)]
+        request: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdapterCommands {
+    /// Report adapter capabilities (M4)
+    Capabilities {
+        /// Adapter name (e.g., "omp")
+        #[arg(long)]
+        adapter: String,
     },
 }
 
@@ -304,6 +400,9 @@ pub fn run() -> Result<()> {
         Commands::Audit { id } => cmd_audit(id),
         Commands::Report => cmd_report(),
         Commands::Run { command } => cmd_run(command),
+        Commands::Workspace { command } => cmd_workspace(command),
+        Commands::Approval { command } => cmd_approval(command),
+        Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
     }
 }
@@ -508,14 +607,91 @@ fn cmd_run(command: &RunCommands) -> Result<()> {
             adapter,
             result,
         } => {
-            if adapter != "manual" {
-                return Err(anyhow::anyhow!("Only 'manual' adapter is supported in M3"));
+            if adapter == "manual" {
+                let event = app.ingest_manual_result(id, std::path::Path::new(result))?;
+                println!(
+                    "Ingested manual result for task '{}' at seq {}.",
+                    id, event.seq
+                );
+            } else if adapter == "omp" {
+                let event = app.run_ingest_omp(id, std::path::Path::new(result))?;
+                println!(
+                    "Ingested OMP result for task '{}' at seq {}.",
+                    id, event.seq
+                );
+            } else {
+                return Err(anyhow::anyhow!("Unknown adapter: {}", adapter));
             }
-            let event = app.ingest_manual_result(id, std::path::Path::new(result))?;
+        }
+        RunCommands::Start { id, adapter } => {
+            let event = app.run_start(id, adapter)?;
             println!(
-                "Ingested manual result for task '{}' at seq {}.",
+                "Started {} run for task '{}' at seq {}.",
+                adapter, id, event.seq
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_workspace(command: &WorkspaceCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        WorkspaceCommands::Create { id } => {
+            let event = app.workspace_create(id)?;
+            println!("Created workspace for task '{}' at seq {}.", id, event.seq);
+        }
+        WorkspaceCommands::Diff { id } => {
+            let result = app.workspace_diff(id)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        WorkspaceCommands::Apply { id } => {
+            let event = app.workspace_apply(id)?;
+            println!("Applied workspace for task '{}' at seq {}.", id, event.seq);
+        }
+        WorkspaceCommands::Cleanup { id } => {
+            let event = app.workspace_cleanup(id)?;
+            println!("Cleaned workspace for task '{}' at seq {}.", id, event.seq);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_approval(command: &ApprovalCommands) -> Result<()> {
+    let app = app_open()?;
+    match command {
+        ApprovalCommands::Request { id, reason, ttl } => {
+            let scope = serde_json::json!({});
+            let event = app.approval_request(id, reason, scope, *ttl)?;
+            println!(
+                "Created approval request for task '{}' at seq {}.",
                 id, event.seq
             );
+        }
+        ApprovalCommands::Grant { id, request } => {
+            let event = app.approval_grant(id, request)?;
+            println!(
+                "Granted approval for task '{}' request '{}' at seq {}.",
+                id, request, event.seq
+            );
+        }
+        ApprovalCommands::Deny { id, request } => {
+            let event = app.approval_deny(id, request)?;
+            println!(
+                "Denied approval for task '{}' request '{}' at seq {}.",
+                id, request, event.seq
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
+    match command {
+        AdapterCommands::Capabilities { adapter } => {
+            let app = app_open()?;
+            let caps = app.adapter_capabilities(adapter)?;
+            println!("{}", serde_json::to_string_pretty(&caps)?);
         }
     }
     Ok(())
@@ -910,15 +1086,16 @@ fn check_baseline_manifest() -> Result<()> {
     }
 
     let expected_fixtures = [
-        "reducer_test.jsonl",
-        "reducer_lifecycle.jsonl",
+        "invalid.json",
+        "reducer_boundary_violation.jsonl",
         "reducer_hold.jsonl",
-        "reducer_revise.jsonl",
+        "reducer_lifecycle.jsonl",
         "reducer_m2_lifecycle.jsonl",
         "reducer_m3_lifecycle.jsonl",
-        "reducer_boundary_violation.jsonl",
+        "reducer_m4_lifecycle.jsonl",
+        "reducer_revise.jsonl",
+        "reducer_test.jsonl",
         "schema_counter_examples.json",
-        "invalid.json",
     ];
     let mut found_fixtures: Vec<String> = Vec::new();
     for entry in fs::read_dir("fixtures")? {
@@ -969,6 +1146,12 @@ fn check_state_transitions() -> Result<()> {
             "t-violation",
             Phase::InProgress,
             4,
+        ),
+        (
+            "fixtures/reducer_m4_lifecycle.jsonl",
+            "t-m4",
+            Phase::Completed,
+            18,
         ),
     ];
     for (path, task_id, expected_phase, expected_history) in &fixture_files {
@@ -1029,21 +1212,24 @@ fn check_milestone_scope() -> Result<()> {
         "top-level CLI",
         command.get_subcommands().map(|cmd| cmd.get_name()),
         [
-            "init",
-            "task",
-            "replay",
-            "reconcile",
-            "validate",
-            "doctor",
-            "schema",
-            "boundary",
-            "gate",
-            "context",
-            "assignment",
-            "run",
-            "audit",
-            "report",
+            "adapter",
+            "approval",
             "architecture",
+            "assignment",
+            "audit",
+            "boundary",
+            "context",
+            "doctor",
+            "gate",
+            "init",
+            "reconcile",
+            "replay",
+            "report",
+            "run",
+            "schema",
+            "task",
+            "validate",
+            "workspace",
         ],
     )?;
 
@@ -1060,11 +1246,8 @@ fn check_milestone_scope() -> Result<()> {
         ],
     )?;
 
-    // M3+ commands that must not appear in M2
+    // Post-M4 commands that must not appear yet
     let forbidden = [
-        "workspace",
-        "approval",
-        "adapter",
         "telemetry",
         "drift",
         "next-action",
@@ -1077,7 +1260,7 @@ fn check_milestone_scope() -> Result<()> {
     for forbidden_cmd in &forbidden {
         if names.iter().any(|name| name == forbidden_cmd) {
             return Err(anyhow::anyhow!(
-                "Milestone scope violation: CLI exposes post-M2 command '{}'",
+                "Milestone scope violation: CLI exposes post-M4 command '{}'",
                 forbidden_cmd
             ));
         }
@@ -1134,12 +1317,12 @@ fn check_canonical_task_ledger_contract() -> Result<()> {
 
     check_files_absent(
         &[
-            "schemas/control.event-envelope.v1.schema.json",
             "schemas/control.task-definition.v1.schema.json",
             "schemas/control.task-view.v1.schema.json",
         ],
         &["\"scope\""],
     )?;
+    // event-envelope is excluded because M4 approval events legitimately use "scope"
 
     for entry in fs::read_dir("fixtures")? {
         let path = entry?.path();

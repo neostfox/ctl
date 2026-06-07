@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::adapters::omp::OmpAdapter;
+use crate::adapters::ExecutorAdapter;
 use crate::domain::event::Event;
 use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
@@ -798,6 +800,423 @@ impl ControlApp {
         Ok(())
     }
 
+    // ── M4: Workspace commands ──
+
+    pub fn workspace_create(&self, task_id: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::InProgress {
+            return Err(anyhow!(
+                "Can only create workspace for InProgress tasks, current: {:?}",
+                state.phase
+            ));
+        }
+
+        let worktree_path =
+            crate::infrastructure::workspace::create_worktree(&self.project_root, task_id)?;
+        let branch = format!("omp-run-{}", task_id);
+
+        let payload = serde_json::json!({
+            "worktree_path": worktree_path.to_string_lossy(),
+            "branch": branch,
+        });
+        let event = self.build_event(task_id, "workspace_created", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn workspace_diff(&self, task_id: &str) -> Result<serde_json::Value> {
+        let _state = self.replay_task(task_id)?;
+        let worktree_path = self.get_worktree_path(task_id)?;
+
+        let diff_files =
+            crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
+
+        let high_risks = crate::infrastructure::workspace::detect_high_risk(&diff_files);
+
+        let mut files_added = Vec::new();
+        let mut files_modified = Vec::new();
+        let mut files_deleted = Vec::new();
+
+        for (status, path) in &diff_files {
+            match status.as_str() {
+                "A" => files_added.push(path.clone()),
+                "D" => files_deleted.push(path.clone()),
+                _ => files_modified.push(path.clone()),
+            }
+        }
+
+        // Auto-create approval requests for high-risk changes
+        let high_risk_descriptions: Vec<String> = high_risks
+            .iter()
+            .map(|(risk_type, path)| format!("{}: {}", risk_type, path))
+            .collect();
+
+        if !high_risks.is_empty() {
+            let scope = serde_json::json!({
+                "high_risk_files": high_risks.iter().map(|(_, p)| p).collect::<Vec<_>>(),
+                "diff_summary": {
+                    "added": files_added.len(),
+                    "modified": files_modified.len(),
+                    "deleted": files_deleted.len(),
+                },
+            });
+            let request_id = generate_uuid();
+            let approval_payload = serde_json::json!({
+                "request_id": request_id,
+                "reason": format!("High-risk changes detected: {} file(s)", high_risks.len()),
+                "scope": scope,
+                "ttl_seconds": 86400,
+            });
+            let event = self.build_event(task_id, "approval_requested", approval_payload)?;
+            self.validate_and_append(&event)?;
+        }
+
+        // Record diff_computed event
+        let payload = serde_json::json!({
+            "files_added": files_added,
+            "files_modified": files_modified,
+            "files_deleted": files_deleted,
+            "high_risk": high_risk_descriptions,
+        });
+        let event = self.build_event(task_id, "workspace_diff_computed", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+
+        Ok(serde_json::json!({
+            "task_id": task_id,
+            "files_added": files_added,
+            "files_modified": files_modified,
+            "files_deleted": files_deleted,
+            "high_risk": high_risk_descriptions,
+        }))
+    }
+
+    pub fn workspace_apply(&self, task_id: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::InProgress {
+            return Err(anyhow!(
+                "Can only apply workspace for InProgress tasks, current: {:?}",
+                state.phase
+            ));
+        }
+
+        let worktree_path = self.get_worktree_path(task_id)?;
+        let diff_files =
+            crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
+        let high_risks = crate::infrastructure::workspace::detect_high_risk(&diff_files);
+
+        // Check all files are within write_allow
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        let mut files_to_apply = Vec::new();
+        for (status, path) in &diff_files {
+            let normalized = normalizer
+                .normalize(path)
+                .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
+            let normalized_str = normalized.to_string_lossy().replace('\\', "/");
+            let in_scope = state.write_allow.iter().any(|scope| {
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
+            });
+            let in_deny = state.write_deny.iter().any(|scope| {
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
+            });
+            if !in_scope || in_deny {
+                return Err(anyhow!(
+                    "File '{}' is out of write scope or in deny list. Rule: scope_enforcement",
+                    path
+                ));
+            }
+            if status != "D" {
+                files_to_apply.push(path.clone());
+            }
+        }
+
+        // Check high-risk changes have approval
+        for (risk_type, path) in &high_risks {
+            let has_approval = state.pending_approvals.values().any(|a| {
+                a.is_granted()
+                    && a.scope
+                        .get("high_risk_files")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|files| files.iter().any(|f| f.as_str() == Some(path)))
+            });
+            if !has_approval {
+                return Err(anyhow!(
+                    "High-risk change '{}' on '{}' requires approval. Grant with: control approval grant --id {} --request <request_id>",
+                    risk_type, path, task_id
+                ));
+            }
+        }
+
+        // Apply files
+        crate::infrastructure::workspace::apply_files(
+            &self.project_root,
+            &worktree_path,
+            &files_to_apply,
+        )?;
+
+        let payload = serde_json::json!({
+            "files_applied": files_to_apply,
+        });
+        let event = self.build_event(task_id, "workspace_applied", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn workspace_cleanup(&self, task_id: &str) -> Result<Event> {
+        let worktree_path = self.get_worktree_path(task_id)?;
+        crate::infrastructure::workspace::cleanup_worktree(&self.project_root, &worktree_path)?;
+
+        let payload = serde_json::json!({
+            "worktree_path": worktree_path.to_string_lossy(),
+        });
+        let event = self.build_event(task_id, "workspace_cleaned", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    // ── M4: Approval commands ──
+
+    pub fn approval_request(
+        &self,
+        task_id: &str,
+        reason: &str,
+        scope: serde_json::Value,
+        ttl_seconds: u64,
+    ) -> Result<Event> {
+        let request_id = generate_uuid();
+        let payload = serde_json::json!({
+            "request_id": request_id,
+            "reason": reason,
+            "scope": scope,
+            "ttl_seconds": ttl_seconds,
+        });
+        let event = self.build_event(task_id, "approval_requested", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn approval_grant(&self, task_id: &str, request_id: &str) -> Result<Event> {
+        let payload = serde_json::json!({
+            "request_id": request_id,
+        });
+        let event = self.build_event(task_id, "approval_granted", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn approval_deny(&self, task_id: &str, request_id: &str) -> Result<Event> {
+        let payload = serde_json::json!({
+            "request_id": request_id,
+        });
+        let event = self.build_event(task_id, "approval_denied", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    // ── M4: Run lifecycle commands ──
+
+    pub fn run_start(&self, task_id: &str, adapter_name: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::InProgress {
+            return Err(anyhow!(
+                "Can only start run for InProgress tasks, current: {:?}",
+                state.phase
+            ));
+        }
+        if state.active_run.is_some() {
+            return Err(anyhow!("Task already has an active run"));
+        }
+
+        let run_id = generate_uuid();
+        let lease_id = generate_uuid();
+
+        // Create worktree
+        let worktree_path =
+            crate::infrastructure::workspace::create_worktree(&self.project_root, task_id)?;
+
+        // Create lease
+        let lease_payload = serde_json::json!({
+            "lease_id": lease_id,
+            "run_id": run_id,
+            "resource_path": state.write_allow.iter().next().unwrap_or(&String::new()),
+            "action": "write",
+            "ttl_seconds": 3600,
+            "max_uses": 100,
+        });
+        let lease_event = self.build_event(task_id, "lease_created", lease_payload)?;
+        self.validate_and_append(&lease_event)?;
+
+        // Generate run manifest
+        let adapter: Box<dyn ExecutorAdapter> = match adapter_name {
+            "omp" => Box::new(OmpAdapter),
+            _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
+        };
+
+        let write_allow: Vec<String> = state.write_allow.iter().cloned().collect();
+        let write_deny: Vec<String> = state.write_deny.iter().cloned().collect();
+        let gates: Vec<String> = state.gates.iter().cloned().collect();
+
+        let manifest = adapter.prepare_run(
+            task_id,
+            &run_id,
+            &lease_id,
+            &worktree_path,
+            &write_allow,
+            &write_deny,
+            &gates,
+        )?;
+
+        // Write run manifest atomically
+        let task_dir = self.store.task_dir(task_id)?;
+        let manifest_path = task_dir.join("run-manifest.json");
+        let temp_path = task_dir.join("run-manifest.json.tmp");
+        std::fs::write(&temp_path, serde_json::to_string_pretty(&manifest)?)?;
+        std::fs::rename(&temp_path, &manifest_path)?;
+
+        // Record workspace_created event
+        let ws_payload = serde_json::json!({
+            "worktree_path": worktree_path.to_string_lossy(),
+            "branch": format!("omp-run-{}", task_id),
+        });
+        let ws_event = self.build_event(task_id, "workspace_created", ws_payload)?;
+        self.validate_and_append(&ws_event)?;
+
+        // Record run_started event
+        let payload = serde_json::json!({
+            "run_id": run_id,
+            "adapter": adapter_name,
+            "lease_id": lease_id,
+        });
+        let event = self.build_event(task_id, "run_started", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn run_ingest_omp(&self, task_id: &str, result_file: &Path) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.active_run.is_none() {
+            return Err(anyhow!("No active run for task '{}'", task_id));
+        }
+
+        let content = std::fs::read_to_string(result_file)?;
+        let result: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| anyhow!("Invalid result file: {}", e))?;
+
+        // Validate via OMP adapter
+        let omp = OmpAdapter;
+        omp.validate_output(&result)?;
+
+        // Validate touched files against write scope
+        let touched_files = result
+            .get("touched_files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        for file_entry in &touched_files {
+            let file_path = file_entry.as_str().unwrap_or("");
+            if file_path.is_empty() {
+                continue;
+            }
+            let normalized = normalizer
+                .normalize(file_path)
+                .map_err(|e| anyhow!("Invalid touched file '{}': {}", file_path, e))?;
+            let normalized_str = normalized.to_string_lossy().replace('\\', "/");
+            let in_scope = state.write_allow.iter().any(|scope| {
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
+            });
+            let in_deny = state.write_deny.iter().any(|scope| {
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
+            });
+            if !in_scope || in_deny {
+                let evidence_id = generate_uuid();
+                let payload = serde_json::json!({
+                    "evidence_id": evidence_id,
+                    "source": "omp",
+                    "rejection_reason": format!("File '{}' is out of write scope or in deny list", file_path),
+                    "touched_file": file_path,
+                });
+                let event = self.build_event(task_id, "evidence_rejected", payload)?;
+                self.validate_and_append(&event)?;
+                self.rebuild_task_view(task_id)?;
+                return Err(anyhow!(
+                    "Evidence rejected: file '{}' is out of write scope or in deny list",
+                    file_path
+                ));
+            }
+        }
+
+        // Write agent-output.json
+        let evidence_id = generate_uuid();
+        let output_path = self.store.task_dir(task_id)?.join("agent-output.json");
+        let temp_path = output_path.with_extension("json.tmp");
+        std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
+        std::fs::rename(&temp_path, &output_path)?;
+
+        // Record run_completed
+        let run_complete_payload = serde_json::json!({
+            "run_id": state.active_run.as_ref().unwrap().run_id,
+        });
+        let rc_event = self.build_event(task_id, "run_completed", run_complete_payload)?;
+        self.validate_and_append(&rc_event)?;
+
+        // Record evidence_accepted
+        let payload = serde_json::json!({
+            "evidence_id": evidence_id,
+            "source": "omp",
+            "result_file": result_file.to_string_lossy(),
+            "touched_files": touched_files,
+            "accepted_at": now_iso8601(),
+        });
+        let event = self.build_event(task_id, "evidence_accepted", payload)?;
+        self.validate_and_append(&event)?;
+        self.rebuild_task_view(task_id)?;
+        Ok(event)
+    }
+
+    pub fn adapter_capabilities(&self, adapter_name: &str) -> Result<serde_json::Value> {
+        let adapter: Box<dyn ExecutorAdapter> = match adapter_name {
+            "omp" => Box::new(OmpAdapter),
+            _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
+        };
+        Ok(adapter.capabilities())
+    }
+
+    // ── M4: Helpers ──
+
+    fn get_worktree_path(&self, task_id: &str) -> Result<PathBuf> {
+        let worktree_path = self
+            .project_root
+            .join(".trellis")
+            .join("tasks")
+            .join(task_id)
+            .join("worktree");
+        if !worktree_path.exists() {
+            return Err(anyhow!("Worktree not found for task '{}'", task_id));
+        }
+        Ok(worktree_path)
+    }
+
     pub fn ingest_manual_result(&self, task_id: &str, result_file: &Path) -> Result<Event> {
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress && state.phase != Phase::Review {
@@ -1017,8 +1436,7 @@ fn new_validator_if_available() -> Option<SchemaValidator> {
 // ── UUID generation (no external crate) ──
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn generate_uuid() -> String {
+pub fn generate_uuid() -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -1038,7 +1456,7 @@ fn generate_uuid() -> String {
 
 // ── ISO 8601 timestamp (no external crate) ──
 
-fn now_iso8601() -> String {
+pub fn now_iso8601() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
