@@ -1,0 +1,21 @@
+{
+  "adapter": "manual",
+  "assignment_id": "080c3a3c-080c-4fce-a000-ce080c3a0000",
+  "context_snapshot": null,
+  "exported_at": "2026-06-07T03:46:42Z",
+  "gates": [
+    "cargo_check",
+    "cargo_clippy"
+  ],
+  "objective": "Remove dead-code warnings in application/mod.rs (collect_files_recursive, UNVERIFIED hash)",
+  "read_scope": [
+    "src/application/mod.rs"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df01-clippy-docs",
+  "write_allow": [
+    "src/application/mod.rs"
+  ],
+  "write_deny": []
+}

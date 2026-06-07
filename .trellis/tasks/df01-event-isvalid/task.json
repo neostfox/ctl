@@ -1,0 +1,23 @@
+{
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "id": "df01-event-isvalid",
+  "is_archived": true,
+  "is_held": false,
+  "last_event_seq": 11,
+  "objective": "Remove dead #[allow(dead_code)] on Event::is_valid() and use it in store read validation",
+  "phase": "completed",
+  "read_scope": [
+    "src/domain/event.rs",
+    "src/infrastructure/store/mod.rs"
+  ],
+  "risk_triggers": [],
+  "schema": "control.task-view.v1",
+  "write_allow": [
+    "src/domain/event.rs",
+    "src/infrastructure/store/mod.rs"
+  ],
+  "write_deny": []
+}

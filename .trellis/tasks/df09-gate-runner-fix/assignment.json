@@ -1,0 +1,34 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "1a03f9dc-1a03-4118-a000-181a03f90000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:10:19Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Fix gate runner env allowlist for Windows MSVC linker",
+  "read_scope": [
+    "src/infrastructure/gates/mod.rs"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df09-gate-runner-fix",
+  "write_allow": [
+    "src/infrastructure/gates/mod.rs"
+  ],
+  "write_deny": []
+}

@@ -1,0 +1,34 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "efa4e218-efa4-411d-a000-1defa4e20000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:10:44Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Verify replay determinism: delete all task.json and rebuild from events.jsonl",
+  "read_scope": [
+    "src/infrastructure/store"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df10-replay-determinism",
+  "write_allow": [
+    "src/infrastructure/store/mod.rs"
+  ],
+  "write_deny": []
+}

@@ -1,0 +1,21 @@
+{
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "id": "df03-remove-dead-collect",
+  "is_archived": false,
+  "is_held": false,
+  "last_event_seq": 4,
+  "objective": "Remove dead collect_files_recursive function and its #[allow(dead_code)]",
+  "phase": "cancelled",
+  "read_scope": [
+    "src/application/mod.rs"
+  ],
+  "risk_triggers": [],
+  "schema": "control.task-view.v1",
+  "write_allow": [
+    "src/application/mod.rs"
+  ],
+  "write_deny": []
+}

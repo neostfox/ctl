@@ -1,0 +1,9 @@
+{
+  "command": "verify test",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Verified schema_rejects_unknown_event_type test passes. Schema now includes evidence_accepted and evidence_rejected event types with payload validation.",
+  "touched_files": [
+    "src/domain/audit_matrix.rs"
+  ]
+}

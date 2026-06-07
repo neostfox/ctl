@@ -146,6 +146,9 @@ enum TaskCommands {
         /// Stable task identifier
         #[arg(long)]
         id: String,
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Start a Ready task (transition to InProgress)
     Start {
@@ -366,9 +369,13 @@ fn cmd_task(command: &TaskCommands) -> Result<()> {
             let event = app.mark_ready(id)?;
             println!("Marked task '{}' ready at seq {}.", id, event.seq);
         }
-        TaskCommands::Status { id } => {
+        TaskCommands::Status { id, json } => {
             let state = app.get_status(id)?;
-            print_task_state(&state)?;
+            if *json {
+                print_task_state(&state)?;
+            } else {
+                print_task_human(&state)?;
+            }
         }
         TaskCommands::Start { id } => {
             let event = app.start_task(id)?;
@@ -532,6 +539,33 @@ fn print_task_state(state: &TaskState) -> Result<()> {
         "last_event_seq": state.last_seq,
     });
     println!("{}", serde_json::to_string_pretty(&view)?);
+    Ok(())
+}
+
+fn print_task_human(state: &TaskState) -> Result<()> {
+    println!("Task: {}", state.id);
+    println!("Phase: {:?}", state.phase);
+    if state.is_held {
+        println!("HELD");
+    }
+    if state.is_archived {
+        println!("ARCHIVED");
+    }
+    if let Some(ref obj) = state.objective {
+        println!("Objective: {}", obj);
+    }
+    if !state.gates.is_empty() {
+        println!("Gates:");
+        for gate in &state.gates {
+            let status = match state.gate_results.get(gate) {
+                Some(r) if r.passed => "PASS".to_string(),
+                Some(r) => format!("FAIL ({})", r.evidence.chars().take(60).collect::<String>()),
+                None => "pending".to_string(),
+            };
+            println!("  {}: {}", gate, status);
+        }
+    }
+    println!("Seq: {}", state.last_seq);
     Ok(())
 }
 

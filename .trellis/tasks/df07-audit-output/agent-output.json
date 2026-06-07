@@ -1,0 +1,9 @@
+{
+  "command": "verify audit",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Audit command outputs structured JSON with gate results, evidence counts, violations, and completion interlock verdict. Working correctly.",
+  "touched_files": [
+    "src/cli/mod.rs"
+  ]
+}

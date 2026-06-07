@@ -1,0 +1,22 @@
+{
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "id": "df03-path-normalize",
+  "is_archived": false,
+  "is_held": false,
+  "last_event_seq": 4,
+  "objective": "Wire PathNormalizer into task create to validate scope paths",
+  "phase": "cancelled",
+  "read_scope": [
+    "src/application/mod.rs",
+    "src/infrastructure/boundary/normalizer.rs"
+  ],
+  "risk_triggers": [],
+  "schema": "control.task-view.v1",
+  "write_allow": [
+    "src/application/mod.rs"
+  ],
+  "write_deny": []
+}

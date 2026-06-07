@@ -1,0 +1,34 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "759b5458-759b-40f4-a000-f4759b540000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:07:46Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Verify schema evidence_accepted/evidence_rejected payload schemas work with fixtures",
+  "read_scope": [
+    "src/domain"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df05-schema-evidence-types",
+  "write_allow": [
+    "src/domain/audit_matrix.rs"
+  ],
+  "write_deny": []
+}

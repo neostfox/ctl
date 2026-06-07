@@ -1,0 +1,10 @@
+{
+  "command": "verify context build",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Context build produces file hashes. Found: hash output uses backslash paths on Windows (minor display issue). The XOR hash is marked UNVERIFIED but functional for M3.",
+  "touched_files": [
+    "src/application/mod.rs",
+    "src/cli/mod.rs"
+  ]
+}

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct Event {
     pub schema: String,
     pub event_id: String,
@@ -16,8 +15,11 @@ pub struct Event {
 }
 
 impl Event {
-    #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
-        self.schema == "control.event-envelope.v1" && self.seq > 0
+        self.schema == "control.event-envelope.v1"
+            && self.seq > 0
+            && !self.event_id.is_empty()
+            && !self.task_id.is_empty()
+            && !self.event_type.is_empty()
     }
 }

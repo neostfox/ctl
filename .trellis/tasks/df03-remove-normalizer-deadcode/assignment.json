@@ -1,0 +1,34 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "79189f5c-7918-409d-a000-9d79189f0000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:01:33Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Remove #[allow(dead_code)] from PathNormalizer methods that are actually used",
+  "read_scope": [
+    "src/infrastructure/boundary/normalizer.rs"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df03-remove-normalizer-deadcode",
+  "write_allow": [
+    "src/infrastructure/boundary/normalizer.rs"
+  ],
+  "write_deny": []
+}

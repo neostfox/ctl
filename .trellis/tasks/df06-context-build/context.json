@@ -1,0 +1,19 @@
+{
+  "built_at": "2026-06-07T04:08:49Z",
+  "file_count": 2,
+  "files": [
+    {
+      "hash": "787bbed71d7cea5c21e22cd449317dae",
+      "path": "src\\application\\mod.rs"
+    },
+    {
+      "hash": "51684f1d0afbb8d5536d6a515b2d1e21",
+      "path": "src\\cli\\mod.rs"
+    }
+  ],
+  "read_scope": [
+    "src/application/mod.rs",
+    "src/cli/mod.rs"
+  ],
+  "task_id": "df06-context-build"
+}

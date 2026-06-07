@@ -170,7 +170,9 @@ impl ControlApp {
         }
         // Check for any boundary violations recorded since start
         let events = self.store.read_for_task(task_id)?;
-        let has_violations = events.iter().any(|e| e.event_type == "boundary_violation_recorded");
+        let has_violations = events
+            .iter()
+            .any(|e| e.event_type == "boundary_violation_recorded");
         if has_violations {
             return Err(anyhow!("Cannot submit: task has boundary violations"));
         }
@@ -223,15 +225,36 @@ impl ControlApp {
             ));
         }
 
-        // Check for rejected evidence
+        // Check for rejected evidence that hasn't been superseded by accepted evidence.
+        // A rejection for a file is resolved if a later evidence_accepted covers it.
         let events = self.store.read_for_task(task_id)?;
-        let rejected_evidence = events.iter()
-            .filter(|e| e.event_type == "evidence_rejected")
-            .count();
-        if rejected_evidence > 0 {
+        let mut rejected_files: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for e in &events {
+            match e.event_type.as_str() {
+                "evidence_rejected" => {
+                    if let Some(f) = e.payload.get("touched_file").and_then(|v| v.as_str()) {
+                        if !f.is_empty() {
+                            rejected_files.insert(f.to_string());
+                        }
+                    }
+                }
+                "evidence_accepted" => {
+                    if let Some(files) = e.payload.get("touched_files").and_then(|v| v.as_array()) {
+                        for f in files {
+                            if let Some(s) = f.as_str() {
+                                rejected_files.remove(s);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !rejected_files.is_empty() {
             return Err(anyhow!(
-                "Completion interlock: {} evidence items were rejected",
-                rejected_evidence
+                "Completion interlock: rejected evidence unresolved for: {:?}",
+                rejected_files
             ));
         }
 
@@ -359,13 +382,23 @@ impl ControlApp {
             "assignment_id": generate_uuid(),
             "task_id": task_id,
             "adapter": "manual",
+            "contract": {
+                "type": "manual",
+                "input": "assignment.json",
+                "output": "agent-output.json",
+            },
             "objective": objective,
             "read_scope": read_scope,
             "write_allow": write_allow,
             "write_deny": write_deny,
             "risk_triggers": risk_triggers,
             "gates": gates,
-            "context_snapshot": context_snapshot,
+            "context_hashes": context_snapshot,
+            "required_capabilities": ["file_read", "file_write"],
+            "acceptance": {
+                "all_gates_must_pass": true,
+                "scope_enforcement": true,
+            },
             "exported_at": now_iso8601(),
         });
 
@@ -609,25 +642,21 @@ impl ControlApp {
             .count();
 
         // Completion interlock check
-        let all_gates_pass = state.gates.iter().all(|g| {
-            state
-                .gate_results
-                .get(g)
-                .map(|r| r.passed)
-                .unwrap_or(false)
-        });
-        let interlock_verdict =
-            if state.phase == Phase::Review
-                && !state.is_held
-                && all_gates_pass
-                && evidence_rejected_count == 0
-            {
-                "allow"
-            } else if state.phase == Phase::Completed {
-                "completed"
-            } else {
-                "blocked"
-            };
+        let all_gates_pass = state
+            .gates
+            .iter()
+            .all(|g| state.gate_results.get(g).map(|r| r.passed).unwrap_or(false));
+        let interlock_verdict = if state.phase == Phase::Review
+            && !state.is_held
+            && all_gates_pass
+            && evidence_rejected_count == 0
+        {
+            "allow"
+        } else if state.phase == Phase::Completed {
+            "completed"
+        } else {
+            "blocked"
+        };
 
         let report = serde_json::json!({
             "schema": "control.audit-report.v1",
@@ -772,23 +801,25 @@ impl ControlApp {
     pub fn ingest_manual_result(&self, task_id: &str, result_file: &Path) -> Result<Event> {
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress && state.phase != Phase::Review {
-            return Err(anyhow!("Can only ingest results for InProgress or Review tasks, current: {:?}", state.phase));
+            return Err(anyhow!(
+                "Can only ingest results for InProgress or Review tasks, current: {:?}",
+                state.phase
+            ));
         }
 
         // Read and parse the result file
         let content = std::fs::read_to_string(result_file)?;
-        let result: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| anyhow!("Invalid result file: {}", e))?;
+        let result: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| anyhow!("Invalid result file: {}", e))?;
 
         // Validate required fields
-        let source = result.get("source")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("");
         if source != "manual" {
             return Err(anyhow!("Result file must have source=\"manual\""));
         }
 
-        let touched_files = result.get("touched_files")
+        let touched_files = result
+            .get("touched_files")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -799,15 +830,22 @@ impl ControlApp {
         );
         for file_entry in &touched_files {
             let file_path = file_entry.as_str().unwrap_or("");
-            if file_path.is_empty() { continue; }
-            let normalized = normalizer.normalize(file_path)
+            if file_path.is_empty() {
+                continue;
+            }
+            let normalized = normalizer
+                .normalize(file_path)
                 .map_err(|e| anyhow!("Invalid touched file '{}': {}", file_path, e))?;
-            let normalized_str = normalized.to_string_lossy();
+            let normalized_str = normalized.to_string_lossy().replace('\\', "/");
             let in_scope = state.write_allow.iter().any(|scope| {
-                normalized_str.starts_with(scope.as_str()) || normalized_str == scope.as_str()
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
             });
             let in_deny = state.write_deny.iter().any(|scope| {
-                normalized_str.starts_with(scope.as_str()) || normalized_str == scope.as_str()
+                let scope_norm = scope.replace('\\', "/");
+                normalized_str.starts_with(scope_norm.as_str())
+                    || normalized_str == scope_norm.as_str()
             });
             if !in_scope || in_deny {
                 // Reject evidence: file out of scope
@@ -821,7 +859,10 @@ impl ControlApp {
                 let event = self.build_event(task_id, "evidence_rejected", payload)?;
                 self.validate_and_append(&event)?;
                 self.rebuild_task_view(task_id)?;
-                return Err(anyhow!("Evidence rejected: file '{}' is out of write scope or in deny list", file_path));
+                return Err(anyhow!(
+                    "Evidence rejected: file '{}' is out of write scope or in deny list",
+                    file_path
+                ));
             }
         }
 
@@ -844,7 +885,7 @@ impl ControlApp {
         self.rebuild_task_view(task_id)?;
         Ok(event)
     }
- }
+}
 
 fn validate_task_definition(
     objective: &str,

@@ -337,13 +337,17 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
         }
         "evidence_accepted" => {
             // Validate required fields
-            let evidence_id = event.payload.get("evidence_id")
+            let evidence_id = event
+                .payload
+                .get("evidence_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if evidence_id.is_empty() {
                 return Err("evidence_accepted: evidence_id is required".into());
             }
-            let source = event.payload.get("source")
+            let source = event
+                .payload
+                .get("source")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if source.is_empty() {
@@ -355,7 +359,9 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
         }
         "evidence_rejected" => {
-            let evidence_id = event.payload.get("evidence_id")
+            let evidence_id = event
+                .payload
+                .get("evidence_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if evidence_id.is_empty() {

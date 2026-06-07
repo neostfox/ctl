@@ -1,0 +1,21 @@
+{
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "id": "df05-schema-evidence-types",
+  "is_archived": true,
+  "is_held": false,
+  "last_event_seq": 9,
+  "objective": "Verify schema evidence_accepted/evidence_rejected payload schemas work with fixtures",
+  "phase": "completed",
+  "read_scope": [
+    "src/domain"
+  ],
+  "risk_triggers": [],
+  "schema": "control.task-view.v1",
+  "write_allow": [
+    "src/domain/audit_matrix.rs"
+  ],
+  "write_deny": []
+}

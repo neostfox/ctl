@@ -2,14 +2,12 @@ use anyhow::{anyhow, Result};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-#[allow(dead_code)]
 pub struct PathNormalizer {
     root: PathBuf,
     protected_paths: Vec<String>,
 }
 
 impl PathNormalizer {
-    #[allow(dead_code)]
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -29,7 +27,6 @@ impl PathNormalizer {
     ///
     /// Rejects: absolute paths, `..`, UNC (`\\server\share`), drive prefixes,
     /// symlinks, junctions, root escapes, and protected paths.
-    #[allow(dead_code)]
     pub fn normalize(&self, path_str: &str) -> Result<PathBuf> {
         // Reject Windows UNC paths explicitly before component parsing
         if path_str.starts_with("\\\\") || path_str.starts_with("//") {
@@ -106,7 +103,6 @@ impl PathNormalizer {
 
     /// Check whether a normalized path is under a protected root.
     /// Uses separator-boundary matching so ".git" does not match "gitignored".
-    #[allow(dead_code)]
     fn is_protected(&self, path: &Path) -> bool {
         let s = path.to_string_lossy().to_lowercase();
         for p in &self.protected_paths {

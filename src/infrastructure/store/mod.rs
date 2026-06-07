@@ -97,6 +97,15 @@ impl FileEventStore {
                     task_id
                 ));
             }
+            if !event.is_valid() {
+                return Err(anyhow!(
+                    "{} line {}: event failed validation: schema={}, seq={}",
+                    events_path.display(),
+                    i + 1,
+                    event.schema,
+                    event.seq
+                ));
+            }
             events.push(event);
         }
         Ok(events)

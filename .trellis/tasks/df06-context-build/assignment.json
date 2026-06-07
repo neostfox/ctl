@@ -1,0 +1,36 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "24abbb48-24ab-40fc-a000-fc24abbb0000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:08:19Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Wire context build to produce file hashes in read_scope",
+  "read_scope": [
+    "src/application/mod.rs",
+    "src/cli/mod.rs"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df06-context-build",
+  "write_allow": [
+    "src/application/mod.rs",
+    "src/cli/mod.rs"
+  ],
+  "write_deny": []
+}

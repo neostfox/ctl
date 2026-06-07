@@ -1,0 +1,9 @@
+{
+  "command": "edit application/mod.rs export_assignment",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Added contract, context_hashes, required_capabilities, and acceptance fields to assignment export. Replaced context_snapshot with context_hashes per ROADMAP spec.",
+  "touched_files": [
+    "src/application/mod.rs"
+  ]
+}

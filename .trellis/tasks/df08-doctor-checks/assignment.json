@@ -1,0 +1,34 @@
+{
+  "acceptance": {
+    "all_gates_must_pass": true,
+    "scope_enforcement": true
+  },
+  "adapter": "manual",
+  "assignment_id": "2cdd1db0-2cdd-4111-a000-112cdd1d0000",
+  "context_hashes": null,
+  "contract": {
+    "input": "assignment.json",
+    "output": "agent-output.json",
+    "type": "manual"
+  },
+  "exported_at": "2026-06-07T04:09:49Z",
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "objective": "Verify doctor command checks M3 ledger health",
+  "read_scope": [
+    "src/application/mod.rs"
+  ],
+  "required_capabilities": [
+    "file_read",
+    "file_write"
+  ],
+  "risk_triggers": [],
+  "schema": "control.assignment.v1",
+  "task_id": "df08-doctor-checks",
+  "write_allow": [
+    "src/application/mod.rs"
+  ],
+  "write_deny": []
+}

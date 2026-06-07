@@ -1,0 +1,9 @@
+{
+  "command": "edit cli/mod.rs",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Added --json flag to task status. Default is now human-readable. --json outputs machine-readable JSON for scripts/adapters.",
+  "touched_files": [
+    "src/cli/mod.rs"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "command": "verify doctor",
+  "exit_code": 0,
+  "source": "manual",
+  "summary": "Doctor command checks ledger health, lists all tasks with phase and seq. Working correctly.",
+  "touched_files": [
+    "src/application/mod.rs"
+  ]
+}

@@ -125,6 +125,20 @@ fn build_allowed_env() -> HashMap<String, String> {
             || key == "HOME"
             || key == "USERPROFILE"
             || key == "RUSTUP_HOME"
+            // Windows linker and SDK vars (dogfood finding: link.exe needs these)
+            || key == "LIB"
+            || key == "INCLUDE"
+            || key == "LIBPATH"
+            || key == "SystemRoot"
+            || key == "TEMP"
+            || key == "TMP"
+            || key == "OS"
+            || key.starts_with("PROCESSOR_")
+            || key.starts_with("VS")
+            || key.starts_with("VCINSTALLDIR")
+            || key.starts_with("WindowsSdkDir")
+            || key.starts_with("WindowsSDKLibVersion")
+            || key.starts_with("WindowsSDKVersion")
         {
             env.insert(key, value);
         }

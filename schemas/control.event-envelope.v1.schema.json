@@ -53,7 +53,9 @@
         "hold_entered",
         "hold_exited",
         "boundary_violation_recorded",
-        "gate_checked"
+        "gate_checked",
+        "evidence_accepted",
+        "evidence_rejected"
       ]
     },
     "payload": {
@@ -404,6 +406,83 @@
               }
             },
             "required": ["violation"],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "evidence_accepted" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["evidence_id", "source", "touched_files"],
+            "properties": {
+              "evidence_id": {
+                "description": "Unique evidence identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "description": "Evidence source adapter.",
+                "type": "string",
+                "minLength": 1
+              },
+              "touched_files": {
+                "description": "Files reported as touched.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "result_file": {
+                "description": "Path to the submitted result file.",
+                "type": "string"
+              },
+              "accepted_at": {
+                "description": "ISO 8601 timestamp of acceptance.",
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "evidence_rejected" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["evidence_id"],
+            "properties": {
+              "evidence_id": {
+                "description": "Unique evidence identifier.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Evidence source adapter.",
+                "type": "string"
+              },
+              "rejection_reason": {
+                "description": "Why the evidence was rejected.",
+                "type": "string"
+              },
+              "touched_file": {
+                "description": "The offending file path.",
+                "type": "string"
+              }
+            },
             "additionalProperties": false
           }
         }

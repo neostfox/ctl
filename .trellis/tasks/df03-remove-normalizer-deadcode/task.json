@@ -1,0 +1,21 @@
+{
+  "gates": [
+    "cargo_check",
+    "cargo_test"
+  ],
+  "id": "df03-remove-normalizer-deadcode",
+  "is_archived": true,
+  "is_held": false,
+  "last_event_seq": 9,
+  "objective": "Remove #[allow(dead_code)] from PathNormalizer methods that are actually used",
+  "phase": "completed",
+  "read_scope": [
+    "src/infrastructure/boundary/normalizer.rs"
+  ],
+  "risk_triggers": [],
+  "schema": "control.task-view.v1",
+  "write_allow": [
+    "src/infrastructure/boundary/normalizer.rs"
+  ],
+  "write_deny": []
+}

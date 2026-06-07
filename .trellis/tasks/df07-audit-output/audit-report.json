@@ -1,0 +1,39 @@
+{
+  "all_gates_pass": false,
+  "completion_interlock": {
+    "all_gates_pass": false,
+    "no_hold": true,
+    "no_rejected_evidence": true,
+    "phase_is_review": false,
+    "verdict": "blocked"
+  },
+  "evidence_accepted": 0,
+  "evidence_rejected": 0,
+  "gates": [
+    {
+      "checked_at": "never",
+      "evidence": "no result",
+      "gate_id": "cargo_check",
+      "passed": false
+    },
+    {
+      "checked_at": "never",
+      "evidence": "no result",
+      "gate_id": "cargo_test",
+      "passed": false
+    }
+  ],
+  "is_archived": false,
+  "is_held": false,
+  "last_seq": 3,
+  "objective": "Verify audit command outputs gate results and evidence summary",
+  "phase": "inprogress",
+  "schema": "control.audit-report.v1",
+  "task_id": "df07-audit-output",
+  "total_events": 3,
+  "violations": 0,
+  "write_deny": [],
+  "write_scope": [
+    "src/cli/mod.rs"
+  ]
+}
