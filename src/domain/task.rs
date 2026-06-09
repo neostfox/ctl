@@ -406,6 +406,12 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
         }
         "workspace_cleaned" => {
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "workspace_cleaned only valid in InProgress, current: {:?}",
+                    state.phase
+                ));
+            }
             let worktree_path = event
                 .payload
                 .get("worktree_path")
@@ -416,6 +422,12 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
         }
         "workspace_diff_computed" => {
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "workspace_diff_computed only valid in InProgress, current: {:?}",
+                    state.phase
+                ));
+            }
             // Diff computed is informational; no state mutation.
             // Validate required arrays exist.
             for field in [
@@ -438,6 +450,12 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
         }
         "workspace_applied" => {
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "workspace_applied only valid in InProgress, current: {:?}",
+                    state.phase
+                ));
+            }
             let files = event
                 .payload
                 .get("files_applied")

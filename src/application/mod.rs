@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::adapters::omp::OmpAdapter;
 use crate::adapters::ExecutorAdapter;
 use crate::domain::event::Event;
+use crate::domain::lease::LeaseStatus;
 use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::FileEventStore;
@@ -901,6 +902,9 @@ impl ControlApp {
             ));
         }
 
+        // AUDIT-001: Verify active lease before applying writes
+        self.check_lease_valid(&state)?;
+
         let worktree_path = self.get_worktree_path(task_id)?;
         let diff_files =
             crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
@@ -1039,6 +1043,10 @@ impl ControlApp {
             return Err(anyhow!("Task already has an active run"));
         }
 
+        // AC4: Cross-task lease write overlap check (ADAPTER-005)
+        let write_allow: Vec<String> = state.write_allow.iter().cloned().collect();
+        self.check_cross_task_lease_overlap(task_id, &write_allow)?;
+
         let run_id = generate_uuid();
         let lease_id = generate_uuid();
 
@@ -1064,7 +1072,6 @@ impl ControlApp {
             _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
         };
 
-        let write_allow: Vec<String> = state.write_allow.iter().cloned().collect();
         let write_deny: Vec<String> = state.write_deny.iter().cloned().collect();
         let gates: Vec<String> = state.gates.iter().cloned().collect();
 
@@ -1215,6 +1222,71 @@ impl ControlApp {
             return Err(anyhow!("Worktree not found for task '{}'", task_id));
         }
         Ok(worktree_path)
+    }
+
+    /// AC4: Check that no other task holds an active lease with overlapping write scope.
+    /// ADAPTER-005: M6 前禁止多个 agent 并发写入。
+    fn check_cross_task_lease_overlap(
+        &self,
+        current_task_id: &str,
+        write_allow: &[String],
+    ) -> Result<()> {
+        let all_task_ids = self.store.task_ids()?;
+        for other_task_id in &all_task_ids {
+            if other_task_id == current_task_id {
+                continue;
+            }
+            let other_state = self.replay_task(other_task_id)?;
+            for lease in other_state.leases.values() {
+                if lease.status != LeaseStatus::Active {
+                    continue;
+                }
+                // Check if the lease's resource_path overlaps with our write_allow
+                let lease_resource = lease.resource_path.replace('\\', "/");
+                let has_overlap = write_allow.iter().any(|scope| {
+                    let scope_norm = scope.replace('\\', "/");
+                    lease_resource.starts_with(scope_norm.as_str())
+                        || scope_norm.starts_with(lease_resource.as_str())
+                });
+                if has_overlap {
+                    return Err(anyhow!(
+                        "Cross-task lease conflict: task '{}' holds active lease '{}' on '{}' which overlaps with this task's write scope. Rule: ADAPTER-005",
+                        other_task_id, lease.lease_id, lease.resource_path
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// AUDIT-001: Verify lease is active and not expired before write operations.
+    fn check_lease_valid(&self, state: &TaskState) -> Result<()> {
+        let run_info = state
+            .active_run
+            .as_ref()
+            .ok_or_else(|| anyhow!("No active run — cannot apply without an active lease"))?;
+        let lease = state
+            .leases
+            .get(&run_info.lease_id)
+            .ok_or_else(|| anyhow!("Lease '{}' not found", run_info.lease_id))?;
+        if lease.status != LeaseStatus::Active {
+            return Err(anyhow!(
+                "Lease '{}' is not active (status: {:?}). Rule: AUDIT-001",
+                lease.lease_id,
+                lease.status
+            ));
+        }
+        if lease.remaining_uses == 0 {
+            return Err(anyhow!(
+                "Lease '{}' has no remaining uses. Rule: AUDIT-001",
+                lease.lease_id
+            ));
+        }
+        // TTL check: since reducer has no time access, we check at application layer.
+        // We store ttl_seconds and created_at_seq. We can't compare wall clock from seq,
+        // so we rely on a separate lease_expired event being emitted by a timer/watchdog.
+        // For now, max_uses enforcement is the primary TTL proxy.
+        Ok(())
     }
 
     pub fn ingest_manual_result(&self, task_id: &str, result_file: &Path) -> Result<Event> {
