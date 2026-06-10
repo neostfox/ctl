@@ -17,6 +17,9 @@ use crate::infrastructure::schema_validator::SchemaValidator;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Validate and show what would happen, but do not persist changes
+    #[arg(long, global = true)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -385,40 +388,45 @@ enum AdapterCommands {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    let dry_run = cli.dry_run;
     match &cli.command {
-        Commands::Init => cmd_init(),
-        Commands::Task { command } => cmd_task(command),
+        Commands::Init => cmd_init(dry_run),
+        Commands::Task { command } => cmd_task(command, dry_run),
         Commands::Replay { task } => cmd_replay(task.as_deref()),
         Commands::Reconcile => cmd_reconcile(),
         Commands::Validate => cmd_validate(),
         Commands::Doctor => cmd_doctor(),
         Commands::Schema { command } => cmd_schema(command),
         Commands::Boundary { command } => cmd_boundary(command),
-        Commands::Gate { command } => cmd_gate(command),
-        Commands::Context { command } => cmd_context(command),
-        Commands::Assignment { command } => cmd_assignment(command),
+        Commands::Gate { command } => cmd_gate(command, dry_run),
+        Commands::Context { command } => cmd_context(command, dry_run),
+        Commands::Assignment { command } => cmd_assignment(command, dry_run),
         Commands::Audit { id } => cmd_audit(id),
         Commands::Report => cmd_report(),
-        Commands::Run { command } => cmd_run(command),
-        Commands::Workspace { command } => cmd_workspace(command),
-        Commands::Approval { command } => cmd_approval(command),
+        Commands::Run { command } => cmd_run(command, dry_run),
+        Commands::Workspace { command } => cmd_workspace(command, dry_run),
+        Commands::Approval { command } => cmd_approval(command, dry_run),
         Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
     }
 }
 
-fn app_open() -> Result<ControlApp> {
-    ControlApp::open(&std::env::current_dir()?)
+fn app_open(dry_run: bool) -> Result<ControlApp> {
+    ControlApp::open(&std::env::current_dir()?, dry_run)
 }
 
-fn cmd_init() -> Result<()> {
+fn cmd_init(dry_run: bool) -> Result<()> {
+    if dry_run {
+        println!("[dry-run] Would initialize local task ledger");
+        return Ok(());
+    }
     ControlApp::init(&std::env::current_dir()?)?;
     println!("Initialized local task ledger.");
     Ok(())
 }
 
-fn cmd_task(command: &TaskCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         TaskCommands::Create {
             id,
@@ -513,7 +521,7 @@ fn optional_slice(values: &[String]) -> Option<&[String]> {
 }
 
 fn cmd_replay(task_id: Option<&str>) -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     match task_id {
         Some(id) => {
             app.replay(id)?;
@@ -528,14 +536,14 @@ fn cmd_replay(task_id: Option<&str>) -> Result<()> {
 }
 
 fn cmd_reconcile() -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     let rebuilt = app.reconcile()?;
     println!("Rebuilt {} task projection(s).", rebuilt.len());
     Ok(())
 }
 
 fn cmd_validate() -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     let issues = app.validate_store()?;
     if issues.is_empty() {
         println!("Task ledger validation passed.");
@@ -551,7 +559,7 @@ fn cmd_validate() -> Result<()> {
 }
 
 fn cmd_doctor() -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     let results = app.doctor()?;
     let has_error = results
         .iter()
@@ -566,14 +574,14 @@ fn cmd_doctor() -> Result<()> {
 }
 
 fn cmd_audit(id: &str) -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     let report = app.generate_audit_report(id)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
 fn cmd_report() -> Result<()> {
-    let app = app_open()?;
+    let app = app_open(false)?;
     let reports = app.generate_status_report()?;
     if reports.is_empty() {
         println!("No tasks found.");
@@ -599,8 +607,8 @@ fn cmd_report() -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(command: &RunCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         RunCommands::Ingest {
             id,
@@ -634,8 +642,8 @@ fn cmd_run(command: &RunCommands) -> Result<()> {
     Ok(())
 }
 
-fn cmd_workspace(command: &WorkspaceCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_workspace(command: &WorkspaceCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         WorkspaceCommands::Create { id } => {
             let event = app.workspace_create(id)?;
@@ -657,8 +665,8 @@ fn cmd_workspace(command: &WorkspaceCommands) -> Result<()> {
     Ok(())
 }
 
-fn cmd_approval(command: &ApprovalCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_approval(command: &ApprovalCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         ApprovalCommands::Request { id, reason, ttl } => {
             let scope = serde_json::json!({});
@@ -689,7 +697,7 @@ fn cmd_approval(command: &ApprovalCommands) -> Result<()> {
 fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
     match command {
         AdapterCommands::Capabilities { adapter } => {
-            let app = app_open()?;
+            let app = app_open(false)?;
             let caps = app.adapter_capabilities(adapter)?;
             println!("{}", serde_json::to_string_pretty(&caps)?);
         }
@@ -780,7 +788,7 @@ fn cmd_boundary(command: &BoundaryCommands) -> Result<()> {
         }
         BoundaryCommands::Explain { path } => boundary_explain(path),
         BoundaryCommands::CheckById { id } => {
-            let app = app_open()?;
+            let app = app_open(false)?;
             let violations = app.boundary_check_and_record(id)?;
             if violations.is_empty() {
                 println!("No boundary violations detected for task '{}'.", id);
@@ -800,8 +808,8 @@ fn cmd_boundary(command: &BoundaryCommands) -> Result<()> {
     }
 }
 
-fn cmd_gate(command: &GateCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_gate(command: &GateCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         GateCommands::Run { id, gate } => {
             let event = app.run_gate_checked(id, gate)?;
@@ -841,8 +849,8 @@ fn cmd_gate(command: &GateCommands) -> Result<()> {
     Ok(())
 }
 
-fn cmd_context(command: &ContextCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_context(command: &ContextCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         ContextCommands::Build { id } => {
             let context = app.build_context(id)?;
@@ -859,8 +867,8 @@ fn cmd_context(command: &ContextCommands) -> Result<()> {
     Ok(())
 }
 
-fn cmd_assignment(command: &AssignmentCommands) -> Result<()> {
-    let app = app_open()?;
+fn cmd_assignment(command: &AssignmentCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
     match command {
         AssignmentCommands::Export { id } => {
             let assignment = app.export_assignment(id)?;
@@ -991,7 +999,7 @@ fn check_dependencies() -> Result<()> {
         }
     }
     found_deps.sort();
-    let mut expected: Vec<&str> = vec!["anyhow", "clap", "serde", "serde_json"];
+    let mut expected: Vec<&str> = vec!["anyhow", "clap", "serde", "serde_json", "sha2"];
     expected.sort();
     if found_deps != expected {
         return Err(anyhow::anyhow!(

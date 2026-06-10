@@ -26,7 +26,8 @@ impl PathNormalizer {
     /// Normalize and validate a path against boundary rules.
     ///
     /// Rejects: absolute paths, `..`, UNC (`\\server\share`), drive prefixes,
-    /// symlinks, junctions, root escapes, and protected paths.
+    /// symlinks, junctions, and root escapes. Does NOT check protected paths
+    /// (use `normalize_write` for write-scope validation).
     pub fn normalize(&self, path_str: &str) -> Result<PathBuf> {
         // Reject Windows UNC paths explicitly before component parsing
         if path_str.starts_with("\\\\") || path_str.starts_with("//") {
@@ -53,10 +54,6 @@ impl PathNormalizer {
 
         if normalized.as_os_str().is_empty() {
             return Err(anyhow!("Empty path after normalization"));
-        }
-
-        if self.is_protected(&normalized) {
-            return Err(anyhow!("Path is protected: {}", normalized.display()));
         }
 
         // Walk ancestry checking for symlinks/junctions
@@ -98,6 +95,17 @@ impl PathNormalizer {
             return Err(anyhow!("Path escapes root directory: {}", path_str));
         }
 
+        Ok(normalized)
+    }
+
+    /// Normalize and validate a path for write operations.
+    ///
+    /// Performs all `normalize()` checks plus protected-path enforcement.
+    pub fn normalize_write(&self, path_str: &str) -> Result<PathBuf> {
+        let normalized = self.normalize(path_str)?;
+        if self.is_protected(&normalized) {
+            return Err(anyhow!("Write path is protected: {}", normalized.display()));
+        }
         Ok(normalized)
     }
 
@@ -199,56 +207,76 @@ mod tests {
         assert!(norm.normalize("src\\main.rs").is_ok());
         cleanup(&dir);
     }
-    // ---- Protected path tests ----
+    // ---- Protected path tests (write paths) ----
     #[test]
     fn reject_protected_git_root() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize(".git").is_err());
+        assert!(norm.normalize_write(".git").is_err());
     }
     #[test]
     fn reject_protected_git_nested() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize(".git/config").is_err());
+        assert!(norm.normalize_write(".git/config").is_err());
     }
     #[test]
     fn reject_protected_trellis() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize(".trellis/control/events.jsonl").is_err());
+        assert!(norm
+            .normalize_write(".trellis/control/events.jsonl")
+            .is_err());
     }
     #[test]
     fn reject_canonical_task_events_path() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
         assert!(norm
-            .normalize(".trellis/tasks/example-task/events.jsonl")
+            .normalize_write(".trellis/tasks/example-task/events.jsonl")
             .is_err());
     }
     #[test]
     fn reject_protected_control_events() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize(".control/events.jsonl").is_err());
+        assert!(norm.normalize_write(".control/events.jsonl").is_err());
     }
     #[test]
     fn reject_protected_schemas() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize("schemas/foo.json").is_err());
+        assert!(norm.normalize_write("schemas/foo.json").is_err());
     }
     #[test]
     fn reject_protected_cargo_toml() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize("Cargo.toml").is_err());
+        assert!(norm.normalize_write("Cargo.toml").is_err());
     }
     #[test]
     fn reject_protected_cargo_lock() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm.normalize("Cargo.lock").is_err());
+        assert!(norm.normalize_write("Cargo.lock").is_err());
+    }
+    #[test]
+    fn accept_protected_paths_for_read() {
+        let dir = unique_dir();
+        let norm = PathNormalizer::new(dir.clone());
+        assert!(
+            norm.normalize("schemas/foo.json").is_ok(),
+            "schemas should be readable"
+        );
+        assert!(
+            norm.normalize(".git/config").is_ok(),
+            ".git should be readable"
+        );
+        assert!(
+            norm.normalize("Cargo.toml").is_ok(),
+            "Cargo.toml should be readable"
+        );
+        cleanup(&dir);
     }
     #[test]
     fn accept_non_protected_prefix() {

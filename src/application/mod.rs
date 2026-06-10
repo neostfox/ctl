@@ -16,6 +16,7 @@ pub struct ControlApp {
     project_root: PathBuf,
     store: FileEventStore,
     validator: Option<SchemaValidator>,
+    dry_run: bool,
 }
 
 pub struct CreateTaskInput<'a> {
@@ -45,10 +46,11 @@ impl ControlApp {
             project_root,
             store,
             validator,
+            dry_run: false,
         })
     }
 
-    pub fn open(project_root: &Path) -> Result<Self> {
+    pub fn open(project_root: &Path, dry_run: bool) -> Result<Self> {
         let store = FileEventStore::open(project_root)?;
         let validator = new_validator_if_available();
         let project_root = std::fs::canonicalize(project_root)?;
@@ -56,6 +58,7 @@ impl ControlApp {
             project_root,
             store,
             validator,
+            dry_run,
         })
     }
 
@@ -67,9 +70,9 @@ impl ControlApp {
             return Err(anyhow!("Task '{}' already exists", id));
         }
 
-        let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope)?;
-        let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow)?;
-        let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny)?;
+        let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope, false)?;
+        let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow, true)?;
+        let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny, true)?;
         let gates = validate_gate_templates(input.gates)?;
         validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
 
@@ -83,7 +86,9 @@ impl ControlApp {
         });
         let event = self.build_event(id, "task_created", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(id)?;
+        }
         Ok(event)
     }
 
@@ -102,15 +107,15 @@ impl ControlApp {
             .or_else(|| state.objective.clone())
             .unwrap_or_default();
         let read_scope = match input.read_scope {
-            Some(paths) => self.normalize_boundary_paths("read_scope", paths)?,
+            Some(paths) => self.normalize_boundary_paths("read_scope", paths, false)?,
             None => state.read_scope.iter().cloned().collect(),
         };
         let write_allow = match input.write_allow {
-            Some(paths) => self.normalize_boundary_paths("write_allow", paths)?,
+            Some(paths) => self.normalize_boundary_paths("write_allow", paths, true)?,
             None => state.write_allow.iter().cloned().collect(),
         };
         let write_deny = match input.write_deny {
-            Some(paths) => self.normalize_boundary_paths("write_deny", paths)?,
+            Some(paths) => self.normalize_boundary_paths("write_deny", paths, true)?,
             None => state.write_deny.iter().cloned().collect(),
         };
         let risk_triggers = input
@@ -133,28 +138,36 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "task_revised", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
     pub fn mark_ready(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_marked_ready", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
     pub fn start_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_started", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
     pub fn cancel_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_cancelled", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -182,14 +195,18 @@ impl ControlApp {
         let event =
             self.build_event(task_id, "task_submitted_for_review", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
     pub fn reopen_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_reopened", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -263,14 +280,18 @@ impl ControlApp {
 
         let event = self.build_event(task_id, "task_completed", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
     pub fn archive_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_archived", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -289,7 +310,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "gate_checked", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -335,7 +358,7 @@ impl ControlApp {
                 let hash = hash_file(&full_path)?;
                 let rel = full_path.strip_prefix(root).unwrap_or(&full_path);
                 file_hashes.push(serde_json::json!({
-                    "path": rel.to_string_lossy(),
+                    "path": path_to_payload_string(rel),
                     "hash": hash,
                 }));
             }
@@ -351,9 +374,11 @@ impl ControlApp {
 
         let task_dir = self.store.task_dir(task_id)?;
         let context_path = task_dir.join("context.json");
-        let temp_path = task_dir.join("context.json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&context)?)?;
-        std::fs::rename(&temp_path, &context_path)?;
+        if !self.dry_run {
+            let temp_path = task_dir.join("context.json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&context)?)?;
+            std::fs::rename(&temp_path, &context_path)?;
+        }
 
         Ok(context)
     }
@@ -407,10 +432,18 @@ impl ControlApp {
 
         // Atomic write: temp + rename
         let assignment_path = task_dir.join("assignment.json");
-        let temp_path = task_dir.join("assignment.json.tmp");
-        let json_str = serde_json::to_string_pretty(&assignment)?;
-        std::fs::write(&temp_path, &json_str)?;
-        std::fs::rename(&temp_path, &assignment_path)?;
+        if assignment_path.exists() && !self.dry_run {
+            eprintln!(
+                "Warning: Overwriting existing assignment.json for task '{}'",
+                task_id
+            );
+        }
+        if !self.dry_run {
+            let temp_path = task_dir.join("assignment.json.tmp");
+            let json_str = serde_json::to_string_pretty(&assignment)?;
+            std::fs::write(&temp_path, &json_str)?;
+            std::fs::rename(&temp_path, &assignment_path)?;
+        }
 
         Ok(assignment)
     }
@@ -495,7 +528,7 @@ impl ControlApp {
             let event = self.build_event(task_id, "boundary_violation_recorded", payload)?;
             self.validate_and_append(&event)?;
         }
-        if !violations.is_empty() {
+        if !violations.is_empty() && !self.dry_run {
             self.rebuild_task_view(task_id)?;
         }
         Ok(violations)
@@ -689,9 +722,11 @@ impl ControlApp {
         // Write report file
         let task_dir = self.store.task_dir(task_id)?;
         let report_path = task_dir.join("audit-report.json");
-        let temp_path = task_dir.join("audit-report.json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&report)?)?;
-        std::fs::rename(&temp_path, &report_path)?;
+        if !self.dry_run {
+            let temp_path = task_dir.join("audit-report.json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&report)?)?;
+            std::fs::rename(&temp_path, &report_path)?;
+        }
 
         Ok(report)
     }
@@ -751,21 +786,29 @@ impl ControlApp {
         })
     }
 
-    fn normalize_boundary_paths(&self, field: &str, paths: &[String]) -> Result<Vec<String>> {
+    fn normalize_boundary_paths(
+        &self,
+        field: &str,
+        paths: &[String],
+        write: bool,
+    ) -> Result<Vec<String>> {
         let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
             self.project_root.clone(),
         );
         let mut normalized = Vec::with_capacity(paths.len());
         for path in paths {
-            let path = normalizer
-                .normalize(path)
-                .map_err(|e| anyhow!("Invalid {} path '{}': {}", field, path, e))?;
+            let path = if write {
+                normalizer.normalize_write(path)
+            } else {
+                normalizer.normalize(path)
+            }
+            .map_err(|e| anyhow!("Invalid {} path '{}': {}", field, path, e))?;
             normalized.push(path_to_payload_string(&path));
         }
         Ok(normalized)
     }
 
-    fn validate_and_append(&self, event: &Event) -> Result<()> {
+    fn validate_event(&self, event: &Event) -> Result<()> {
         if matches!(event.event_type.as_str(), "task_created" | "task_revised")
             && event.payload.get("scope").is_some()
         {
@@ -788,9 +831,18 @@ impl ControlApp {
             apply(&mut state, &prior)
                 .map_err(|e| anyhow!("Reducer error at seq {}: {}", prior.seq, e))?;
         }
-        apply(&mut state, event).map_err(|e| anyhow!("Reducer rejected: {}", e))?;
+        apply(&mut state, event).map_err(|e| anyhow!("Reducer rejected: {}", e))
+    }
 
-        // 3. Persist
+    fn validate_and_append(&self, event: &Event) -> Result<()> {
+        self.validate_event(event)?;
+        if self.dry_run {
+            println!(
+                "[dry-run] Would append event: type={}, task={}, seq={}",
+                event.event_type, event.task_id, event.seq
+            );
+            return Ok(());
+        }
         self.store.append(event)?;
         Ok(())
     }
@@ -822,7 +874,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "workspace_created", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -882,7 +936,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "workspace_diff_computed", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
 
         Ok(serde_json::json!({
             "task_id": task_id,
@@ -970,7 +1026,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "workspace_applied", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -983,7 +1041,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "workspace_cleaned", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1005,7 +1065,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "approval_requested", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1015,7 +1077,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "approval_granted", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1025,7 +1089,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "approval_denied", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1088,9 +1154,11 @@ impl ControlApp {
         // Write run manifest atomically
         let task_dir = self.store.task_dir(task_id)?;
         let manifest_path = task_dir.join("run-manifest.json");
-        let temp_path = task_dir.join("run-manifest.json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&manifest)?)?;
-        std::fs::rename(&temp_path, &manifest_path)?;
+        if !self.dry_run {
+            let temp_path = task_dir.join("run-manifest.json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&manifest)?)?;
+            std::fs::rename(&temp_path, &manifest_path)?;
+        }
 
         // Record workspace_created event
         let ws_payload = serde_json::json!({
@@ -1108,7 +1176,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "run_started", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1165,7 +1235,9 @@ impl ControlApp {
                 });
                 let event = self.build_event(task_id, "evidence_rejected", payload)?;
                 self.validate_and_append(&event)?;
-                self.rebuild_task_view(task_id)?;
+                if !self.dry_run {
+                    self.rebuild_task_view(task_id)?;
+                }
                 return Err(anyhow!(
                     "Evidence rejected: file '{}' is out of write scope or in deny list",
                     file_path
@@ -1176,9 +1248,11 @@ impl ControlApp {
         // Write agent-output.json
         let evidence_id = generate_uuid();
         let output_path = self.store.task_dir(task_id)?.join("agent-output.json");
-        let temp_path = output_path.with_extension("json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
-        std::fs::rename(&temp_path, &output_path)?;
+        if !self.dry_run {
+            let temp_path = output_path.with_extension("json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
+            std::fs::rename(&temp_path, &output_path)?;
+        }
 
         // Record run_completed
         let run_complete_payload = serde_json::json!({
@@ -1197,7 +1271,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "evidence_accepted", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 
@@ -1349,7 +1425,9 @@ impl ControlApp {
                 });
                 let event = self.build_event(task_id, "evidence_rejected", payload)?;
                 self.validate_and_append(&event)?;
-                self.rebuild_task_view(task_id)?;
+                if !self.dry_run {
+                    self.rebuild_task_view(task_id)?;
+                }
                 return Err(anyhow!(
                     "Evidence rejected: file '{}' is out of write scope or in deny list",
                     file_path
@@ -1360,9 +1438,11 @@ impl ControlApp {
         // Generate evidence_id and write agent-output.json
         let evidence_id = generate_uuid();
         let output_path = self.store.task_dir(task_id)?.join("agent-output.json");
-        let temp_path = output_path.with_extension("json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
-        std::fs::rename(&temp_path, &output_path)?;
+        if !self.dry_run {
+            let temp_path = output_path.with_extension("json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&result)?)?;
+            std::fs::rename(&temp_path, &output_path)?;
+        }
 
         let payload = serde_json::json!({
             "evidence_id": evidence_id,
@@ -1373,7 +1453,9 @@ impl ControlApp {
         });
         let event = self.build_event(task_id, "evidence_accepted", payload)?;
         self.validate_and_append(&event)?;
-        self.rebuild_task_view(task_id)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
         Ok(event)
     }
 }
@@ -1444,7 +1526,7 @@ fn collect_file_hashes(
             let hash = hash_file(&path)?;
             let rel = path.strip_prefix(root).unwrap_or(&path);
             results.push(serde_json::json!({
-                "path": rel.to_string_lossy(),
+                "path": path_to_payload_string(rel),
                 "hash": hash,
             }));
         }
@@ -1469,32 +1551,26 @@ fn collect_files_recursive(
             collect_files_recursive(&path, root, results)?;
         } else if path.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
-            results.insert(rel.to_string_lossy().to_string());
+            results.insert(path_to_payload_string(rel));
         }
     }
     Ok(())
 }
 
-/// # UNVERIFIED — EVIDENCE-001
-/// This hash is a 16-byte XOR fold, NOT cryptographically secure.
-/// It must NOT be used for evidence integrity verification.
-/// Replace with SHA-256 before this is used as evidence integrity data (requires DEP-001/004 review).
 fn hash_file(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
     use std::io::Read;
-    // Simple hash: XOR-fold of byte values — NOT cryptographic
     let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
-    let mut hash: [u8; 16] = [0; 16];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        for (i, &byte) in buf[..n].iter().enumerate() {
-            hash[i % 16] ^= byte;
-        }
+        hasher.update(&buf[..n]);
     }
-    Ok(hash.iter().map(|b| format!("{:02x}", b)).collect())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn new_validator_if_available() -> Option<SchemaValidator> {

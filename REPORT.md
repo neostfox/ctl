@@ -81,18 +81,18 @@ All tasks have evidence in `events.jsonl`. All completed tasks pass replay deter
 
 ## M4 Readiness Assessment
 
-**Can M4 begin?** YES, with caveats:
+**Can M4 begin?** YES:
 
-1. Gate runner env allowlist is now Windows-compatible, but the allowlist is maintained manually. Consider a more principled approach (e.g., allow everything except explicit deny list).
-2. Hash function is still 16-byte XOR fold (`UNVERIFIED`). Must replace with SHA-256 before relying on evidence integrity.
+1. Gate runner env allowlist is Windows-compatible, but the allowlist is maintained manually. Consider a more principled approach (e.g., allow everything except explicit deny list).
+2. ~~Hash function is still 16-byte XOR fold (`UNVERIFIED`).~~ **FIXED**: Now SHA-256.
 3. `collect_files_recursive` and `boundary_check` have `#[allow(dead_code)]` — they're M2 features wired but unused in M3.
-4. No `--dry-run` support on write commands yet (ROADMAP requirement).
-5. PathNormalizer read/write protection separation needed.
+4. ~~No `--dry-run` support on write commands yet.~~ **FIXED**: Global `--dry-run` flag added.
+5. ~~PathNormalizer read/write protection separation needed.~~ **FIXED**: `normalize()` vs `normalize_write()`.
 
 ## M3 Legacy Issues
 
-1. **EVIDENCE-001**: Hash function is XOR fold, not cryptographically secure. Must replace before M4.
-2. **Protected paths for read scope**: schemas/, Cargo.toml, etc. can't be added to read_scope.
-3. **No --dry-run**: All write commands lack dry-run support.
-4. **Context hash display**: Uses `\` on Windows for path display in context.json.
-5. **Assignment export overwrites**: Re-running assignment export overwrites without warning.
+1. ~~**EVIDENCE-001**: Hash function is XOR fold, not cryptographically secure.~~ **FIXED**: Replaced with SHA-256 (`sha2` crate). Hash output is now 64-char hex.
+2. ~~**Protected paths for read scope**: schemas/, Cargo.toml, etc. can't be added to read_scope.~~ **FIXED**: Split `normalize()`/`normalize_write()` — protected paths only enforced on write scope.
+3. ~~**No --dry-run**: All write commands lack dry-run support.~~ **FIXED**: Added `--dry-run` global flag. Validates and prints what would happen without persisting.
+4. ~~**Context hash display**: Uses `\` on Windows for path display in context.json.~~ **FIXED**: All paths in context.json now use `/` via `path_to_payload_string()`.
+5. ~~**Assignment export overwrites**: Re-running assignment export overwrites without warning.~~ **FIXED**: Prints warning to stderr on overwrite.
