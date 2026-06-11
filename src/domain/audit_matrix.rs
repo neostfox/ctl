@@ -3,7 +3,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::approval::ApprovalStatus;
     use crate::domain::event::Event;
+    use crate::domain::lease::LeaseStatus;
     use crate::domain::task::{apply, Phase, TaskState};
     use crate::infrastructure::schema_validator::SchemaValidator;
     use serde_json::json;
@@ -1104,7 +1106,7 @@ mod tests {
     // Baseline manifest (AUDIT-005: fixed-set regression)
     // ============================================================
     /// Audit matrix version — bump when test structure changes.
-    const AUDIT_MATRIX_VERSION: u32 = 6;
+    const AUDIT_MATRIX_VERSION: u32 = 8;
     const BASELINE_SCHEMA_FILES: &[&str] = &[
         "control.event-envelope.v1.schema.json",
         "control.task-definition.v1.schema.json",
@@ -1132,7 +1134,7 @@ mod tests {
     #[test]
     fn baseline_audit_matrix_version() {
         assert_eq!(
-            AUDIT_MATRIX_VERSION, 6,
+            AUDIT_MATRIX_VERSION, 8,
             "Audit matrix version must be explicitly bumped on structural changes"
         );
     }
@@ -1496,6 +1498,698 @@ mod tests {
         // Archive
         apply(&mut state, &ev(9, "t-m3", "task_archived", json!({}))).unwrap();
         assert!(state.is_archived);
+    }
+
+    // ============================================================
+    // M4: Lease lifecycle tests
+    // ============================================================
+
+    fn setup_in_progress(task_id: &str) -> TaskState {
+        let mut state = TaskState::new(task_id);
+        apply(
+            &mut state,
+            &ev(
+                1,
+                task_id,
+                "task_created",
+                task_payload("test", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut state, &ev(2, task_id, "task_marked_ready", json!({}))).unwrap();
+        apply(&mut state, &ev(3, task_id, "task_started", json!({}))).unwrap();
+        state
+    }
+
+    #[test]
+    fn lease_lifecycle_create_use_revoke() {
+        let mut state = setup_in_progress("t-lease");
+        // Create lease
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lease",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 3
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Active);
+        assert_eq!(state.leases["l1"].remaining_uses, 3);
+        // Use once
+        apply(
+            &mut state,
+            &ev(5, "t-lease", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].remaining_uses, 2);
+        // Use twice
+        apply(
+            &mut state,
+            &ev(6, "t-lease", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].remaining_uses, 1);
+        // Revoke
+        apply(
+            &mut state,
+            &ev(7, "t-lease", "lease_revoked", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Revoked);
+    }
+
+    #[test]
+    fn lease_reject_duplicate_id() {
+        let mut state = setup_in_progress("t-ldup");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-ldup",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 10
+                }),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                5,
+                "t-ldup",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r2", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 10
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lease_reject_use_when_expired() {
+        let mut state = setup_in_progress("t-lexp");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lexp",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 1
+                }),
+            ),
+        )
+        .unwrap();
+        // Use the only remaining use
+        apply(
+            &mut state,
+            &ev(5, "t-lexp", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Expired);
+        // Try to use again
+        let result = apply(
+            &mut state,
+            &ev(6, "t-lexp", "lease_used", json!({"lease_id": "l1"})),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lease_reject_use_when_revoked() {
+        let mut state = setup_in_progress("t-lrev");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lrev",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 10
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(5, "t-lrev", "lease_revoked", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(6, "t-lrev", "lease_used", json!({"lease_id": "l1"})),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lease_reject_zero_ttl() {
+        let mut state = setup_in_progress("t-lttl");
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lttl",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 0, "max_uses": 10
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lease_reject_zero_max_uses() {
+        let mut state = setup_in_progress("t-lmu");
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lmu",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 0
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lease_auto_expire_on_last_use() {
+        let mut state = setup_in_progress("t-lae");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lae",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 1
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Active);
+        apply(
+            &mut state,
+            &ev(5, "t-lae", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Expired);
+        assert_eq!(state.leases["l1"].remaining_uses, 0);
+    }
+
+    // ============================================================
+    // M4: Run lifecycle tests
+    // ============================================================
+
+    #[test]
+    fn run_lifecycle_start_complete() {
+        let mut state = setup_in_progress("t-run");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-run",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-run",
+                "run_started",
+                json!({
+                    "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+                }),
+            ),
+        )
+        .unwrap();
+        assert!(state.active_run.is_some());
+        assert_eq!(state.active_run.as_ref().unwrap().run_id, "r1");
+        apply(
+            &mut state,
+            &ev(6, "t-run", "run_completed", json!({"run_id": "r1"})),
+        )
+        .unwrap();
+        assert!(state.active_run.is_none());
+    }
+
+    #[test]
+    fn run_reject_double_start() {
+        let mut state = setup_in_progress("t-rds");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-rds",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-rds",
+                "run_started",
+                json!({
+                    "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+                }),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                6,
+                "t-rds",
+                "run_started",
+                json!({
+                    "run_id": "r2", "adapter": "omp", "lease_id": "l2"
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_failed_clears_active() {
+        let mut state = setup_in_progress("t-rf");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-rf",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-rf",
+                "run_started",
+                json!({
+                    "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+                }),
+            ),
+        )
+        .unwrap();
+        assert!(state.active_run.is_some());
+        apply(
+            &mut state,
+            &ev(
+                6,
+                "t-rf",
+                "run_failed",
+                json!({
+                    "run_id": "r1", "reason": "crash"
+                }),
+            ),
+        )
+        .unwrap();
+        assert!(state.active_run.is_none());
+    }
+
+    #[test]
+    fn run_complete_without_active() {
+        let mut state = setup_in_progress("t-rc");
+        let result = apply(
+            &mut state,
+            &ev(4, "t-rc", "run_completed", json!({"run_id": "r1"})),
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // M4: Workspace tests
+    // ============================================================
+
+    #[test]
+    fn workspace_created_requires_in_progress() {
+        let mut state = TaskState::new("t-ws1");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t-ws1",
+                "task_created",
+                task_payload("test", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                2,
+                "t-ws1",
+                "workspace_created",
+                json!({
+                    "worktree_path": ".trellis/tasks/t-ws1/worktree", "branch": "omp-run-t-ws1"
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn workspace_cleaned_requires_in_progress() {
+        let mut state = TaskState::new("t-ws2");
+        apply(
+            &mut state,
+            &ev(
+                1,
+                "t-ws2",
+                "task_created",
+                task_payload("test", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                2,
+                "t-ws2",
+                "workspace_cleaned",
+                json!({
+                    "worktree_path": ".trellis/tasks/t-ws2/worktree"
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn workspace_diff_requires_arrays() {
+        let mut state = setup_in_progress("t-wsd");
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t-wsd",
+                "workspace_diff_computed",
+                json!({
+                    "files_added": "not_an_array",
+                    "files_modified": [],
+                    "files_deleted": [],
+                    "high_risk": []
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // M4: Approval tests
+    // ============================================================
+
+    #[test]
+    fn approval_lifecycle_request_grant() {
+        let mut state = setup_in_progress("t-ap");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-ap",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            state.pending_approvals["ap1"].status,
+            ApprovalStatus::Pending
+        );
+        assert!(state.pending_approvals["ap1"].granted_at_seq.is_none());
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-ap",
+                "approval_granted",
+                json!({
+                    "request_id": "ap1"
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            state.pending_approvals["ap1"].status,
+            ApprovalStatus::Granted
+        );
+        assert_eq!(state.pending_approvals["ap1"].granted_at_seq, Some(5));
+    }
+
+    #[test]
+    fn approval_reject_duplicate_request() {
+        let mut state = setup_in_progress("t-adup");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-adup",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .unwrap();
+        let result = apply(
+            &mut state,
+            &ev(
+                5,
+                "t-adup",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "dup", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn approval_deny_non_pending() {
+        let mut state = setup_in_progress("t-adnp");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-adnp",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-adnp",
+                "approval_granted",
+                json!({
+                    "request_id": "ap1"
+                }),
+            ),
+        )
+        .unwrap();
+        // Try to deny an already-granted approval
+        let result = apply(
+            &mut state,
+            &ev(
+                6,
+                "t-adnp",
+                "approval_denied",
+                json!({
+                    "request_id": "ap1"
+                }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn approval_expired_status() {
+        let mut state = setup_in_progress("t-aexp");
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-aexp",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-aexp",
+                "approval_expired",
+                json!({
+                    "request_id": "ap1"
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            state.pending_approvals["ap1"].status,
+            ApprovalStatus::Expired
+        );
+    }
+
+    // ============================================================
+    // M4: Fixture replay test
+    // ============================================================
+
+    #[test]
+    fn replay_m4_lifecycle() {
+        let state = replay("t-m4", "fixtures/reducer_m4_lifecycle.jsonl");
+        assert_eq!(state.phase, Phase::Completed);
+        assert!(state.is_archived);
+        assert!(state.active_run.is_none());
+        // Lease revoked
+        assert!(state
+            .leases
+            .values()
+            .all(|l| l.status != LeaseStatus::Active));
+        assert_eq!(state.history.len(), 18);
+    }
+
+    // ============================================================
+    // M4 Hardening: Run abort lifecycle
+    // ============================================================
+
+    #[test]
+    fn run_abort_revokes_lease_and_fails_run() {
+        let mut state = setup_in_progress("t-ra");
+        apply(&mut state, &ev(4, "t-ra", "lease_created", json!({
+            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+            "action": "write", "ttl_seconds": 3600, "max_uses": 100
+        }))).unwrap();
+        apply(&mut state, &ev(5, "t-ra", "run_started", json!({
+            "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+        }))).unwrap();
+        assert!(state.active_run.is_some());
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Active);
+        // Revoke lease
+        apply(&mut state, &ev(6, "t-ra", "lease_revoked", json!({"lease_id": "l1"}))).unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Revoked);
+        // Fail run
+        apply(&mut state, &ev(7, "t-ra", "run_failed", json!({
+            "run_id": "r1", "reason": "crash"
+        }))).unwrap();
+        assert!(state.active_run.is_none());
+    }
+
+    #[test]
+    fn run_complete_then_lease_revoked_lifecycle() {
+        let mut state = setup_in_progress("t-rcr");
+        apply(&mut state, &ev(4, "t-rcr", "lease_created", json!({
+            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+            "action": "write", "ttl_seconds": 3600, "max_uses": 100
+        }))).unwrap();
+        apply(&mut state, &ev(5, "t-rcr", "run_started", json!({
+            "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+        }))).unwrap();
+        // Complete run
+        apply(&mut state, &ev(6, "t-rcr", "run_completed", json!({"run_id": "r1"}))).unwrap();
+        assert!(state.active_run.is_none());
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Active); // Lease still active
+        // Revoke lease after run completion
+        apply(&mut state, &ev(7, "t-rcr", "lease_revoked", json!({"lease_id": "l1"}))).unwrap();
+        assert_eq!(state.leases["l1"].status, LeaseStatus::Revoked);
+    }
+
+    // ============================================================
+    // M4 Hardening: Workspace apply consumes lease
+    // ============================================================
+
+    #[test]
+    fn lease_used_decrements_remaining() {
+        let mut state = setup_in_progress("t-lud");
+        apply(&mut state, &ev(4, "t-lud", "lease_created", json!({
+            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+            "action": "write", "ttl_seconds": 3600, "max_uses": 5
+        }))).unwrap();
+        assert_eq!(state.leases["l1"].remaining_uses, 5);
+        apply(&mut state, &ev(5, "t-lud", "lease_used", json!({"lease_id": "l1"}))).unwrap();
+        assert_eq!(state.leases["l1"].remaining_uses, 4);
+        apply(&mut state, &ev(6, "t-lud", "lease_used", json!({"lease_id": "l1"}))).unwrap();
+        assert_eq!(state.leases["l1"].remaining_uses, 3);
+    }
+
+    #[test]
+    fn lease_reject_use_on_unknown_id() {
+        let mut state = setup_in_progress("t-lunk");
+        let result = apply(&mut state, &ev(4, "t-lunk", "lease_used", json!({"lease_id": "nonexistent"})));
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // M4 Hardening: Approval with granted_at_seq
+    // ============================================================
+
+    #[test]
+    fn approval_granted_records_seq() {
+        let mut state = setup_in_progress("t-ags");
+        apply(&mut state, &ev(4, "t-ags", "approval_requested", json!({
+            "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+        }))).unwrap();
+        assert_eq!(state.pending_approvals["ap1"].granted_at_seq, None);
+        apply(&mut state, &ev(7, "t-ags", "approval_granted", json!({
+            "request_id": "ap1"
+        }))).unwrap();
+        assert_eq!(state.pending_approvals["ap1"].granted_at_seq, Some(7));
+    }
+
+    #[test]
+    fn approval_grant_on_nonexistent_fails() {
+        let mut state = setup_in_progress("t-agnf");
+        let result = apply(&mut state, &ev(4, "t-agnf", "approval_granted", json!({
+            "request_id": "nonexistent"
+        })));
+        assert!(result.is_err());
     }
 
     // ============================================================

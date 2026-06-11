@@ -229,21 +229,6 @@ mod tests {
         TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
-    fn make_event(task_id: &str, seq: i64, event_type: &str) -> Event {
-        Event {
-            schema: "control.event-envelope.v1".to_string(),
-            event_id: format!("{:08x}-0000-4000-8000-000000000000", seq),
-            command_id: format!("cmd-{}", seq),
-            task_id: task_id.to_string(),
-            seq,
-            occurred_at: "2026-06-03T12:00:00Z".to_string(),
-            actor: "human".to_string(),
-            event_type: event_type.to_string(),
-            payload: json!({}),
-        }
-    }
-
     fn make_create_event(task_id: &str, seq: i64) -> Event {
         Event {
             schema: "control.event-envelope.v1".to_string(),

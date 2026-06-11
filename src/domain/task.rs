@@ -41,7 +41,6 @@ pub struct RunInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskState {
     pub id: String,
     pub phase: Phase,
@@ -149,7 +148,6 @@ fn string_set(
     Ok(normalized)
 }
 
-#[allow(dead_code)]
 pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
     // R6: Check task_id BEFORE command_id idempotency (per-task, not global)
     if event.task_id != state.id {
@@ -659,6 +657,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                     scope,
                     ttl_seconds,
                     requested_at_seq: event.seq,
+                    granted_at_seq: None,
                     status: ApprovalStatus::Pending,
                 },
             );
@@ -683,6 +682,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 ));
             }
             approval.status = ApprovalStatus::Granted;
+            approval.granted_at_seq = Some(event.seq);
         }
         "approval_denied" => {
             let request_id = event

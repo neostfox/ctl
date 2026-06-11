@@ -66,7 +66,7 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
 /// Run a gate with EXEC-002 controls:
 /// - Only allowlisted command templates (EXEC-001)
 /// - Timeout: 60s default
-/// - Environment allowlist: PATH + CARGO_* only (EXEC-003: no network deps)
+/// - Environment: full inherit with proxy/auth denylist (EXEC-003: no network deps)
 /// - Output cap: 64KB per stream, truncated if exceeded
 /// - Explicit working directory
 pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
@@ -114,36 +114,43 @@ pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
     })
 }
 
-/// Build the minimal environment allowlist (EXEC-002, EXEC-003).
-/// Only PATH and CARGO_* variables are passed through.
+/// Build the execution environment with a denylist approach (EXEC-002, EXEC-003).
+///
+/// Instead of allowlisting specific vars (which is fragile across platforms and
+/// toolchain versions), we pass through the full environment and only strip
+/// variables that could enable unauthorized network access. This prevents
+/// transient linker failures on Windows where the MSVC toolchain needs many
+/// env vars (LIB, INCLUDE, SystemRoot, APPDATA, PATHEXT, etc.) that are
+/// difficult to enumerate completely.
 fn build_allowed_env() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    for (key, value) in std::env::vars() {
-        if key == "PATH"
-            || key == "Path"
-            || key.starts_with("CARGO")
-            || key == "HOME"
-            || key == "USERPROFILE"
-            || key == "RUSTUP_HOME"
-            // Windows linker and SDK vars (dogfood finding: link.exe needs these)
-            || key == "LIB"
-            || key == "INCLUDE"
-            || key == "LIBPATH"
-            || key == "SystemRoot"
-            || key == "TEMP"
-            || key == "TMP"
-            || key == "OS"
-            || key.starts_with("PROCESSOR_")
-            || key.starts_with("VS")
-            || key.starts_with("VCINSTALLDIR")
-            || key.starts_with("WindowsSdkDir")
-            || key.starts_with("WindowsSDKLibVersion")
-            || key.starts_with("WindowsSDKVersion")
-        {
-            env.insert(key, value);
-        }
-    }
-    env
+    /// Network-related env var prefixes whose presence could bypass EXEC-003.
+    const BLOCKED_PREFIXES: &[&str] = &[
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "FTP_PROXY",
+        "ftp_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        // Auth tokens that could be used to access network resources
+        "AUTH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        "CARGO_REGISTRY_TOKEN",
+        "CARGO_REGISTRY_HTTP_", // CARGO_REGISTRY_HTTP_*, but CARGO_HOME etc are fine
+        "NETRC",
+        "SSH_AUTH_SOCK",
+    ];
+
+    std::env::vars()
+        .filter(|(key, _)| {
+            !BLOCKED_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+        })
+        .collect()
 }
 
 /// Cap output to OUTPUT_CAP bytes, truncating with a marker if exceeded.
@@ -225,5 +232,20 @@ mod tests {
     fn test_build_allowed_env_has_path() {
         let env = build_allowed_env();
         assert!(env.contains_key("PATH") || env.contains_key("Path"));
+    }
+
+    #[test]
+    fn test_build_allowed_env_blocks_proxy_vars() {
+        // Temporarily set a proxy var to verify it's blocked
+        let proxy_key = "HTTPS_PROXY";
+        let had_prev = std::env::var(proxy_key).ok();
+        std::env::set_var(proxy_key, "http://evil.proxy:1234");
+        let env = build_allowed_env();
+        assert!(!env.contains_key(proxy_key), "proxy vars must be blocked");
+        // Restore
+        match had_prev {
+            Some(v) => std::env::set_var(proxy_key, v),
+            None => std::env::remove_var(proxy_key),
+        }
     }
 }

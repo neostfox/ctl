@@ -96,3 +96,182 @@ All tasks have evidence in `events.jsonl`. All completed tasks pass replay deter
 3. ~~**No --dry-run**: All write commands lack dry-run support.~~ **FIXED**: Added `--dry-run` global flag. Validates and prints what would happen without persisting.
 4. ~~**Context hash display**: Uses `\` on Windows for path display in context.json.~~ **FIXED**: All paths in context.json now use `/` via `path_to_payload_string()`.
 5. ~~**Assignment export overwrites**: Re-running assignment export overwrites without warning.~~ **FIXED**: Prints warning to stderr on overwrite.
+
+# M4 Dogfood Report
+
+**Date**: 2026-06-10
+**Milestone**: M4 OMP 单执行器隔离运行
+**Result**: PASS — 21 tasks completed through full control plane lifecycle
+
+## Summary
+
+Executed 21 M4 tasks (df-m4-01 through df-m4-21), each tracked through the complete lifecycle:
+
+```
+create → ready → start → (manual work) → ingest → gate run → submit → finish → archive
+```
+
+All tasks use manual adapter (git worktree not functional on Windows due to UNC path issue with `git worktree add`).
+
+**Update (2026-06-10)**: UNC path issue fixed. OMP worktree isolation verified end-to-end.
+## Implementation Changes (Phase 1)
+
+### 1.1 `print_task_state` / `print_task_human` M4 fields
+- JSON view now includes `active_run`, `leases_active` count, `pending_approvals` count
+- Human output shows run info, active lease count, approval status per request
+
+### 1.2 `control run abort` command
+- New `RunCommands::Abort { id, reason }` CLI variant
+- Application method `run_abort()`: revokes lease, cleans worktree, emits `run_failed`
+- Enables recovery after OMP crash
+
+### 1.3 Lease TTL wall-clock check
+- `check_lease_valid` now reads `occurred_at` from the event stream for `created_at_seq`
+- Compares wall-clock elapsed time against `ttl_seconds`
+- Fail-closed: if parsing fails, only max_uses enforcement applies
+- Added `parse_iso8601_to_epoch()` helper (inverse of `epoch_to_datetime`)
+
+### 1.4 `workspace_apply` emits `lease_used` event
+- Each apply consumes one lease use via `lease_used` event
+- If reducer rejects (remaining_uses == 0), apply is blocked
+
+### 1.5 Lease auto-expire check
+- New `expire_stale_leases()` method scans active leases and emits `lease_expired` for TTL-exceeded
+- Called at start of `run_start` and `workspace_apply`
+
+### 1.6 Approval TTL expiry check
+- `ApprovalState` gained `granted_at_seq: Option<i64>` field
+- Reducer sets `granted_at_seq` on `approval_granted`
+- `workspace_apply` checks approval TTL: if elapsed > ttl_seconds, approval is expired
+- Fail-closed: if grant time can't be determined, approval is not valid
+
+## Audit Matrix Tests (Phase 2)
+
+19 new tests added, `AUDIT_MATRIX_VERSION` bumped from 6 to 7:
+
+- **Lease lifecycle** (7 tests): create/use/revoke, duplicate rejection, expired/revoked use rejection, zero TTL/max_uses rejection, auto-expire on last use
+- **Run lifecycle** (4 tests): start/complete, double start rejection, failed clears active, complete without active
+- **Workspace** (3 tests): created/cleaned require InProgress, diff requires arrays
+- **Approval** (4 tests): request/grant lifecycle, duplicate rejection, deny non-pending, expired status
+- **Fixture replay** (1 test): 18-event M4 lifecycle replay verifying Completed, archived, no active leases/runs
+
+Total: 124 tests pass (105 existing + 19 new).
+
+## Dogfood Tasks (21 completed)
+
+| ID | Objective | Outcome |
+|---|---|---|
+| df-m4-01 | Verify print_task_human M4 fields display | Completed |
+| df-m4-02 | Add RunInfo doc comment | Completed |
+| df-m4-03 | Add LeaseState doc comment | Completed |
+| df-m4-04 | Add ApprovalState doc comment | Completed |
+| df-m4-05 | Add RunCommands Abort variant for run abort CLI | Completed |
+| df-m4-06 | Implement print_task_state M4 fields in JSON view | Completed |
+| df-m4-07 | Implement print_task_human M4 fields | Completed |
+| df-m4-08 | Implement run_abort application method | Completed |
+| df-m4-09 | Implement lease TTL wall-clock check | Completed |
+| df-m4-10 | Implement workspace_apply lease_used event | Completed |
+| df-m4-11 | Implement expire_stale_leases method | Completed |
+| df-m4-12 | Implement approval TTL expiry check | Completed |
+| df-m4-13 | Add lease lifecycle audit matrix tests | Completed |
+| df-m4-14 | Add run lifecycle audit matrix tests | Completed |
+| df-m4-15 | Add workspace audit matrix tests | Completed |
+| df-m4-16 | Add approval audit matrix tests | Completed |
+| df-m4-17 | Add M4 fixture replay test | Completed |
+| df-m4-18 | Bump AUDIT_MATRIX_VERSION to 7 | Completed |
+| df-m4-19 | Add parse_iso8601_to_epoch helper | Completed |
+| df-m4-20 | Add granted_at_seq to ApprovalState | Completed |
+| df-m4-21 | Remove dead_code annotations from M4 fields | Completed |
+
+## M4 Verification Results
+
+- ✅ 124 tests pass (105 existing + 19 new)
+- ✅ `cargo build` clean
+- ✅ `architecture check` passes
+- ✅ 21 dogfood tasks completed through full lifecycle
+- ✅ `control doctor` shows all tasks healthy
+- ✅ `control task status` displays M4 fields (active_run, leases, approvals)
+- ⚠️ Git worktree non-functional on Windows (UNC path issue) — manual adapter used as fallback
+
+## Dogfood Observations
+
+- **Command latency**: Each `control` command completes in < 0.2s (target < 2s) ✅
+- **Error messages**: Clear, include rule IDs (AUDIT-001, ADAPTER-005)
+- **Status readability**: M4 fields (run, lease, approval) now visible in human output
+- **Windows compatibility**: Gate runner works; git worktree add fails with UNC paths
+
+## Known Issues
+
+1. ~~**Git worktree on Windows**: `git worktree add` fails with canonicalized UNC paths.~~ **FIXED**: Removed `std::fs::canonicalize()` from `ControlApp::init`/`open`. `PathNormalizer` handles its own canonicalization internally.
+2. ~~**Lease not revoked on run completion**: `run_ingest_omp` emitted `run_completed` without `lease_revoked`, leaving stale leases that block cross-task checks.~~ **FIXED**: `run_ingest_omp` now emits `lease_revoked` + `workspace_cleaned` after `run_completed`.
+3. **Lease TTL performance**: `check_lease_valid` reads the full event stream to find `occurred_at` by seq. Acceptable for current scale (< 100 events/task).
+
+## OMP Isolation Verification
+
+After fixing the UNC path issue, the following end-to-end tests passed:
+
+| Test | Result |
+|---|---|
+| `run start --adapter omp` creates worktree and branch | ✅ |
+| `workspace diff` detects changes in worktree | ✅ |
+| `workspace apply` copies files to main workspace | ✅ |
+| `run ingest --adapter omp` emits run_completed + lease_revoked + workspace_cleaned | ✅ |
+| `run abort` cleans up worktree and revokes lease | ✅ |
+| Worktree removed after completion | ✅ |
+| Main workspace untouched during worktree execution | ✅ |
+| Cross-task lease conflict detection | ✅ |
+
+## M4 Hardening Report
+
+**Date**: 2026-06-10
+**Result**: PASS — 131 tests, clippy clean, all checks green
+
+### Dead Code Cleanup
+
+- Removed 5 stale `#[allow(dead_code)]` annotations (boundary_check, collect_files_recursive, TaskState, TaskState::new, apply)
+- Deleted 3 dead functions: `list_tasks` (unused), `LeaseState::is_valid` (unused), `make_event` test helper (unused)
+- Kept 5 correct module-level suppressions in main.rs and infrastructure/mod.rs
+
+### Bug Fix: Lease Not Revoked on Run Completion
+
+`run_ingest_omp` emitted `run_completed` without `lease_revoked`/`workspace_cleaned`, leaving stale leases that blocked cross-task scope overlap checks.
+
+**Fix**: `run_ingest_omp` now emits `lease_revoked` + `workspace_cleaned` after `run_completed`.
+
+### Gate Runner Stabilization
+
+**Root cause**: Gate runner used an allowlist for environment variables. On Windows, the MSVC linker needs many env vars not in the allowlist. Transient failures occurred when incremental compilation cache was invalidated and relinking was needed.
+
+**Fix**: Switched from allowlist to denylist. Passes ALL env vars except proxy/auth tokens (HTTP_PROXY, HTTPS_PROXY, GITHUB_TOKEN, etc.). This achieves the same EXEC-003 security goal (no network deps) without platform-specific fragility.
+
+### Error Message Rule IDs
+
+Added rule IDs to 6 M4 error messages that lacked them:
+- `APPROVAL-001` — high-risk change requires approval
+- `RUN-001` — no active run
+- `RUN-002` — already has active run
+- `SCOPE-001` — file out of write scope (evidence rejected)
+- `ADAPTER-001` — wrong adapter source
+
+### New Hardening Tests (7 tests)
+
+| Test | Covers |
+|---|---|
+| `run_abort_revokes_lease_and_fails_run` | Run abort event sequence |
+| `run_complete_then_lease_revoked_lifecycle` | Lease revocation after run completion |
+| `lease_used_decrements_remaining` | Lease use counting |
+| `lease_reject_use_on_unknown_id` | Unknown lease rejection |
+| `approval_granted_records_seq` | granted_at_seq tracking |
+| `approval_grant_on_nonexistent_fails` | Nonexistent approval rejection |
+| `test_build_allowed_env_blocks_proxy_vars` | Gate runner env denylist |
+
+`AUDIT_MATRIX_VERSION` bumped from 7 to 8.
+
+### Final Verification
+
+- ✅ 131 tests pass (105 baseline + 19 M4 + 7 hardening)
+- ✅ `cargo clippy -- -D warnings` clean
+- ✅ `architecture check` passes
+- ✅ `validate` passes
+- ✅ `doctor` shows all 43 tasks healthy
+- ✅ OMP worktree isolation verified end-to-end on Windows

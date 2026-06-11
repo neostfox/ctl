@@ -40,10 +40,9 @@ pub struct ReviseTaskInput<'a> {
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
-        let project_root = std::fs::canonicalize(project_root)?;
         let validator = new_validator_if_available();
         Ok(Self {
-            project_root,
+            project_root: project_root.to_path_buf(),
             store,
             validator,
             dry_run: false,
@@ -53,9 +52,8 @@ impl ControlApp {
     pub fn open(project_root: &Path, dry_run: bool) -> Result<Self> {
         let store = FileEventStore::open(project_root)?;
         let validator = new_validator_if_available();
-        let project_root = std::fs::canonicalize(project_root)?;
         Ok(Self {
-            project_root,
+            project_root: project_root.to_path_buf(),
             store,
             validator,
             dry_run,
@@ -450,7 +448,6 @@ impl ControlApp {
 
     /// Check workspace modifications against task scope.
     /// Returns list of violations (files modified outside write_allow scope).
-    #[allow(dead_code)]
     pub fn boundary_check(&self, task_id: &str) -> Result<Vec<String>> {
         let state = self.replay_task(task_id)?;
         let root = &self.project_root;
@@ -556,11 +553,6 @@ impl ControlApp {
         let state = self.replay_task(task_id)?;
         self.store.write_task_view(task_id, &state)?;
         Ok(state)
-    }
-
-    #[allow(dead_code)]
-    pub fn list_tasks(&self) -> Result<Vec<String>> {
-        self.store.task_ids()
     }
 
     pub fn validate_store(&self) -> Result<Vec<String>> {
@@ -950,6 +942,8 @@ impl ControlApp {
     }
 
     pub fn workspace_apply(&self, task_id: &str) -> Result<Event> {
+        // Expire any stale leases before applying
+        let _ = self.expire_stale_leases(task_id);
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress {
             return Err(anyhow!(
@@ -959,7 +953,7 @@ impl ControlApp {
         }
 
         // AUDIT-001: Verify active lease before applying writes
-        self.check_lease_valid(&state)?;
+        self.check_lease_valid(task_id, &state)?;
 
         let worktree_path = self.get_worktree_path(task_id)?;
         let diff_files =
@@ -997,22 +991,53 @@ impl ControlApp {
             }
         }
 
-        // Check high-risk changes have approval
+        // Check high-risk changes have approval (with TTL check)
+        let all_events = self.store.read_for_task(task_id)?;
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         for (risk_type, path) in &high_risks {
-            let has_approval = state.pending_approvals.values().any(|a| {
-                a.is_granted()
-                    && a.scope
-                        .get("high_risk_files")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|files| files.iter().any(|f| f.as_str() == Some(path)))
+            let has_valid_approval = state.pending_approvals.values().any(|a| {
+                if !a.is_granted() {
+                    return false;
+                }
+                // Check the file is in scope
+                let in_scope = a
+                    .scope
+                    .get("high_risk_files")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|files| files.iter().any(|f| f.as_str() == Some(path)));
+                if !in_scope {
+                    return false;
+                }
+                // TTL check: granted_at must not be older than ttl_seconds
+                if let Some(granted_seq) = a.granted_at_seq {
+                    if let Some(granted_at_str) = event_occurred_at_by_seq(&all_events, granted_seq)
+                    {
+                        if let Some(granted_epoch) = parse_iso8601_to_epoch(&granted_at_str) {
+                            return now_epoch.saturating_sub(granted_epoch) <= a.ttl_seconds;
+                        }
+                    }
+                }
+                // If we can't determine grant time, fail-closed
+                false
             });
-            if !has_approval {
+            if !has_valid_approval {
                 return Err(anyhow!(
-                    "High-risk change '{}' on '{}' requires approval. Grant with: control approval grant --id {} --request <request_id>",
+                    "High-risk change '{}' on '{}' requires valid approval (not expired). Rule: APPROVAL-001. Grant with: control approval grant --id {} --request <request_id>",
                     risk_type, path, task_id
                 ));
             }
         }
+
+        // Emit lease_used event (consumes one lease use)
+        let lease_id = state.active_run.as_ref().unwrap().lease_id.clone();
+        let lease_used_payload = serde_json::json!({
+            "lease_id": lease_id,
+        });
+        let lease_used_event = self.build_event(task_id, "lease_used", lease_used_payload)?;
+        self.validate_and_append(&lease_used_event)?;
 
         // Apply files
         crate::infrastructure::workspace::apply_files(
@@ -1098,6 +1123,8 @@ impl ControlApp {
     // ── M4: Run lifecycle commands ──
 
     pub fn run_start(&self, task_id: &str, adapter_name: &str) -> Result<Event> {
+        // Expire any stale leases before starting a new run
+        let _ = self.expire_stale_leases(task_id);
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress {
             return Err(anyhow!(
@@ -1106,7 +1133,7 @@ impl ControlApp {
             ));
         }
         if state.active_run.is_some() {
-            return Err(anyhow!("Task already has an active run"));
+            return Err(anyhow!("Task already has an active run. Rule: RUN-002"));
         }
 
         // AC4: Cross-task lease write overlap check (ADAPTER-005)
@@ -1239,7 +1266,7 @@ impl ControlApp {
                     self.rebuild_task_view(task_id)?;
                 }
                 return Err(anyhow!(
-                    "Evidence rejected: file '{}' is out of write scope or in deny list",
+                    "Evidence rejected: file '{}' is out of write scope or in deny list. Rule: SCOPE-001",
                     file_path
                 ));
             }
@@ -1260,6 +1287,27 @@ impl ControlApp {
         });
         let rc_event = self.build_event(task_id, "run_completed", run_complete_payload)?;
         self.validate_and_append(&rc_event)?;
+
+        // Revoke the lease now that the run is complete
+        let lease_id = state.active_run.as_ref().unwrap().lease_id.clone();
+        let revoke_payload = serde_json::json!({ "lease_id": lease_id });
+        let revoke_event = self.build_event(task_id, "lease_revoked", revoke_payload)?;
+        self.validate_and_append(&revoke_event)?;
+
+        // Cleanup worktree
+        let worktree_path = self.get_worktree_path(task_id)?;
+        if worktree_path.exists() {
+            let _ = crate::infrastructure::workspace::cleanup_worktree(
+                &self.project_root,
+                &worktree_path,
+            );
+            let ws_clean_payload = serde_json::json!({
+                "worktree_path": worktree_path.to_string_lossy(),
+            });
+            let ws_clean_event =
+                self.build_event(task_id, "workspace_cleaned", ws_clean_payload)?;
+            self.validate_and_append(&ws_clean_event)?;
+        }
 
         // Record evidence_accepted
         let payload = serde_json::json!({
@@ -1283,6 +1331,60 @@ impl ControlApp {
             _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
         };
         Ok(adapter.capabilities())
+    }
+
+    /// Abort an active run: revoke lease, cleanup worktree, emit run_failed.
+    pub fn run_abort(&self, task_id: &str, reason: &str) -> Result<()> {
+        let state = self.replay_task(task_id)?;
+        let run_info = state
+            .active_run
+            .as_ref()
+            .ok_or_else(|| anyhow!("No active run for task '{}'. Rule: RUN-001", task_id))?
+            .clone();
+
+        // Revoke active lease if present
+        let lease = state.leases.get(&run_info.lease_id);
+        if let Some(lease) = lease {
+            if lease.status == LeaseStatus::Active {
+                let payload = serde_json::json!({
+                    "lease_id": lease.lease_id,
+                });
+                let event = self.build_event(task_id, "lease_revoked", payload)?;
+                self.validate_and_append(&event)?;
+            }
+        }
+
+        // Cleanup worktree if it exists
+        let worktree_path = self
+            .project_root
+            .join(".trellis")
+            .join("tasks")
+            .join(task_id)
+            .join("worktree");
+        if worktree_path.exists() {
+            let _ = crate::infrastructure::workspace::cleanup_worktree(
+                &self.project_root,
+                &worktree_path,
+            );
+            let payload = serde_json::json!({
+                "worktree_path": worktree_path.to_string_lossy(),
+            });
+            let event = self.build_event(task_id, "workspace_cleaned", payload)?;
+            self.validate_and_append(&event)?;
+        }
+
+        // Emit run_failed
+        let payload = serde_json::json!({
+            "run_id": run_info.run_id,
+            "reason": reason,
+        });
+        let event = self.build_event(task_id, "run_failed", payload)?;
+        self.validate_and_append(&event)?;
+
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(())
     }
 
     // ── M4: Helpers ──
@@ -1335,8 +1437,9 @@ impl ControlApp {
         Ok(())
     }
 
-    /// AUDIT-001: Verify lease is active and not expired before write operations.
-    fn check_lease_valid(&self, state: &TaskState) -> Result<()> {
+    /// AUDIT-001: Verify lease is active, not expired, and has remaining uses.
+    /// Also checks wall-clock TTL by reading occurred_at from the event stream.
+    fn check_lease_valid(&self, task_id: &str, state: &TaskState) -> Result<()> {
         let run_info = state
             .active_run
             .as_ref()
@@ -1358,10 +1461,54 @@ impl ControlApp {
                 lease.lease_id
             ));
         }
-        // TTL check: since reducer has no time access, we check at application layer.
-        // We store ttl_seconds and created_at_seq. We can't compare wall clock from seq,
-        // so we rely on a separate lease_expired event being emitted by a timer/watchdog.
-        // For now, max_uses enforcement is the primary TTL proxy.
+        // TTL wall-clock check at application layer
+        let events = self.store.read_for_task(task_id)?;
+        if let Some(created_at_str) = event_occurred_at_by_seq(&events, lease.created_at_seq) {
+            if let Some(created_epoch) = parse_iso8601_to_epoch(&created_at_str) {
+                let now_epoch = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if now_epoch.saturating_sub(created_epoch) > lease.ttl_seconds {
+                    return Err(anyhow!(
+                        "Lease '{}' TTL exceeded ({}s > {}s). Rule: AUDIT-001",
+                        lease.lease_id,
+                        now_epoch.saturating_sub(created_epoch),
+                        lease.ttl_seconds
+                    ));
+                }
+            }
+            // If parsing fails: fail-closed (already checked max_uses above)
+        }
+        Ok(())
+    }
+
+    /// Scan all active leases for a task and emit lease_expired for any that exceeded TTL.
+    fn expire_stale_leases(&self, task_id: &str) -> Result<()> {
+        let state = self.replay_task(task_id)?;
+        let events = self.store.read_for_task(task_id)?;
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        for lease in state.leases.values() {
+            if lease.status != LeaseStatus::Active {
+                continue;
+            }
+            if let Some(created_at_str) = event_occurred_at_by_seq(&events, lease.created_at_seq) {
+                if let Some(created_epoch) = parse_iso8601_to_epoch(&created_at_str) {
+                    if now_epoch.saturating_sub(created_epoch) > lease.ttl_seconds {
+                        let payload = serde_json::json!({
+                            "lease_id": lease.lease_id,
+                            "reason": "ttl_exceeded",
+                        });
+                        let event = self.build_event(task_id, "lease_expired", payload)?;
+                        self.validate_and_append(&event)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1382,7 +1529,7 @@ impl ControlApp {
         // Validate required fields
         let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("");
         if source != "manual" {
-            return Err(anyhow!("Result file must have source=\"manual\""));
+            return Err(anyhow!("Result file must have source=\"manual\". Rule: ADAPTER-001"));
         }
 
         let touched_files = result
@@ -1429,7 +1576,7 @@ impl ControlApp {
                     self.rebuild_task_view(task_id)?;
                 }
                 return Err(anyhow!(
-                    "Evidence rejected: file '{}' is out of write scope or in deny list",
+                    "Evidence rejected: file '{}' is out of write scope or in deny list. Rule: SCOPE-001",
                     file_path
                 ));
             }
@@ -1638,6 +1785,40 @@ fn epoch_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
         (time_secs % 3600) / 60,
         time_secs % 60,
     )
+}
+
+/// Parse a simple ISO 8601 UTC string (YYYY-MM-DDTHH:MM:SSZ) to Unix epoch seconds.
+/// Returns None if parsing fails (fail-closed).
+fn parse_iso8601_to_epoch(s: &str) -> Option<u64> {
+    // Expected format: "2026-06-07T10:00:00Z" (len 20)
+    if s.len() < 19 {
+        return None;
+    }
+    let year: u64 = s.get(0..4)?.parse().ok()?;
+    let month: u64 = s.get(5..7)?.parse().ok()?;
+    let day: u64 = s.get(8..10)?.parse().ok()?;
+    let hour: u64 = s.get(11..13)?.parse().ok()?;
+    let minute: u64 = s.get(14..16)?.parse().ok()?;
+    let second: u64 = s.get(17..19)?.parse().ok()?;
+
+    // Days from year 0 using civil_from_days approach
+    let m = month;
+    let y = if m <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146097 + doe - 719468;
+
+    Some(days_since_epoch * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Get the occurred_at timestamp for a given event seq in a task's event stream.
+fn event_occurred_at_by_seq(events: &[Event], seq: i64) -> Option<String> {
+    events
+        .iter()
+        .find(|e| e.seq == seq)
+        .map(|e| e.occurred_at.clone())
 }
 
 #[cfg(test)]

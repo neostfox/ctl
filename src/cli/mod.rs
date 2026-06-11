@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::application::{ControlApp, CreateTaskInput, ReviseTaskInput};
 use crate::domain::event::Event;
+use crate::domain::lease::LeaseStatus;
 use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::boundary::normalizer::PathNormalizer;
 use crate::infrastructure::schema_validator::SchemaValidator;
@@ -311,6 +312,15 @@ enum RunCommands {
         /// Adapter type (must be "omp")
         #[arg(long, default_value = "omp")]
         adapter: String,
+    },
+    /// Abort an active run after OMP crash or manual intervention (M4)
+    Abort {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Reason for aborting the run
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -638,6 +648,10 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                 adapter, id, event.seq
             );
         }
+        RunCommands::Abort { id, reason } => {
+            app.run_abort(id, reason)?;
+            println!("Aborted run for task '{}'.", id);
+        }
     }
     Ok(())
 }
@@ -707,6 +721,12 @@ fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
 
 fn print_task_state(state: &TaskState) -> Result<()> {
     let gate_results: BTreeMap<_, _> = state.gate_results.iter().collect();
+    let active_leases: usize = state
+        .leases
+        .values()
+        .filter(|l| l.status == LeaseStatus::Active)
+        .count();
+    let pending_approvals_count = state.pending_approvals.len();
     let view = serde_json::json!({
         "schema": "control.task-view.v1",
         "id": state.id,
@@ -720,6 +740,9 @@ fn print_task_state(state: &TaskState) -> Result<()> {
         "risk_triggers": state.risk_triggers,
         "gates": state.gates,
         "gate_results": gate_results,
+        "active_run": state.active_run,
+        "leases_active": active_leases,
+        "pending_approvals": pending_approvals_count,
         "last_event_seq": state.last_seq,
     });
     println!("{}", serde_json::to_string_pretty(&view)?);
@@ -748,6 +771,26 @@ fn print_task_human(state: &TaskState) -> Result<()> {
             };
             println!("  {}: {}", gate, status);
         }
+    }
+    // M4: Active run
+    if let Some(ref run) = state.active_run {
+        println!(
+            "Run: {} (adapter: {}, lease: {})",
+            run.run_id, run.adapter, run.lease_id
+        );
+    }
+    // M4: Leases
+    let active_leases: Vec<_> = state
+        .leases
+        .values()
+        .filter(|l| l.status == LeaseStatus::Active)
+        .collect();
+    if !active_leases.is_empty() {
+        println!("Leases: {} active", active_leases.len());
+    }
+    // M4: Pending approvals
+    for approval in state.pending_approvals.values() {
+        println!("Approval {}: {:?}", approval.request_id, approval.status);
     }
     println!("Seq: {}", state.last_seq);
     Ok(())

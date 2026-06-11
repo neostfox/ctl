@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// Capability lease state, projected from events.
+/// Status of a capability lease, projected from events.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LeaseStatus {
     Active,
-    Expired,
     Revoked,
+    Expired,
 }
 
+/// Lease state tracking write access for a specific run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LeaseState {
     pub lease_id: String,
@@ -21,9 +22,3 @@ pub struct LeaseState {
     pub status: LeaseStatus,
 }
 
-impl LeaseState {
-    #[allow(dead_code)]
-    pub fn is_valid(&self) -> bool {
-        self.status == LeaseStatus::Active && self.remaining_uses > 0
-    }
-}

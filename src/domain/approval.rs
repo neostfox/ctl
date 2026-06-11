@@ -16,6 +16,8 @@ pub struct ApprovalState {
     pub scope: serde_json::Value,
     pub ttl_seconds: u64,
     pub requested_at_seq: i64,
+    #[serde(default)]
+    pub granted_at_seq: Option<i64>,
     pub status: ApprovalStatus,
 }
 
