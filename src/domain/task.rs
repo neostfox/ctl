@@ -3,6 +3,7 @@ use crate::domain::event::Event;
 use crate::domain::lease::{LeaseState, LeaseStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -13,6 +14,19 @@ pub enum Phase {
     Review,
     Completed,
     Cancelled,
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Phase::Planning => write!(f, "Planning"),
+            Phase::Ready => write!(f, "Ready"),
+            Phase::InProgress => write!(f, "In Progress"),
+            Phase::Review => write!(f, "Review"),
+            Phase::Completed => write!(f, "Completed"),
+            Phase::Cancelled => write!(f, "Cancelled"),
+        }
+    }
 }
 /// Outcome of running a required gate.
 ///
