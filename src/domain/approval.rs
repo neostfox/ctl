@@ -9,6 +9,17 @@ pub enum ApprovalStatus {
     Expired,
 }
 
+impl std::fmt::Display for ApprovalStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApprovalStatus::Pending => write!(f, "Pending"),
+            ApprovalStatus::Granted => write!(f, "Granted"),
+            ApprovalStatus::Denied => write!(f, "Denied"),
+            ApprovalStatus::Expired => write!(f, "Expired"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApprovalState {
     pub request_id: String,
