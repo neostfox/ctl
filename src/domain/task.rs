@@ -45,6 +45,13 @@ pub struct GateResult {
     pub checked_at: String,
 }
 
+impl fmt::Display for GateResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = if self.passed { "PASS" } else { "FAIL" };
+        write!(f, "{}: {} ({})", self.gate_id, status, self.evidence)
+    }
+}
+
 /// Active run information tracked by the task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunInfo {
