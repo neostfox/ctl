@@ -15,11 +15,27 @@ pub struct Event {
 }
 
 impl Event {
+    /// Validate the event envelope structure.
     pub fn is_valid(&self) -> bool {
         self.schema == "control.event-envelope.v1"
             && self.seq > 0
             && !self.event_id.is_empty()
             && !self.task_id.is_empty()
             && !self.event_type.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn event_type(&self) -> &str {
+        &self.event_type
+    }
+
+    #[allow(dead_code)]
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    #[allow(dead_code)]
+    pub fn payload(&self) -> &serde_json::Value {
+        &self.payload
     }
 }
