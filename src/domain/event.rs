@@ -1,6 +1,14 @@
+//! Event envelope for the control plane event sourcing system.
+//!
+//! Every state change is recorded as an immutable event following the
+//! `control.event-envelope.v1` schema. Events are append-only and form
+//! the canonical truth of the task ledger.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Immutable event record in the task event stream.
+/// Follows `control.event-envelope.v1` schema.
 pub struct Event {
     pub schema: String,
     pub event_id: String,
