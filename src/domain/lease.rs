@@ -8,6 +8,16 @@ pub enum LeaseStatus {
     Expired,
 }
 
+impl std::fmt::Display for LeaseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaseStatus::Active => write!(f, "Active"),
+            LeaseStatus::Revoked => write!(f, "Revoked"),
+            LeaseStatus::Expired => write!(f, "Expired"),
+        }
+    }
+}
+
 /// Lease state tracking write access for a specific run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LeaseState {
