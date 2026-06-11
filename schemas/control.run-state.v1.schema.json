@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control.run-state.v1.schema.json",
+  "title": "AgentRunState",
+  "description": "Projected state of an agent run, rebuilt from run events by replay.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "Schema version identifier.",
+      "type": "string",
+      "const": "control.run-state.v1"
+    },
+    "run_id": {
+      "description": "Unique run identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "description": "Parent task identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "adapter": {
+      "description": "Adapter name (e.g., omp, manual).",
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "description": "Current run phase.",
+      "type": "string",
+      "enum": ["queued", "running", "completed", "failed", "aborted"]
+    },
+    "worktree_path": {
+      "description": "Path to the isolated worktree (set when run starts).",
+      "type": ["string", "null"]
+    },
+    "lease_id": {
+      "description": "Active lease ID for this run.",
+      "type": ["string", "null"]
+    },
+    "write_allow": {
+      "description": "Write-allowed paths (inherited from task).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "write_deny": {
+      "description": "Write-denied paths (inherited from task).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "description": "Required gates (inherited from task).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gate_results": {
+      "description": "Latest gate results keyed by gate_id.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "gate_id": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "evidence": { "type": "string" },
+          "checked_at": { "type": "string" }
+        },
+        "required": ["gate_id", "passed", "evidence", "checked_at"]
+      }
+    },
+    "touched_files": {
+      "description": "Files touched by this run (accumulated from evidence).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "history": {
+      "description": "Ordered event IDs.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "last_seq": {
+      "description": "Last processed sequence number.",
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema",
+    "run_id",
+    "task_id",
+    "adapter",
+    "phase",
+    "write_allow",
+    "write_deny",
+    "gates",
+    "gate_results",
+    "touched_files",
+    "history",
+    "last_seq"
+  ],
+  "unevaluatedProperties": false
+}

@@ -1,3 +1,4 @@
+pub mod schedule;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::FileEventStore;
 
 pub struct ControlApp {
-    project_root: PathBuf,
+    pub project_root: PathBuf,
     store: FileEventStore,
     validator: Option<SchemaValidator>,
     dry_run: bool,
@@ -745,7 +746,7 @@ impl ControlApp {
 
     // ── Internal helpers ──
 
-    fn replay_task(&self, task_id: &str) -> Result<TaskState> {
+    pub fn replay_task(&self, task_id: &str) -> Result<TaskState> {
         let events = self.store.read_for_task(task_id)?;
         if events.is_empty() {
             return Err(anyhow!("Task '{}' not found", task_id));
@@ -1529,7 +1530,9 @@ impl ControlApp {
         // Validate required fields
         let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("");
         if source != "manual" {
-            return Err(anyhow!("Result file must have source=\"manual\". Rule: ADAPTER-001"));
+            return Err(anyhow!(
+                "Result file must have source=\"manual\". Rule: ADAPTER-001"
+            ));
         }
 
         let touched_files = result

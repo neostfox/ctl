@@ -1106,12 +1106,14 @@ mod tests {
     // Baseline manifest (AUDIT-005: fixed-set regression)
     // ============================================================
     /// Audit matrix version — bump when test structure changes.
-    const AUDIT_MATRIX_VERSION: u32 = 8;
+    const AUDIT_MATRIX_VERSION: u32 = 9;
     const BASELINE_SCHEMA_FILES: &[&str] = &[
         "control.event-envelope.v1.schema.json",
         "control.task-definition.v1.schema.json",
         "control.task-view.v1.schema.json",
         "control.policy-decision.v1.schema.json",
+        "control.run-state.v1.schema.json",
+        "control.schedule-plan.v1.schema.json",
     ];
     const BASELINE_FIXTURE_FILES: &[&str] = &[
         "invalid.json",
@@ -1121,6 +1123,7 @@ mod tests {
         "reducer_m2_lifecycle.jsonl",
         "reducer_m3_lifecycle.jsonl",
         "reducer_m4_lifecycle.jsonl",
+        "run_lifecycle.jsonl",
         "reducer_revise.jsonl",
         "reducer_test.jsonl",
         "schema_counter_examples.json",
@@ -1134,7 +1137,7 @@ mod tests {
     #[test]
     fn baseline_audit_matrix_version() {
         assert_eq!(
-            AUDIT_MATRIX_VERSION, 8,
+            AUDIT_MATRIX_VERSION, 9,
             "Audit matrix version must be explicitly bumped on structural changes"
         );
     }
@@ -2103,41 +2106,98 @@ mod tests {
     #[test]
     fn run_abort_revokes_lease_and_fails_run() {
         let mut state = setup_in_progress("t-ra");
-        apply(&mut state, &ev(4, "t-ra", "lease_created", json!({
-            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
-            "action": "write", "ttl_seconds": 3600, "max_uses": 100
-        }))).unwrap();
-        apply(&mut state, &ev(5, "t-ra", "run_started", json!({
-            "run_id": "r1", "adapter": "omp", "lease_id": "l1"
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-ra",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-ra",
+                "run_started",
+                json!({
+                    "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+                }),
+            ),
+        )
+        .unwrap();
         assert!(state.active_run.is_some());
         assert_eq!(state.leases["l1"].status, LeaseStatus::Active);
         // Revoke lease
-        apply(&mut state, &ev(6, "t-ra", "lease_revoked", json!({"lease_id": "l1"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(6, "t-ra", "lease_revoked", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
         assert_eq!(state.leases["l1"].status, LeaseStatus::Revoked);
         // Fail run
-        apply(&mut state, &ev(7, "t-ra", "run_failed", json!({
-            "run_id": "r1", "reason": "crash"
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                7,
+                "t-ra",
+                "run_failed",
+                json!({
+                    "run_id": "r1", "reason": "crash"
+                }),
+            ),
+        )
+        .unwrap();
         assert!(state.active_run.is_none());
     }
 
     #[test]
     fn run_complete_then_lease_revoked_lifecycle() {
         let mut state = setup_in_progress("t-rcr");
-        apply(&mut state, &ev(4, "t-rcr", "lease_created", json!({
-            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
-            "action": "write", "ttl_seconds": 3600, "max_uses": 100
-        }))).unwrap();
-        apply(&mut state, &ev(5, "t-rcr", "run_started", json!({
-            "run_id": "r1", "adapter": "omp", "lease_id": "l1"
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-rcr",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100
+                }),
+            ),
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            &ev(
+                5,
+                "t-rcr",
+                "run_started",
+                json!({
+                    "run_id": "r1", "adapter": "omp", "lease_id": "l1"
+                }),
+            ),
+        )
+        .unwrap();
         // Complete run
-        apply(&mut state, &ev(6, "t-rcr", "run_completed", json!({"run_id": "r1"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(6, "t-rcr", "run_completed", json!({"run_id": "r1"})),
+        )
+        .unwrap();
         assert!(state.active_run.is_none());
         assert_eq!(state.leases["l1"].status, LeaseStatus::Active); // Lease still active
-        // Revoke lease after run completion
-        apply(&mut state, &ev(7, "t-rcr", "lease_revoked", json!({"lease_id": "l1"}))).unwrap();
+                                                                    // Revoke lease after run completion
+        apply(
+            &mut state,
+            &ev(7, "t-rcr", "lease_revoked", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
         assert_eq!(state.leases["l1"].status, LeaseStatus::Revoked);
     }
 
@@ -2148,21 +2208,46 @@ mod tests {
     #[test]
     fn lease_used_decrements_remaining() {
         let mut state = setup_in_progress("t-lud");
-        apply(&mut state, &ev(4, "t-lud", "lease_created", json!({
-            "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
-            "action": "write", "ttl_seconds": 3600, "max_uses": 5
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lud",
+                "lease_created",
+                json!({
+                    "lease_id": "l1", "run_id": "r1", "resource_path": "src/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 5
+                }),
+            ),
+        )
+        .unwrap();
         assert_eq!(state.leases["l1"].remaining_uses, 5);
-        apply(&mut state, &ev(5, "t-lud", "lease_used", json!({"lease_id": "l1"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(5, "t-lud", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
         assert_eq!(state.leases["l1"].remaining_uses, 4);
-        apply(&mut state, &ev(6, "t-lud", "lease_used", json!({"lease_id": "l1"}))).unwrap();
+        apply(
+            &mut state,
+            &ev(6, "t-lud", "lease_used", json!({"lease_id": "l1"})),
+        )
+        .unwrap();
         assert_eq!(state.leases["l1"].remaining_uses, 3);
     }
 
     #[test]
     fn lease_reject_use_on_unknown_id() {
         let mut state = setup_in_progress("t-lunk");
-        let result = apply(&mut state, &ev(4, "t-lunk", "lease_used", json!({"lease_id": "nonexistent"})));
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t-lunk",
+                "lease_used",
+                json!({"lease_id": "nonexistent"}),
+            ),
+        );
         assert!(result.is_err());
     }
 
@@ -2173,22 +2258,48 @@ mod tests {
     #[test]
     fn approval_granted_records_seq() {
         let mut state = setup_in_progress("t-ags");
-        apply(&mut state, &ev(4, "t-ags", "approval_requested", json!({
-            "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                4,
+                "t-ags",
+                "approval_requested",
+                json!({
+                    "request_id": "ap1", "reason": "high risk", "scope": {}, "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .unwrap();
         assert_eq!(state.pending_approvals["ap1"].granted_at_seq, None);
-        apply(&mut state, &ev(7, "t-ags", "approval_granted", json!({
-            "request_id": "ap1"
-        }))).unwrap();
+        apply(
+            &mut state,
+            &ev(
+                7,
+                "t-ags",
+                "approval_granted",
+                json!({
+                    "request_id": "ap1"
+                }),
+            ),
+        )
+        .unwrap();
         assert_eq!(state.pending_approvals["ap1"].granted_at_seq, Some(7));
     }
 
     #[test]
     fn approval_grant_on_nonexistent_fails() {
         let mut state = setup_in_progress("t-agnf");
-        let result = apply(&mut state, &ev(4, "t-agnf", "approval_granted", json!({
-            "request_id": "nonexistent"
-        })));
+        let result = apply(
+            &mut state,
+            &ev(
+                4,
+                "t-agnf",
+                "approval_granted",
+                json!({
+                    "request_id": "nonexistent"
+                }),
+            ),
+        );
         assert!(result.is_err());
     }
 

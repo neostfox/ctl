@@ -51,6 +51,24 @@
     },
     "last_event_seq": {
       "type": "integer"
+    },
+    "active_runs": {
+      "description": "M6: Active agent run references.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": { "type": "string", "minLength": 1 },
+          "worktree_path": { "type": "string", "minLength": 1 },
+          "lease_id": { "type": "string", "minLength": 1 }
+        },
+        "required": ["run_id", "worktree_path", "lease_id"],
+        "additionalProperties": false
+      }
+    },
+    "schedule_plan_id": {
+      "description": "M6: Schedule plan ID if this task is part of a planned schedule.",
+      "type": ["string", "null"]
     }
   },
   "required": [

@@ -70,6 +70,13 @@ impl fmt::Display for RunInfo {
         )
     }
 }
+/// Reference to an active agent run, used by M6 multi-agent scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunRef {
+    pub run_id: String,
+    pub worktree_path: String,
+    pub lease_id: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
@@ -87,6 +94,12 @@ pub struct TaskState {
     pub gate_results: HashMap<String, GateResult>,
     /// M4: Active run (at most one per task).
     pub active_run: Option<RunInfo>,
+    /// M6: Active agent runs for multi-agent concurrency.
+    #[serde(default)]
+    pub active_runs: Vec<RunRef>,
+    /// M6: Schedule plan ID if this task is part of a planned schedule.
+    #[serde(default)]
+    pub schedule_plan_id: Option<String>,
     /// M4: Capability leases keyed by lease_id.
     pub leases: HashMap<String, LeaseState>,
     /// M4: Pending/approved/denied approval requests keyed by request_id.
@@ -112,6 +125,8 @@ impl TaskState {
             gates: BTreeSet::new(),
             gate_results: HashMap::new(),
             active_run: None,
+            active_runs: Vec::new(),
+            schedule_plan_id: None,
             leases: HashMap::new(),
             pending_approvals: HashMap::new(),
             history: Vec::new(),
@@ -750,6 +765,77 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .get_mut(request_id)
                 .ok_or_else(|| format!("Unknown approval request_id: {}", request_id))?;
             approval.status = ApprovalStatus::Expired;
+        }
+        // ── M6: Multi-agent scheduling events ──
+        "run_scheduled" => {
+            // Task is assigned to a schedule plan.
+            let plan_id = event
+                .payload
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if plan_id.is_empty() {
+                return Err("run_scheduled: plan_id is required".into());
+            }
+            state.schedule_plan_id = Some(plan_id.to_string());
+        }
+        "run_launched" => {
+            // An agent run has been launched for this task.
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "run_launched only valid in InProgress, current: {:?}",
+                    state.phase
+                ));
+            }
+            let run_id = event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let worktree_path = event
+                .payload
+                .get("worktree_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if run_id.is_empty() || worktree_path.is_empty() || lease_id.is_empty() {
+                return Err(
+                    "run_launched: run_id, worktree_path, and lease_id are required".into(),
+                );
+            }
+            // Check for duplicate run_id
+            if state.active_runs.iter().any(|r| r.run_id == run_id) {
+                return Err(format!("Duplicate run_id in active_runs: {}", run_id));
+            }
+            state.active_runs.push(RunRef {
+                run_id: run_id.to_string(),
+                worktree_path: worktree_path.to_string(),
+                lease_id: lease_id.to_string(),
+            });
+        }
+        "run_merged" => {
+            // A completed run's worktree diff has been applied to main workspace.
+            let run_id = event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if run_id.is_empty() {
+                return Err("run_merged: run_id is required".into());
+            }
+            // Remove from active_runs
+            let idx = state
+                .active_runs
+                .iter()
+                .position(|r| r.run_id == run_id)
+                .ok_or_else(|| {
+                    format!("run_merged: run_id '{}' not found in active_runs", run_id)
+                })?;
+            state.active_runs.remove(idx);
         }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }

@@ -70,7 +70,13 @@
         "approval_requested",
         "approval_granted",
         "approval_denied",
-        "approval_expired"
+        "approval_expired",
+        "run_scheduled",
+        "run_launched",
+        "run_merged",
+        "run_created",
+        "run_finished",
+        "run_aborted"
       ]
     },
     "payload": {
@@ -933,6 +939,173 @@
             "properties": {
               "request_id": {
                 "description": "Approval request identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_scheduled" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["plan_id"],
+            "properties": {
+              "plan_id": {
+                "description": "Schedule plan identifier.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_launched" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id", "worktree_path", "lease_id"],
+            "properties": {
+              "run_id": {
+                "description": "Agent run identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "worktree_path": {
+                "description": "Path to the isolated worktree.",
+                "type": "string",
+                "minLength": 1
+              },
+              "lease_id": {
+                "description": "Capability lease ID for this run.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_merged" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {
+              "run_id": {
+                "description": "Agent run identifier whose worktree was merged.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_created" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["task_id", "adapter"],
+            "properties": {
+              "task_id": {
+                "description": "Parent task identifier.",
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter": {
+                "description": "Adapter name (e.g., omp, manual).",
+                "type": "string",
+                "minLength": 1
+              },
+              "write_allow": {
+                "description": "Write-allowed paths inherited from task.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "write_deny": {
+                "description": "Write-denied paths inherited from task.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "gates": {
+                "description": "Required gates inherited from task.",
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_finished" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "run_aborted" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["reason"],
+            "properties": {
+              "reason": {
+                "description": "Reason for aborting the run.",
                 "type": "string",
                 "minLength": 1
               }

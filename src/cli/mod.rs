@@ -102,6 +102,13 @@ enum Commands {
         #[command(subcommand)]
         command: AdapterCommands,
     },
+    /// Schedule concurrent execution of multiple tasks (M6)
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommands,
+    },
+    /// Agent run status report (M6)
+    AgentReport,
 }
 
 #[derive(Subcommand)]
@@ -396,6 +403,37 @@ enum AdapterCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    /// Plan concurrent execution of tasks with non-overlapping write scopes (M6)
+    Plan {
+        /// Maximum concurrent agents
+        #[arg(long, default_value = "4")]
+        max_concurrent: usize,
+        /// Task IDs to schedule (space-separated)
+        #[arg(long, num_args = 1..)]
+        tasks: Vec<String>,
+    },
+    /// Validate a schedule plan against current task states (M6)
+    Validate {
+        /// Schedule plan ID
+        #[arg(long)]
+        plan: String,
+    },
+    /// Execute a validated schedule plan (M6)
+    Run {
+        /// Schedule plan ID
+        #[arg(long)]
+        plan: String,
+        /// Poll interval in seconds
+        #[arg(long, default_value = "5")]
+        poll_interval: u64,
+        /// Timeout per run in seconds
+        #[arg(long, default_value = "1800")]
+        timeout: u64,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let dry_run = cli.dry_run;
@@ -418,6 +456,8 @@ pub fn run() -> Result<()> {
         Commands::Approval { command } => cmd_approval(command, dry_run),
         Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
+        Commands::Schedule { command } => cmd_schedule(command, dry_run),
+        Commands::AgentReport => cmd_agent_report(),
     }
 }
 
@@ -994,6 +1034,8 @@ fn check_schemas() -> Result<()> {
         "control.task-definition.v1.schema.json",
         "control.task-view.v1.schema.json",
         "control.policy-decision.v1.schema.json",
+        "control.run-state.v1.schema.json",
+        "control.schedule-plan.v1.schema.json",
     ];
 
     for entry in fs::read_dir(schema_dir)? {
@@ -1117,6 +1159,8 @@ fn check_baseline_manifest() -> Result<()> {
         "control.task-definition.v1.schema.json",
         "control.task-view.v1.schema.json",
         "control.policy-decision.v1.schema.json",
+        "control.run-state.v1.schema.json",
+        "control.schedule-plan.v1.schema.json",
     ];
     let mut found_schemas: Vec<String> = Vec::new();
     for entry in fs::read_dir("schemas")? {
@@ -1144,6 +1188,7 @@ fn check_baseline_manifest() -> Result<()> {
         "reducer_m2_lifecycle.jsonl",
         "reducer_m3_lifecycle.jsonl",
         "reducer_m4_lifecycle.jsonl",
+        "run_lifecycle.jsonl",
         "reducer_revise.jsonl",
         "reducer_test.jsonl",
         "schema_counter_examples.json",
@@ -1264,6 +1309,7 @@ fn check_milestone_scope() -> Result<()> {
         command.get_subcommands().map(|cmd| cmd.get_name()),
         [
             "adapter",
+            "agent-report",
             "approval",
             "architecture",
             "assignment",
@@ -1277,6 +1323,7 @@ fn check_milestone_scope() -> Result<()> {
             "replay",
             "report",
             "run",
+            "schedule",
             "schema",
             "task",
             "validate",
@@ -1297,15 +1344,8 @@ fn check_milestone_scope() -> Result<()> {
         ],
     )?;
 
-    // Post-M4 commands that must not appear yet
-    let forbidden = [
-        "telemetry",
-        "drift",
-        "next-action",
-        "nextaction",
-        "schedule",
-        "agent",
-    ];
+    // Post-M4 commands that must not appear yet (M5 items)
+    let forbidden = ["telemetry", "drift", "next-action", "nextaction"];
     let mut names = Vec::new();
     collect_subcommand_names(&command, &mut names);
     for forbidden_cmd in &forbidden {
@@ -1663,5 +1703,126 @@ fn check_fixture_paths_gates() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+// ── M6: Schedule commands ──
+
+fn cmd_schedule(command: &ScheduleCommands, dry_run: bool) -> Result<()> {
+    match command {
+        ScheduleCommands::Plan {
+            max_concurrent,
+            tasks,
+        } => cmd_schedule_plan(*max_concurrent, tasks, dry_run),
+        ScheduleCommands::Validate { plan } => cmd_schedule_validate(plan),
+        ScheduleCommands::Run {
+            plan,
+            poll_interval,
+            timeout,
+        } => cmd_schedule_run(plan, *poll_interval, *timeout, dry_run),
+    }
+}
+
+fn cmd_schedule_plan(max_concurrent: usize, tasks: &[String], dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
+
+    if tasks.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No tasks specified. Use --tasks <id1> <id2> ..."
+        ));
+    }
+
+    // Collect task states
+    let mut task_data = Vec::new();
+    for task_id in tasks {
+        let state = app.replay_task(task_id)?;
+        if state.phase != Phase::Ready && state.phase != Phase::InProgress {
+            return Err(anyhow::anyhow!(
+                "Task '{}' is not Ready or InProgress (phase: {})",
+                task_id,
+                state.phase
+            ));
+        }
+        if state.is_held {
+            return Err(anyhow::anyhow!("Task '{}' is held", task_id));
+        }
+        task_data.push((task_id.clone(), state.write_allow.clone()));
+    }
+
+    let plan = crate::application::schedule::plan_schedule(&task_data, max_concurrent);
+
+    // Output plan as JSON
+    let json = serde_json::to_string_pretty(&plan)?;
+    println!("{}", json);
+
+    // Write plan to file for later reference
+    if !dry_run {
+        let plan_path = app
+            .project_root
+            .join(".trellis")
+            .join(format!("plans/{}.json", plan.plan_id));
+        std::fs::create_dir_all(plan_path.parent().unwrap())?;
+        std::fs::write(&plan_path, &json)?;
+        eprintln!("Plan saved to {}", plan_path.display());
+    }
+
+    if !plan.conflicts.is_empty() {
+        eprintln!("\nWarning: {} conflict(s) detected:", plan.conflicts.len());
+        for c in &plan.conflicts {
+            eprintln!(
+                "  {} <-> {} overlaps: {:?}",
+                c.task_a, c.task_b, c.overlapping_paths
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_schedule_validate(_plan: &str) -> Result<()> {
+    // TODO: Full validation requires reading plan file and re-checking task states
+    eprintln!("Schedule validation not yet implemented (requires plan persistence)");
+    Ok(())
+}
+
+fn cmd_schedule_run(_plan: &str, _poll_interval: u64, _timeout: u64, _dry_run: bool) -> Result<()> {
+    // TODO: Full execution engine requires file locking and process management
+    eprintln!(
+        "Schedule execution not yet implemented (requires file locking + process supervision)"
+    );
+    Ok(())
+}
+
+fn cmd_agent_report() -> Result<()> {
+    let app = app_open(false)?;
+    let run_store =
+        crate::infrastructure::store::run_store::RunEventStore::init(&app.project_root)?;
+
+    let run_ids = run_store.run_ids()?;
+    if run_ids.is_empty() {
+        println!("No agent runs found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<20} {:<15} {:<12} {:<10} {:<30}",
+        "RUN_ID", "TASK_ID", "ADAPTER", "PHASE", "WORKTREE"
+    );
+    for run_id in &run_ids {
+        let events = run_store.read_for_run(run_id)?;
+        let mut state = crate::domain::run::AgentRunState::new(run_id);
+        for event in &events {
+            if let Err(e) = crate::domain::run::apply_run(&mut state, event) {
+                eprintln!("Error replaying run {}: {}", run_id, e);
+                break;
+            }
+        }
+        let wt = state.worktree_path.as_deref().unwrap_or("-");
+        println!(
+            "{:<20} {:<15} {:<12} {:<10} {:<30}",
+            state.run_id, state.task_id, state.adapter, state.phase, wt
+        );
+    }
+
     Ok(())
 }

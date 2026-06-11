@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control.schedule-plan.v1.schema.json",
+  "title": "SchedulePlan",
+  "description": "Plan for concurrent execution of multiple tasks with non-overlapping write scopes.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "Schema version identifier.",
+      "type": "string",
+      "const": "control.schedule-plan.v1"
+    },
+    "plan_id": {
+      "description": "Unique plan identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "groups": {
+      "description": "Parallel execution groups. Tasks within each group run concurrently.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "description": "Group identifier.",
+            "type": "string",
+            "minLength": 1
+          },
+          "tasks": {
+            "description": "Task IDs in this group.",
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          }
+        },
+        "required": ["group_id", "tasks"],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "conflicts": {
+      "description": "Write scope conflicts that prevent concurrent execution.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task_a": {
+            "description": "First task ID in conflict.",
+            "type": "string",
+            "minLength": 1
+          },
+          "task_b": {
+            "description": "Second task ID in conflict.",
+            "type": "string",
+            "minLength": 1
+          },
+          "overlapping_paths": {
+            "description": "Paths where write scopes overlap.",
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          }
+        },
+        "required": ["task_a", "task_b", "overlapping_paths"],
+        "additionalProperties": false
+      }
+    },
+    "max_concurrent": {
+      "description": "Maximum concurrent agents per group.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "description": "ISO 8601 timestamp of plan creation.",
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "schema",
+    "plan_id",
+    "groups",
+    "conflicts",
+    "max_concurrent",
+    "created_at"
+  ],
+  "unevaluatedProperties": false
+}
