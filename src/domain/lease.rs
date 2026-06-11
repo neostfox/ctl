@@ -31,4 +31,22 @@ pub struct LeaseState {
     pub created_at_seq: i64,
     pub status: LeaseStatus,
 }
+impl LeaseState {
+    /// Check if the lease is currently active.
+    #[allow(dead_code)]
+    pub fn is_active(&self) -> bool {
+        self.status == LeaseStatus::Active
+    }
 
+    /// Check if the lease has been revoked.
+    #[allow(dead_code)]
+    pub fn is_revoked(&self) -> bool {
+        self.status == LeaseStatus::Revoked
+    }
+
+    /// Check if the lease has expired (TTL or max uses exceeded).
+    #[allow(dead_code)]
+    pub fn is_expired(&self) -> bool {
+        self.status == LeaseStatus::Expired
+    }
+}
