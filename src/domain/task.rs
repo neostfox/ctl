@@ -61,6 +61,16 @@ pub struct RunInfo {
     pub started_at_seq: i64,
 }
 
+impl fmt::Display for RunInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Run({}) adapter={} lease={}",
+            self.run_id, self.adapter, self.lease_id
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
     pub id: String,
