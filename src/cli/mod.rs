@@ -2410,8 +2410,9 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
 }
 
 /// Classify a bash command into an action category.
-fn classify_bash(command: &str) -> &'static str {
-    let cmd = command.trim();
+/// Classify a single (non-compound) command segment.
+fn classify_bash_segment(segment: &str) -> &'static str {
+    let cmd = segment.trim();
     if cmd.starts_with("git commit") || cmd.starts_with("git add") {
         "git_commit"
     } else if cmd.starts_with("git push") {
@@ -2424,6 +2425,39 @@ fn classify_bash(command: &str) -> &'static str {
         || cmd.starts_with("cargo fmt")
         || cmd.starts_with("cargo clippy")
     {
+        "cargo_build"
+    } else {
+        "bash_other"
+    }
+}
+
+/// Classify a bash command for gating. Compound commands (`a && b`, `a; b`,
+/// `a | b`, `$(a)`) are classified by their MOST restrictive segment — otherwise
+/// `cp x y && git push` would slip through as `bash_other` (the loophole the
+/// architecture review found). Best-effort only: a caller with shell access can
+/// still obscure intent (eval, base64, env-indirection); this discourages and
+/// audits casual composition, it is not a hard security boundary.
+fn classify_bash(command: &str) -> &'static str {
+    let (mut push, mut deps, mut commit, mut build) = (false, false, false, false);
+    // Split on shell control/grouping operators so a restricted action inside a
+    // compound or substitution (`$(..)`, backticks) becomes its own segment.
+    for segment in command.split(|c| matches!(c, ';' | '\n' | '&' | '|' | '(' | ')' | '`')) {
+        match classify_bash_segment(segment) {
+            "git_push" => push = true,
+            "cargo_deps" => deps = true,
+            "git_commit" => commit = true,
+            "cargo_build" => build = true,
+            _ => {}
+        }
+    }
+    // Most restrictive wins: step-up actions first, then commit window, then build.
+    if push {
+        "git_push"
+    } else if deps {
+        "cargo_deps"
+    } else if commit {
+        "git_commit"
+    } else if build {
         "cargo_build"
     } else {
         "bash_other"
@@ -2853,4 +2887,34 @@ fn cmd_hook_spec_status() -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_bash;
+
+    #[test]
+    fn simple_commands_classify_directly() {
+        assert_eq!(classify_bash("git push origin master"), "git_push");
+        assert_eq!(classify_bash("git commit -m x"), "git_commit");
+        assert_eq!(classify_bash("cargo add serde"), "cargo_deps");
+        assert_eq!(classify_bash("cargo test"), "cargo_build");
+        assert_eq!(classify_bash("ls -la"), "bash_other");
+    }
+
+    #[test]
+    fn compound_commands_use_most_restrictive_segment() {
+        // The loophole: a benign prefix must not let a restricted action ride in.
+        assert_eq!(classify_bash("cp a b && git push origin master"), "git_push");
+        assert_eq!(classify_bash("echo hi; git commit -m x"), "git_commit");
+        assert_eq!(classify_bash("ls | cargo add serde"), "cargo_deps");
+        assert_eq!(classify_bash("git commit -m x && git push"), "git_push");
+        assert_eq!(classify_bash("true || cargo install foo"), "cargo_deps");
+    }
+
+    #[test]
+    fn subshell_and_backtick_segments_are_scanned() {
+        assert_eq!(classify_bash("echo $(git push)"), "git_push");
+        assert_eq!(classify_bash("x=`git push`"), "git_push");
+    }
 }
