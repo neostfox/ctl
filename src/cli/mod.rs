@@ -142,6 +142,26 @@ enum TaskCommands {
         #[arg(long = "gates", required = true)]
         gates: Vec<String>,
     },
+    /// Fuse create + ready + start into one command with sensible defaults.
+    /// Keeps the write boundary explicit (`--write-allow` required) but removes
+    /// the three-step ceremony for small changes.
+    Quick {
+        /// Paths the agent may write — the task boundary; repeat for multiple
+        #[arg(long = "write-allow", required = true)]
+        write_allow: Vec<String>,
+        /// Task objective
+        #[arg(long, default_value = "quick change")]
+        objective: String,
+        /// Task id (default: quick-<unix_timestamp>)
+        #[arg(long)]
+        id: Option<String>,
+        /// Read scope (default: same as --write-allow); repeat for multiple
+        #[arg(long = "read-scope")]
+        read_scope: Vec<String>,
+        /// Required gates (default: cargo_check, cargo_test); repeat for multiple
+        #[arg(long = "gates")]
+        gates: Vec<String>,
+    },
     /// Revise a Planning task boundary; omitted fields keep current values
     Revise {
         /// Stable task identifier
@@ -597,6 +617,55 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 },
             )?;
             println!("Created task '{}' at seq {}.", id, event.seq);
+        }
+        TaskCommands::Quick {
+            write_allow,
+            objective,
+            id,
+            read_scope,
+            gates,
+        } => {
+            let task_id = match id {
+                Some(i) => i.clone(),
+                None => {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    format!("quick-{}", secs)
+                }
+            };
+            let read: Vec<String> = if read_scope.is_empty() {
+                write_allow.clone()
+            } else {
+                read_scope.clone()
+            };
+            let gate_list: Vec<String> = if gates.is_empty() {
+                vec!["cargo_check".to_string(), "cargo_test".to_string()]
+            } else {
+                gates.clone()
+            };
+            let empty: Vec<String> = Vec::new();
+            app.create_task(
+                &task_id,
+                CreateTaskInput {
+                    objective,
+                    read_scope: &read,
+                    write_allow,
+                    write_deny: &empty,
+                    risk_triggers: &empty,
+                    gates: &gate_list,
+                },
+            )?;
+            app.mark_ready(&task_id)?;
+            let event = app.start_task(&task_id)?;
+            println!(
+                "Quick task '{}' created, ready, started at seq {} — write scope: [{}], gates: [{}]",
+                task_id,
+                event.seq,
+                write_allow.join(", "),
+                gate_list.join(", ")
+            );
         }
         TaskCommands::Revise {
             id,
@@ -1498,8 +1567,8 @@ fn check_milestone_scope() -> Result<()> {
         "task CLI",
         task_command.get_subcommands().map(|cmd| cmd.get_name()),
         [
-            "create", "revise", "ready", "status", "start", "submit", "reopen", "finish", "cancel",
-            "archive",
+            "create", "quick", "revise", "ready", "status", "start", "submit", "reopen", "finish",
+            "cancel", "archive",
         ],
     )?;
 
