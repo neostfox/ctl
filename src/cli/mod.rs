@@ -451,6 +451,21 @@ enum HookCommands {
         #[arg(long)]
         path: String,
     },
+    /// Unified governance gate: check action against task state machine
+    Gate {
+        /// Tool name: write, edit, bash, read, search, find, task, other
+        #[arg(long)]
+        tool: String,
+        /// Target path (for write/edit)
+        #[arg(long)]
+        path: Option<String>,
+        /// Command string (for bash)
+        #[arg(long)]
+        command: Option<String>,
+        /// Subagent type (for task tool): explore, task, oracle, etc.
+        #[arg(long)]
+        agent_type: Option<String>,
+    },
     /// Append a decision record to decisions.jsonl
     RecordDecision {
         /// JSON object to record
@@ -1913,6 +1928,17 @@ fn cmd_hook(command: &HookCommands) -> Result<()> {
         HookCommands::Context => cmd_hook_context(),
         HookCommands::Breadcrumb => cmd_hook_breadcrumb(),
         HookCommands::CheckWrite { path } => cmd_hook_check_write(path),
+        HookCommands::Gate {
+            tool,
+            path,
+            command,
+            agent_type,
+        } => cmd_hook_gate(
+            tool,
+            path.as_deref(),
+            command.as_deref(),
+            agent_type.as_deref(),
+        ),
         HookCommands::RecordDecision { data } => cmd_hook_record_decision(data),
         HookCommands::SpecStatus => cmd_hook_spec_status(),
     }
@@ -1934,10 +1960,25 @@ fn cmd_hook_context() -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown");
         *by_phase.entry(phase.to_string()).or_default() += 1;
-        if phase == "InProgress" {
+        if phase == "inprogress" {
+            let task_id = report.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            // Replay to get full boundary for context injection
+            let boundary = app
+                .replay_task(task_id)
+                .ok()
+                .map(|s| {
+                    serde_json::json!({
+                        "write_allow": s.write_allow,
+                        "write_deny": s.write_deny,
+                        "read_scope": s.read_scope,
+                        "gates": s.gates,
+                    })
+                })
+                .unwrap_or(serde_json::json!({}));
             active.push(serde_json::json!({
-                "id": report.get("task_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "id": task_id,
                 "objective": report.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
+                "boundary": boundary,
             }));
         }
     }
@@ -2105,6 +2146,382 @@ fn cmd_hook_check_write(target_path: &str) -> Result<()> {
     });
 
     println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+// ── Governance state machine ──────────────────────────────────────────
+
+/// Governance state derived from the task ledger.
+#[derive(Debug)]
+enum GovState {
+    /// No .ctl directory — not a governed project
+    Ungoverned,
+    /// Tasks exist but none active
+    Idle,
+    /// A task is in_progress (with optional hold)
+    InProgress {
+        task_id: String,
+        write_allow: Vec<String>,
+        is_held: bool,
+    },
+    /// A task is in review
+    Review,
+    /// A task is completed but not yet archived (commit window)
+    Completed {
+        task_id: String,
+        write_allow: Vec<String>,
+    },
+}
+
+fn compute_gov_state(project_root: &Path) -> Result<GovState> {
+    let tasks_dir = project_root.join(".ctl").join("tasks");
+    if !tasks_dir.exists() {
+        return Ok(GovState::Ungoverned);
+    }
+
+    let app = ControlApp::open(project_root, false)?;
+    let reports = app.generate_status_report()?;
+
+    // Priority: Held > InProgress > Completed > Review > Idle
+    for report in &reports {
+        let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        let is_held = report
+            .get("is_held")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_archived = report
+            .get("is_archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let task_id = report
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if is_archived {
+            continue;
+        }
+
+        if phase == "inprogress" {
+            let state = app.replay_task(&task_id)?;
+            return Ok(GovState::InProgress {
+                task_id,
+                write_allow: state.write_allow.iter().cloned().collect(),
+                is_held,
+            });
+        }
+    }
+
+    // Check for completed (not archived) — commit window
+    for report in &reports {
+        let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        let is_archived = report
+            .get("is_archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let task_id = report
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !is_archived && phase == "completed" {
+            let state = app.replay_task(&task_id)?;
+            return Ok(GovState::Completed {
+                task_id,
+                write_allow: state.write_allow.iter().cloned().collect(),
+            });
+        }
+    }
+
+    // Check for review
+    for report in &reports {
+        let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        let is_archived = report
+            .get("is_archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !is_archived && phase == "review" {
+            return Ok(GovState::Review);
+        }
+    }
+
+    // Any non-archived tasks at all?
+    let has_active = reports.iter().any(|r| {
+        !r.get("is_archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    });
+    if has_active {
+        Ok(GovState::Idle)
+    } else {
+        Ok(GovState::Ungoverned)
+    }
+}
+
+/// Classify a bash command into an action category.
+fn classify_bash(command: &str) -> &'static str {
+    let cmd = command.trim();
+    if cmd.starts_with("git commit") || cmd.starts_with("git add") {
+        "git_commit"
+    } else if cmd.starts_with("git push") {
+        "git_push"
+    } else if cmd.starts_with("cargo add") || cmd.starts_with("cargo install") {
+        "cargo_deps"
+    } else if cmd.starts_with("cargo check")
+        || cmd.starts_with("cargo test")
+        || cmd.starts_with("cargo build")
+        || cmd.starts_with("cargo fmt")
+        || cmd.starts_with("cargo clippy")
+    {
+        "cargo_build"
+    } else {
+        "bash_other"
+    }
+}
+
+/// Check if a path is within any of the allowed scopes.
+fn path_in_scope(project_root: &Path, path: &str, scopes: &[String]) -> bool {
+    let resolved = if Path::new(path).is_relative() {
+        project_root.join(path)
+    } else {
+        Path::new(path).to_path_buf()
+    };
+    scopes
+        .iter()
+        .any(|s| resolved.starts_with(project_root.join(s)))
+}
+
+/// Check if a path targets the spec directory (always writable for updates).
+fn is_spec_path(project_root: &Path, path: &str) -> bool {
+    let resolved = if Path::new(path).is_relative() {
+        project_root.join(path)
+    } else {
+        Path::new(path).to_path_buf()
+    };
+    resolved.starts_with(project_root.join(".ctl").join("spec"))
+}
+/// Short string for GovState variant (no Debug payload).
+fn gov_state_str(state: &GovState) -> &'static str {
+    match state {
+        GovState::Ungoverned => "ungoverned",
+        GovState::Idle => "idle",
+        GovState::InProgress { .. } => "in_progress",
+        GovState::Review => "review",
+        GovState::Completed { .. } => "completed",
+    }
+}
+
+fn cmd_hook_gate(
+    tool: &str,
+    path: Option<&str>,
+    command: Option<&str>,
+    agent_type: Option<&str>,
+) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let state = compute_gov_state(&project_root)?;
+
+    // UNGOVERNED — no .ctl, allow everything
+    if matches!(state, GovState::Ungoverned) {
+        let output = serde_json::json!({
+            "allowed": true,
+            "state": "ungoverned",
+            "reason": "no .ctl directory — project not governed"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // Read-only tools always allowed
+    if matches!(
+        tool,
+        "read" | "search" | "find" | "ast_grep" | "lsp" | "eval" | "todo"
+    ) {
+        let output = serde_json::json!({
+            "allowed": true,
+            "state": gov_state_str(&state),
+            "reason": "read-only tool"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // HELD — block everything except reads
+    if let GovState::InProgress { is_held: true, .. } = &state {
+        let output = serde_json::json!({
+            "allowed": false,
+            "state": "held",
+            "reason": "task is held — resolve hold before proceeding",
+            "remedy": "ctl task status --id <id> to see hold reason"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    match tool {
+        "write" | "edit" => {
+            let target = path.unwrap_or("");
+
+            // Spec path always writable (except when held)
+            if is_spec_path(&project_root, target) {
+                let output = serde_json::json!({
+                    "allowed": true,
+                    "state": gov_state_str(&state),
+                    "reason": "spec path — always writable"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+
+            match &state {
+                GovState::InProgress {
+                    task_id,
+                    write_allow,
+                    ..
+                } => {
+                    let in_scope = path_in_scope(&project_root, target, write_allow);
+                    let output = serde_json::json!({
+                        "allowed": in_scope,
+                        "state": "in_progress",
+                        "task_id": task_id,
+                        "reason": if in_scope { "within write_allow" } else { "outside write_allow" },
+                        "remedy": if in_scope { "" } else { "widen scope via ctl task revise or use /ctl-apply" }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                _ => {
+                    let output = serde_json::json!({
+                        "allowed": false,
+                        "state": gov_state_str(&state),
+                        "reason": "no active in_progress task — create one first",
+                        "remedy": "use control-guard skill to create a task, or user says 'skip control'"
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+            }
+        }
+        "bash" => {
+            let cmd_str = command.unwrap_or("");
+            let action = classify_bash(cmd_str);
+
+            match action {
+                "git_commit" => match &state {
+                    GovState::Completed {
+                        task_id,
+                        write_allow,
+                    } => {
+                        let output = serde_json::json!({
+                            "allowed": true,
+                            "state": "completed",
+                            "task_id": task_id,
+                            "reason": "commit window open for completed task",
+                            "scope": write_allow
+                        });
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
+                    _ => {
+                        let output = serde_json::json!({
+                            "allowed": false,
+                            "state": gov_state_str(&state),
+                            "reason": "git commit only allowed when task is completed",
+                            "remedy": "ctl task submit --id <id> && ctl task finish --id <id>"
+                        });
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
+                },
+                "git_push" => {
+                    let output = serde_json::json!({
+                        "allowed": false,
+                        "state": gov_state_str(&state),
+                        "reason": "git push requires step-up approval",
+                        "remedy": "ctl approval request --action push"
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                "cargo_deps" => {
+                    let output = serde_json::json!({
+                        "allowed": false,
+                        "state": gov_state_str(&state),
+                        "reason": "dependency changes require step-up approval",
+                        "remedy": "ctl approval request --action deps"
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                "cargo_build" => {
+                    // cargo check/test/build/fmt allowed in InProgress, Review, Completed
+                    let allow = matches!(
+                        &state,
+                        GovState::InProgress { .. }
+                            | GovState::Review
+                            | GovState::Completed { .. }
+                            | GovState::Idle
+                    );
+                    let output = serde_json::json!({
+                        "allowed": allow,
+                        "state": gov_state_str(&state),
+                        "reason": if allow { "cargo tool allowed" } else { "not in a build-capable state" }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                _ => {
+                    // bash_other — allow in InProgress/Completed, warn in Idle
+                    let allow = !matches!(&state, GovState::Ungoverned);
+                    let output = serde_json::json!({
+                        "allowed": allow,
+                        "state": gov_state_str(&state),
+                        "reason": if allow { "bash allowed" } else { "ungoverned" }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+            }
+        }
+        "task" => {
+            // Spawning subagents — govern based on agent type and state
+            let at = agent_type.unwrap_or("task");
+            let is_readonly = matches!(at, "explore");
+
+            if is_readonly {
+                // Read-only subagents (explore) always allowed
+                let output = serde_json::json!({
+                    "allowed": true,
+                    "state": gov_state_str(&state),
+                    "reason": "read-only subagent"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                // Writable subagents inherit governance from task ledger.
+                // Block in IDLE/REVIEW/HELD — force parent to have active task.
+                let allow = matches!(
+                    &state,
+                    GovState::Ungoverned | GovState::InProgress { .. } | GovState::Completed { .. }
+                );
+                let output = serde_json::json!({
+                    "allowed": allow,
+                    "state": gov_state_str(&state),
+                    "agent_type": at,
+                    "reason": if allow {
+                        "subagent inherits governance from task ledger"
+                    } else {
+                        "no active task — subagent would operate without governance"
+                    },
+                    "remedy": if allow { "" } else {
+                        "create a ctl task first: ctl task create + ready + start"
+                    }
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+        _ => {
+            // Unknown tool — default allow
+            let output = serde_json::json!({
+                "allowed": true,
+                "state": gov_state_str(&state),
+                "reason": "unknown tool — default allow"
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
     Ok(())
 }
 

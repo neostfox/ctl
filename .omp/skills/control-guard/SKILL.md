@@ -1,81 +1,144 @@
 ---
 name: control-guard
-description: "Control plane entry point. Auto-loaded every session. Routes task lifecycle, code quality diagnosis, and spec management. All findings follow the Iron Law: Symptom → Source → Consequence → Remedy."
+description: "Control plane entry point. Auto-loaded every session. Proactively routes task lifecycle — detects multi-step work, creates ctl tasks with clear boundaries, injects scope into conversation. All findings follow the Iron Law: Symptom → Source → Consequence → Remedy."
 ---
 
 # Control Guard
 
-Auto-loaded every session. You enforce the control plane, not orchestrate the LLM's thinking.
-
-## One Rule
-
-**The main agent NEVER runs `ctl` commands directly — they go through this skill.**
-
-## When to Engage
-
-Engage: modifying source files, clear verifiable objective, multi-file change, feature/bugfix/refactoring.
-Skip: pure conversation, read-only, user says "skip control".
-
-## The Iron Law
+Auto-loaded every session. You **proactively enforce** the two-layer governance model:
 
 ```
-NEVER suggest fixes before completing risk diagnosis.
-EVERY finding MUST follow: Symptom → Source → Consequence → Remedy.
+ctl task (parent)     — declared scope, gates, boundaries
+  └─ OMP todo (child) — subtask tracking within parent's write_allow
 ```
 
-A finding without all four fields is noise, not a diagnosis. Severity labels: 🔴 Critical / 🟡 Warning / 🟢 Suggestion.
+## The Core Problem This Solves
 
----
+Without control-guard: the model dives into work using OMP todo, but **no task boundaries are declared, no gates are set, no audit trail exists**. Work happens un governed.
+
+With control-guard: **before** any multi-file change, you create a ctl task. The hook auto-injects boundaries into every conversation turn. Writes outside scope are blocked.
+
+## When to Engage (PROACTIVE)
+
+**You MUST propose creating ctl tasks when you detect:**
+- Multi-file changes (2+ files to modify)
+- Feature/bugfix/refactoring with a clear objective
+- User describes a problem that needs investigation + code changes
+- Any work that would benefit from audit trail and scope enforcement
+
+**Skip (let the model work freely):**
+- Pure conversation / Q&A
+- Read-only exploration
+- Trivial single-file edit (typo, comment)
+- User explicitly says "skip control"
 
 ## Task Proposal Flow
 
-When you detect a task-worthy request:
+When you detect task-worthy work, **you initiate** — don't wait for the user:
 
+### Step 1: Analyze the request
 1. **Read specs** — load `.ctl/spec/backend/index.md` and relevant layer specs
-2. **Read codebase** — read relevant source files. Never propose blind.
-3. **Infer boundaries** — id, objective, read_scope, write_allow, gates. `write_allow` is always minimal.
-4. **Present proposal** for approval:
+2. **Read codebase** — read the files that will be affected
+3. **Infer boundaries** — determine read_scope, write_allow (always minimal), gates
+
+### Step 2: Present proposal for approval
 
 ```
 📋 Task Proposal: <id>
 
   Objective: <one sentence>
-  
-  📖 Read:    <files>
-  ✏️ Write:   <files>
+
+  📖 Read:    <files/dirs>
+  ✏️ Write:   <files/dirs — minimal, just what needs to change>
+  🚫 Deny:    <protected paths if any>
   🔍 Gates:   <gate list>
   ⚠️ Risks:   <risks>
   📋 Specs:   <which spec files were loaded>
-  
+
   ✅ approve  ✏️ adjust  ❌ skip
 ```
 
-5. **After approval** → execute task lifecycle commands below.
+### Step 3: After approval — create and start
+
+```bash
+ctl task create --id <id> --objective "<text>" \
+  --read-scope <path>... --write-allow <path>... --gates <gate>...
+ctl task ready --id <id>
+ctl task start --id <id>
+```
+
+### Step 4: Use OMP todo for subtasks within the task
+
+After the ctl task is active, break the work into subtasks using your **todo list**. Each subtask operates within the parent task's `write_allow`. The hook auto-injects boundaries on every turn.
+
+### Step 5: Close the task
+
+```bash
+ctl task submit --id <id>
+ctl task finish --id <id>
+ctl task archive --id <id>
+```
+
+## Batch Task Creation
+
+When the user describes a **large effort** (e.g., "rebuild all specs", "fix all P0 issues", "migrate to new framework"):
+
+1. **Decompose** into independent parent tasks, each with **non-overlapping write_scope**
+2. **Present all proposals at once**:
+   ```
+   📋 Batch Proposal: <effort name>
+
+     Task 1: <id> — <objective>
+       ✏️ Write: <paths>
+       🔍 Gates: <gates>
+
+     Task 2: <id> — <objective>
+       ✏️ Write: <paths>
+       🔍 Gates: <gates>
+
+     ...
+
+     ✅ approve all  ✏️ adjust  ❌ skip
+   ```
+3. **Create all approved tasks** in sequence
+4. **Work through them one at a time** — the hook tracks which is active
+
+### Boundary Auto-Inference Rules
+
+| Signal | write_allow inference |
+|---|---|
+| Single file fix | That file only |
+| Module change | `src/<module>/` |
+| Cross-module refactor | Multiple `--write-allow` entries, one per module |
+| Spec regeneration | `.ctl/spec/` |
+| Schema change | `schemas/` + `src/domain/` |
+| Test addition | `tests/` or matching source dir |
+
+**write_allow is ALWAYS minimal.** Start narrow, widen only with explicit approval.
 
 ## Command Reference
 
-| Action | Commands (run in order) |
+| Action | Commands |
 |---|---|
-| **New task** | `ctl task create --id <id> --objective "<text>" --read-scope <path>... --write-allow <path>... --gates <gate>...` → `ctl task ready --id <id>` → `ctl task start --id <id>` → `ctl run start --id <id> --adapter omp` |
-| **Apply changes** | `ctl run diff --id <id>` → `ctl run apply --id <id>` → `ctl run ingest --id <id>` |
-| **Close task** | `ctl run gates --id <id>` → `ctl task submit --id <id>` → `ctl task finish --id <id>` → `ctl task archive --id <id>` |
-| **Abort task** | `ctl run stop --id <id>` → `ctl task cancel --id <id>` |
+| **New task** | `ctl task create --id <id> --objective "<text>" --read-scope <path>... --write-allow <path>... --gates <gate>...` → `ctl task ready --id <id>` → `ctl task start --id <id>` |
 | **Check status** | `ctl task status --id <id>` |
+| **Close task** | `ctl task submit --id <id>` → `ctl task finish --id <id>` → `ctl task archive --id <id>` |
+| **Abort task** | `ctl task cancel --id <id>` |
 | **Health check** | `ctl doctor` |
 | **Generate specs** | `/ctl-spec-bootstrap` |
 | **Update specs** | `/ctl-spec-update` |
 
-## Implementation Phase
+## How the Hook Works (So You Don't Fight It)
 
-After task is created and started:
+The `.omp/hooks/pre/ctl-context.ts` hook does these automatically — **you don't need to replicate them**:
 
-1. Work inside the OMP worktree
-2. **Before every file write**: verify target is within `write_allow`
-3. When implementation is complete → run Apply commands
-4. After Apply → run Close commands
-5. After Close → check if spec update is needed → if yes, `/ctl-spec-update`
+1. **`session_start` → `context`**: injects active task boundaries into every LLM call. You'll see `📋 Active ctl task boundaries` in context.
+2. **`before_agent_start`**: warns if there's no active task but history exists.
+3. **`tool_call`**: blocks writes outside `write_allow`. Returns `block: true` with reason.
+4. **`agent_end`**: detects spec drift, warns to regenerate.
+5. **`session_shutdown`**: reminds of unfinished tasks.
 
----
+**If a write is blocked**, the hook message tells you which task and which path. Don't bypass — either widen scope via `ctl task revise` or redirect your work.
 
 ## Code Quality Diagnosis
 
@@ -85,120 +148,59 @@ When user asks to review code, audit architecture, check tech debt, assess tests
 
 | User intent | Read | Output mode |
 |---|---|---|
-| Review PR / diff / "does this look right?" | `decay-risks.md` + `test-decay-risks.md` | PR Review |
-| Audit architecture / "how is this organized?" | `decay-risks.md` (R5 focus) | Architecture Audit + Mermaid dependency graph |
-| Tech debt / "what to fix first?" | `decay-risks.md` | Tech Debt Assessment + Pain × Spread table |
-| Test quality / "are tests good?" | `test-decay-risks.md` | Test Quality Review |
-| Overall health / "how healthy?" | Both risk files | Health Dashboard (4-dimension score) |
-| "Fix everything" / sweep | Both risk files + `failure-diagnosis.md` | Full Sweep (diagnose + auto-fix safe items) |
+| Review PR / diff | `decay-risks.md` + `test-decay-risks.md` | PR Review |
+| Audit architecture | `decay-risks.md` (R5 focus) | Architecture Audit + Mermaid graph |
+| Tech debt | `decay-risks.md` | Tech Debt Assessment |
+| Test quality | `test-decay-risks.md` | Test Quality Review |
+| Overall health | Both risk files | Health Dashboard (4-dimension score) |
 
-### How to Diagnose
+### Iron Law
 
-1. **Determine scope** — if no files specified: `git diff --cached` → `git diff` → `git diff main...HEAD` → ask user
-2. **Read the relevant risk guide** from `.ctl/spec/guides/` — on demand, not preloaded
-3. **Scan for symptoms** — check each risk code's symptom list against actual code
-4. **Apply What NOT to Flag** — exclude false positives per the guide
-5. **Apply Iron Law** — every finding must be: `Symptom → Source → Consequence → Remedy`
-6. **Assign severity** — 🔴 Critical / 🟡 Warning / 🟢 Suggestion per the guide's severity rules
-7. **Compute Health Score** — Base 100. Critical −15, Warning −5, Suggestion −1. Floor 0.
-
-### Report Template
-
-```markdown
-# ctl Diagnosis
-
-**Mode:** [PR Review / Architecture Audit / Tech Debt / Test Quality / Health Dashboard]
-**Scope:** [what was analyzed]
-**Health Score:** XX/100
-
-[One sentence overall verdict]
-
----
-
-## Findings
-
-### 🔴 Critical
-
-**[Risk Code] — [Title]**
-- Symptom: [what was observed]
-- Source: [which risk pattern]
-- Consequence: [what breaks if unfixed]
-- Remedy: [concrete action]
-
-### 🟡 Warning
-[same format]
-
-### 🟢 Suggestion
-[same format]
-
----
-
-## Summary
-
-[2-3 sentences: most important action, overall trend]
+```
+NEVER suggest fixes before completing risk diagnosis.
+EVERY finding MUST follow: Symptom → Source → Consequence → Remedy.
 ```
 
-### Architecture Audit Extras
+Severity: 🔴 Critical / 🟡 Warning / 🟢 Suggestion. Health Score: Base 100, Critical −15, Warning −5, Suggestion −1. Floor 0.
 
-When mode is Architecture Audit, add **Mermaid dependency graph** as the first element before Findings:
+## Subagent Governance
 
-```mermaid
-graph TD
-    CLI["cli/"] --> APP["application/"]
-    APP --> DOM["domain/"]
-    INFRA["infrastructure/"] --> DOM
-    style DOM fill:#e1f5fe
-    style INFRA fill:#fce4ec
-```
+### Spawn Rules (enforced by hook)
 
-Color code: domain=blue, entry=orange, infrastructure=red, adapters=green. Violations as red dashed edges.
+The `task` tool is gated by the state machine:
 
-### Health Dashboard
+| Subagent type | IDLE | IN_PROGRESS | COMPLETED |
+|---|---|---|---|
+| `explore` (read-only) | ✅ | ✅ | ✅ |
+| `task` / `oracle` / `designer` | ❌ block | ✅ | ✅ |
 
-Run abbreviated scans across 4 dimensions, each gets own Health Score:
-- PR Quality (weight 0.25)
-- Architecture (weight 0.30)
-- Tech Debt (weight 0.20)
-- Test Quality (weight 0.25)
+**When spawning is blocked**: create a ctl task first (`ctl task create + ready + start`), then spawn subagents. Subagents inherit governance from the task ledger — their writes are gated by the same `write_allow` boundaries.
 
-Composite = weighted average. Display trend if prior data exists.
+### Timeout Policy (enforced by hook)
 
-### Full Sweep Auto-Fix
+Writable subagents have a **5-minute timeout** (configurable via `CTL_SUBAGENT_TIMEOUT_MS` env var). The hook tracks elapsed time per subagent:
 
-When user says "fix everything":
-1. Show pre-flight consent and wait for approval
-2. Run 4 dimensions in sequence
-3. Each finding classified: **Safe** (auto-fix: rename, extract constant) / **Extended-Safe** (auto-fix with test verification) / **Manual** (requires human decision)
-4. Apply Safe + Extended-Safe fixes
-5. Re-scan modified files; converge; 3-retry cap per item
-6. Report: applied fixes + residual items + unresolvable set
+- After threshold: `job poll` is **blocked** with a cancel directive.
+- You MUST then: `job cancel [<id>]` and handle the work directly or re-spawn with a **smaller assignment**.
 
----
+### Best Practices
 
-## On Failure
-
-When something breaks (gate fail, boundary violation, crash):
-
-1. Read the relevant guide **on demand**:
-   - Diagnosing cause → `.ctl/spec/guides/failure-diagnosis.md`
-   - Estimating scope → `.ctl/spec/guides/complexity-classification.md`
-   - Root cause from fundamentals → `.ctl/spec/guides/first-principles.md`
-2. These are **reference materials**, not auto-triggers. Read them when needed.
-3. If diagnosis reveals a pattern worth preserving → `/ctl-spec-update`
+- **Break large assignments** — if a subagent is writing >3 files, split into multiple smaller subagents or do it directly.
+- **Use `explore` for investigation** — read-only subagents have no timeout restriction.
+- **Prefer direct work for simple tasks** — spawning a subagent for a 1-file edit wastes overhead.
+- **Monitor early polls** — if the first poll shows no progress after 1 minute, cancel immediately rather than waiting for the timeout.
 
 ## Error Handling
 
-- **Path rejected**: `ctl boundary explain --path <path>`, fix path, retry. Never widen to root.
+- **Write blocked**: `ctl boundary explain --path <path>`, fix path, retry. Never widen to root.
 - **Task id exists**: Propose new id. Never mutate existing events.
-- **Active run blocks start**: Abort first.
 - **Any command fails**: STOP, report error, do not skip steps.
 
 ## Anti-Patterns
 
-- ❌ Run `ctl` directly without going through this skill
+- ❌ Start writing code without creating a ctl task (for multi-file work)
+- ❌ Run `ctl` commands without going through this skill's flow
 - ❌ Skip spec loading before proposing boundaries
 - ❌ Modify files outside `write_allow`
 - ❌ Manually edit `events.jsonl` or `task.json`
-- ❌ Let knowledge stay in chat — capture to specs via `/ctl-spec-update`
 - ❌ Suggest a fix without diagnosing root cause (violates Iron Law)
-- ❌ Output a finding without all four Iron Law fields

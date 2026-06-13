@@ -24,8 +24,8 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
         },
         // Hooks (OMP native extension format)
         EmbeddedFile {
-            relative_path: "hooks/pre/ctl-context.js",
-            content: include_str!("../../.omp/hooks/pre/ctl-context.js"),
+            relative_path: "hooks/pre/ctl-context.ts",
+            content: include_str!("../../.omp/hooks/pre/ctl-context.ts"),
         },
     ]
 }
