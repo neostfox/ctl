@@ -2175,7 +2175,7 @@ fn cmd_hook_breadcrumb() -> Result<()> {
     let next_map = serde_json::json!({
         "Planning": "Revise scope, then `ctl task ready`",
         "Ready": "`ctl task start` to begin work",
-        "InProgress": "Implement in worktree, then `/ctl-apply` → `/ctl-close`",
+        "InProgress": "Implement, then `ctl task submit` (interlock check)",
         "Review": "`ctl task finish` (interlock check)",
         "Completed": "`ctl task archive` to clean up",
         "Cancelled": "`ctl task archive` to clean up",
@@ -2569,7 +2569,7 @@ fn cmd_hook_gate(
                         "state": "in_progress",
                         "task_id": task_id,
                         "reason": if in_scope { "within write_allow" } else { "outside write_allow" },
-                        "remedy": if in_scope { "" } else { "widen scope via ctl task revise or use /ctl-apply" }
+                        "remedy": if in_scope { "" } else { "widen scope via ctl task revise" }
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
@@ -2905,7 +2905,10 @@ mod tests {
     #[test]
     fn compound_commands_use_most_restrictive_segment() {
         // The loophole: a benign prefix must not let a restricted action ride in.
-        assert_eq!(classify_bash("cp a b && git push origin master"), "git_push");
+        assert_eq!(
+            classify_bash("cp a b && git push origin master"),
+            "git_push"
+        );
         assert_eq!(classify_bash("echo hi; git commit -m x"), "git_commit");
         assert_eq!(classify_bash("ls | cargo add serde"), "cargo_deps");
         assert_eq!(classify_bash("git commit -m x && git push"), "git_push");

@@ -459,6 +459,53 @@ ctl workspace merge-candidate
 
 全自动 merge、commit、push、deploy、动态扩权和多厂商并发。
 
+## 子代理审核门（硬层，设计冻结）
+
+软层已先行落地：control-guard 指挥主代理在「申请编辑」和「任务完成」时派只读 `ctl-review`
+子代理审核/审计，靠约定与 `explore` 只读放行生效。下列硬层把它从「约定」升级为「网关强制」，
+**顺序是先修治理基座、再上强制审核门**——每条都依赖前一条。本节为设计，未启用。
+
+### M-a：网关多活动任务治理（强制审核门的前置）
+
+**问题**：`compute_gov_state`（`src/cli/mod.rs`）遇到第一个 `in_progress` 任务即 early-return；
+多个任务同时活动时，其余在网关层静默失管。并发子代理审核会制造多活动任务，不修则强制门名存实亡。
+
+**方向**：网关按「派发该工具调用的那个任务」绑定治理（见 M-e），或在存在多活动写入任务时显式拒绝。
+与 M5（reconcile）的活动任务集合定义对齐。
+
+### M-b：control.json + `ctl board`
+
+**用户价值**：跨任务集中视图。reconcile 投影 `control.json`（AGENTS.md 预留，M5+），
+`ctl board` 按 phase / hold / active / gate / 审核裁决聚合全部任务。审核裁决数据来自软层的
+verdict→evidence 事件。
+
+### M-c：跨任务影响接入网关
+
+**方向**：「申请编辑」时调用现有 `src/application/schedule.rs::detect_write_scope_overlap`，
+本次写入若撞上其他活动任务的 `write_allow` 则硬拒；补全当前为桩的 `ctl schedule validate` /
+`ctl schedule run`。
+
+### M-d：跨任务依赖边
+
+**方向**：在调度现有的互斥分组之上增加「A 先于 B」的依赖关系（恢复 Trellis parent/child 的能力），
+依赖写入任务声明而非靠树位置隐含。
+
+### M-e：子代理↔任务绑定
+
+**方向**：可写子代理按「派发它的那个任务」的 `write_allow` 受治，而非网关扫描第一个活动任务；
+与 M6 `AgentRun` aggregate 和 capability lease 对齐。
+
+### M-f：硬版审核门
+
+**命令**
+
+```text
+ctl apply --path <p>      # 越界编辑申请，记录 reviewer 裁决为事件
+ctl task finish           # 联锁：要求存在通过的完成审计裁决事件
+```
+
+**依赖**：M-a（多活动任务治理）+ M-e（子代理绑定）。在两者就绪前，审核门只能停留在软层。
+
 ## Dogfood Workflow
 
 最早验证路径：

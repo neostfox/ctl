@@ -48,7 +48,10 @@ def main() -> None:
         allow()  # not a gated tool
 
     try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        out = subprocess.run(
+            args, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
+        )
     except Exception:
         if tool in FAIL_CLOSED_TOOLS:
             deny("ctl gate unavailable (timeout or missing binary) — failing "

@@ -113,6 +113,16 @@ impl PathNormalizer {
     /// Uses separator-boundary matching so ".git" does not match "gitignored".
     fn is_protected(&self, path: &Path) -> bool {
         let s = path.to_string_lossy().to_lowercase();
+        // Carve-outs from the blanket `.ctl` protection: AI-writable control-plane
+        // config, treated like `.ctl/spec` (which the gate already exempts). These let
+        // the workflow doc be revised and the legacy scripts dir be retired under
+        // governance instead of requiring a human to bypass the boundary.
+        let s_fwd = s.replace('\\', "/");
+        for w in [".ctl/workflow.md", ".ctl/scripts"] {
+            if s_fwd == w || s_fwd.starts_with(&format!("{w}/")) {
+                return false;
+            }
+        }
         for p in &self.protected_paths {
             let p_lower = p.to_lowercase();
             if s == p_lower
@@ -224,9 +234,7 @@ mod tests {
     fn reject_protected_trellis() {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
-        assert!(norm
-            .normalize_write(".ctl/control/events.jsonl")
-            .is_err());
+        assert!(norm.normalize_write(".ctl/control/events.jsonl").is_err());
     }
     #[test]
     fn reject_canonical_task_events_path() {
@@ -259,6 +267,23 @@ mod tests {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
         assert!(norm.normalize_write("Cargo.lock").is_err());
+    }
+    #[test]
+    fn accept_carveout_ctl_workflow_md() {
+        // Carved out of .ctl protection — the workflow doc is AI-writable config.
+        let norm = PathNormalizer::new(PathBuf::from("."));
+        assert!(norm.normalize_write(".ctl/workflow.md").is_ok());
+    }
+    #[test]
+    fn accept_carveout_ctl_scripts() {
+        let norm = PathNormalizer::new(PathBuf::from("."));
+        assert!(norm.normalize_write(".ctl/scripts").is_ok());
+    }
+    #[test]
+    fn ctl_tasks_still_protected_after_carveout() {
+        // The carve-out must not widen to the canonical ledger.
+        let norm = PathNormalizer::new(PathBuf::from("."));
+        assert!(norm.normalize_write(".ctl/tasks/foo/events.jsonl").is_err());
     }
     #[test]
     fn accept_protected_paths_for_read() {

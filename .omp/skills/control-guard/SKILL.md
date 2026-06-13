@@ -16,7 +16,19 @@ ctl task (parent)     — declared scope, gates, boundaries
 
 Without control-guard: the model dives into work using OMP todo, but **no task boundaries are declared, no gates are set, no audit trail exists**. Work happens un governed.
 
-With control-guard: **before** any multi-file change, you create a ctl task. The hook auto-injects boundaries into every conversation turn. Writes outside scope are blocked.
+With control-guard: **before** any multi-file change, you create a ctl task. The hook auto-injects boundaries into every conversation turn. Writes outside scope are blocked. Work happens governed, reviewed, and audited.
+
+## Routing to specialist skills
+
+control-guard is the router. Hand off to the right skill, don't do everything inline:
+
+| Intent | Skill |
+|---|---|
+| Unclear requirements / new feature / scope a complex change | **ctl-brainstorm** (also `/ctl-new`) |
+| Review a change before it lands, or audit a task before finish | **ctl-review** (read-only sub-agent) |
+| A defect: gate/build/test failure, crash, recurring bug | **ctl-diagnose** |
+| Generate `.ctl/spec/` from source | **ctl-spec-bootstrap** (`/ctl-spec-bootstrap`) |
+| Capture a lesson into specs | **ctl-spec-update** (`/ctl-spec-update`) |
 
 ## When to Engage (PROACTIVE)
 
@@ -71,13 +83,65 @@ ctl task start --id <id>
 
 After the ctl task is active, break the work into subtasks using your **todo list**. Each subtask operates within the parent task's `write_allow`. The hook auto-injects boundaries on every turn.
 
-### Step 5: Close the task
+### Step 5: Close the task — completion audit first
+
+**Before `submit`, run the completion audit.** Dispatch `ctl-review` (mode B) over the
+whole task diff. Only proceed to `submit`/`finish` on a `pass` verdict; a `fail` sends the
+work back to fix-up.
 
 ```bash
+# 1. completion audit (sub-agent, read-only) — see Sub-Agent Review Protocol
+# 2. only if VERDICT: pass —
 ctl task submit --id <id>
 ctl task finish --id <id>
 ctl task archive --id <id>
 ```
+
+## Sub-Agent Review Protocol
+
+Two governance gates, both mediated by the read-only `ctl-review` sub-agent. Reviewers run
+as `explore` type — always spawnable (even pre-task), no write risk.
+
+### Gate 1 — edit review (申请编辑 → 子代理审核)
+
+Before applying an **out-of-scope edit** or a **batch of risk-bearing changes**, dispatch
+`ctl-review` (mode A) on the proposed diff. The reviewer returns findings + a `VERDICT`.
+Honor it: apply only on `pass` (zero 🔴 Critical). On `fail`, fix and re-review or redirect.
+
+This is the soft form of the `/ctl-apply` primitive (the hard, gate-enforced version is on
+the roadmap — see ROADMAP). Today it holds because you honor the verdict.
+
+### Gate 2 — completion audit (任务完成 → 子代理审查)
+
+Before `ctl task submit`/`finish`, dispatch `ctl-review` (mode B) over `git diff`. It runs
+the closure checklist (build/test/lint **evidence**, not assertions) and emits a Health
+Score + `VERDICT`. `fail` → back to fix-up.
+
+### Cross-task overlap check (before dispatching / editing)
+
+Before an edit review, check whether this write collides with **another active task's**
+`write_allow`. If `ctl` exposes a schedule/overlap check, use it; otherwise compare the
+active tasks from `ctl hook context` yourself. On overlap, flag it in the review and
+coordinate (sequence the tasks) before proceeding — concurrent writes to a shared path are
+how two tasks silently corrupt each other.
+
+### Recording verdicts (verdict → event)
+
+A verdict is evidence, not chat. After each audit, record it on the task ledger as evidence
+(e.g. `ctl assignment`/evidence path, or the audit command if available) so the trail
+survives compaction and can feed a future board. Never hand-edit `events.jsonl`.
+
+### Dispatch constraints (injected into every sub-agent)
+
+When you spawn any sub-agent, inject these behavioral constraints in the prompt — a
+sub-agent without them will cut corners:
+
+- **Closure discipline**: "done" requires evidence artifacts (build/test/curl output), not
+  claims. "Where is the data?"
+- **No speculation**: never assert a cause without tool verification.
+- **Exhaust before surrender**: read the error verbatim, search, read source context, test
+  the inverse hypothesis, try a fundamentally different approach — before giving up.
+- Always prefix the dispatch with the active task path so the sub-agent inherits governance.
 
 ## Batch Task Creation
 
@@ -125,6 +189,9 @@ When the user describes a **large effort** (e.g., "rebuild all specs", "fix all 
 | **Close task** | `ctl task submit --id <id>` → `ctl task finish --id <id>` → `ctl task archive --id <id>` |
 | **Abort task** | `ctl task cancel --id <id>` |
 | **Health check** | `ctl doctor` |
+| **Plan / scope a task** | `ctl-brainstorm` (`/ctl-new`) |
+| **Review / audit** | `ctl-review` (mode A edit · mode B completion audit) |
+| **Diagnose a defect** | `ctl-diagnose` |
 | **Generate specs** | `/ctl-spec-bootstrap` |
 | **Update specs** | `/ctl-spec-update` |
 
@@ -133,8 +200,8 @@ When the user describes a **large effort** (e.g., "rebuild all specs", "fix all 
 The `.omp/hooks/pre/ctl-context.ts` hook does these automatically — **you don't need to replicate them**:
 
 1. **`session_start` → `context`**: injects active task boundaries into every LLM call. You'll see `📋 Active ctl task boundaries` in context.
-2. **`before_agent_start`**: warns if there's no active task but history exists.
-3. **`tool_call`**: blocks writes outside `write_allow`. Returns `block: true` with reason.
+2. **`tool_call`**: blocks writes outside `write_allow` (and gates git/deps/subagent spawn) via the ctl state machine. Returns `block: true` with reason. Also tracks the per-subagent timeout.
+3. **`tool_result`**: cleans up finished subagents from timeout tracking.
 4. **`agent_end`**: detects spec drift, warns to regenerate.
 5. **`session_shutdown`**: reminds of unfinished tasks.
 
@@ -174,7 +241,10 @@ The `task` tool is gated by the state machine:
 | `explore` (read-only) | ✅ | ✅ | ✅ |
 | `task` / `oracle` / `designer` | ❌ block | ✅ | ✅ |
 
-**When spawning is blocked**: create a ctl task first (`ctl task create + ready + start`), then spawn subagents. Subagents inherit governance from the task ledger — their writes are gated by the same `write_allow` boundaries.
+**Reviewers are `explore`.** `ctl-review` and read-only `ctl-diagnose` runs spawn as
+`explore` — always allowed, even before a task exists, with no write risk. Use them freely.
+
+**When spawning a *writable* subagent is blocked**: create a ctl task first (`ctl task create + ready + start`), then spawn. Writable subagents inherit governance from the task ledger — their writes are gated by the same `write_allow` boundaries.
 
 ### Timeout Policy (enforced by hook)
 

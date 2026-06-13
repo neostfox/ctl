@@ -9,10 +9,22 @@ pub struct EmbeddedFile {
 
 pub fn all_embedded_files() -> Vec<EmbeddedFile> {
     vec![
-        // Skills (3 — down from 10)
+        // Skills (6: entry/router + planning + review + diagnosis + spec bootstrap/update)
         EmbeddedFile {
             relative_path: "skills/control-guard/SKILL.md",
             content: include_str!("../../.omp/skills/control-guard/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-brainstorm/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-brainstorm/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-review/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-review/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-diagnose/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-diagnose/SKILL.md"),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-spec-update/SKILL.md",
@@ -21,6 +33,11 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-spec-bootstrap/SKILL.md"),
+        },
+        // Attribution for adapted MIT skill packs
+        EmbeddedFile {
+            relative_path: "skills/NOTICE.md",
+            content: include_str!("../../.omp/skills/NOTICE.md"),
         },
         // Hooks (OMP native extension format)
         EmbeddedFile {

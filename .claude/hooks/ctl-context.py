@@ -14,7 +14,8 @@ def main() -> None:
     try:
         out = subprocess.run(
             ["ctl", "hook", "context"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         ctx = json.loads(out.stdout)
     except Exception:

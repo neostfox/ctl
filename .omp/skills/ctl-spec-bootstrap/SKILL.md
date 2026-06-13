@@ -424,7 +424,7 @@ Before finishing, validate:
 
 ## Hook Integration: Spec Drift Detection
 
-The `ctl-context.js` hook automatically detects when specs may be stale:
+The `ctl-context.ts` hook automatically detects when specs may be stale:
 
 - On `agent_end`: if code files were modified but `.ctl/spec/` wasn't touched, the hook logs a drift warning
 - On `session_shutdown`: if drift was detected, reminds user to run `/ctl-spec-bootstrap`

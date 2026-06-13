@@ -194,11 +194,7 @@ modelRoles:
 
 ## Trellis 应吸收的能力
 
-Trellis 不是纯 Python 项目，主体仓库是 TypeScript，但落地到项目里的核心脚本大量使用 Python，例如：
-
-- `.ctl/scripts/task.py`
-- `.ctl/scripts/get_context.py`
-- `.ctl/scripts/add_session.py`
+Trellis 不是纯 Python 项目，主体仓库是 TypeScript，但落地到项目里的核心脚本大量使用 Python（已退役的遗留脚本，如 `task.py`、`get_context.py`、`add_session.py`，其职责现由 Rust `ctl` 二进制承担）。
 
 Rust 重写时，不应照搬实现语言或全部平台适配，而应吸收它的文件协议与生命周期。
 

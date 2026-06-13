@@ -1,6 +1,6 @@
 ---
 name: ctl-spec-update
-description: "Capture knowledge from debugging, implementation, or discussion into .ctl/spec/. Auto-triggered by control-guard after /ctl-close completes or after Bayesian diagnosis reveals a pattern worth preserving."
+description: "Capture knowledge from debugging, implementation, or discussion into .ctl/spec/. Auto-triggered by control-guard after a task finishes (ctl task finish) or after ctl-diagnose reveals a pattern worth preserving."
 ---
 
 # /ctl-spec-update — Knowledge Capture into Specs
@@ -9,7 +9,7 @@ Auto-triggered after task completion or when a debugging session reveals somethi
 
 ## When to auto-trigger
 
-- After `/ctl-close` completes successfully AND the task revealed non-obvious patterns
+- After `ctl task finish` completes successfully AND the task revealed non-obvious patterns
 - After Bayesian diagnosis identifies a root cause that future sessions should avoid
 - When the user says "remember this" or "note this down"
 - When a gate failure reveals a missing spec check

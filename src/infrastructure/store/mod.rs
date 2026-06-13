@@ -23,9 +23,7 @@ impl FileEventStore {
     pub fn open(project_root: &Path) -> Result<Self> {
         let tasks_dir = project_root.join(".ctl").join("tasks");
         if !tasks_dir.exists() {
-            return Err(anyhow!(
-                ".ctl/tasks/ not found. Run 'control init' first."
-            ));
+            return Err(anyhow!(".ctl/tasks/ not found. Run 'control init' first."));
         }
         if !tasks_dir.is_dir() {
             return Err(anyhow!(".ctl/tasks exists but is not a directory."));
