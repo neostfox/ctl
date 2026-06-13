@@ -25,6 +25,16 @@ M3 Manual 闭环 MVP
 
 `M4-M6` 只能在真实 dogfood 达到晋级条件后扩展。扩展时可以新增围栏，不能静默放宽现有围栏。
 
+## 强制现状（enforced vs 设计冻结）
+
+> 一条围栏只有「能被机器强制」才算生效。为避免文档读起来像「全部已落地」，明确区分：
+>
+> **已机器强制（M0–M3 + 收敛）**：状态机围栏(STATE-010..014)、模块围栏(MODULE-001/002，由 `ctl architecture check` 扫描 `src/domain`)、路径/写作用域(`ctl hook gate`)、gate 模板与 completion interlock(`finish` 需 required gate 通过)、事实源不变量(`events.jsonl` append-only + replay)、step-up 读取闭环(push 限 completed 窗口、deps 需 granted 审批)。
+>
+> **设计冻结、尚未强制（M4+，下文按 STOP 写但当前不拦截）**：执行协议 `proposal → pending_approval → scoped_lease → implement → audit_hold → ...` 的多数环节、`audit_hold` 只读态、lease TTL/撤销、审计矩阵(AUDIT-001..008 的自动审计)、drift 计算与 `control.json` reconcile。这些是冻结的目标协议，**不要据此假设运行时已有对应拦截**。
+>
+> 落地纪律：把某条从「设计冻结」升为「已强制」时，必须同时提供机器检查(self-check / gate / 测试)，否则不得改其级别。
+
 ## 产品围栏
 
 | ID | 级别 | 规则 |
