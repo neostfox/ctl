@@ -9,38 +9,10 @@ pub struct EmbeddedFile {
 
 pub fn all_embedded_files() -> Vec<EmbeddedFile> {
     vec![
-        // Skills
+        // Skills (3 — down from 10)
         EmbeddedFile {
             relative_path: "skills/control-guard/SKILL.md",
             content: include_str!("../../.omp/skills/control-guard/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-new/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-new/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-apply/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-apply/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-close/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-close/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-abort/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-abort/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-health/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-health/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-status/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-status/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-spec-before/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-spec-before/SKILL.md"),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-spec-update/SKILL.md",

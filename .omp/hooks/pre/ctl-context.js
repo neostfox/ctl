@@ -1,222 +1,100 @@
-// ctl Control Plane Hook — OMP native extension (thin wrapper around `ctl` binary)
-// All control plane logic lives in Rust. This hook calls `ctl hook <subcommand>` for data.
-// Installed into .omp/hooks/pre/ by `ctl init`.
+// ctl Control Plane Hook — OMP native extension
+// Three concerns: write guard, spec drift, unfinished task reminder.
+// All logic in Rust (ctl hook). This is a thin async wrapper.
 
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+import { execFile } from "child_process";
 
-const { execSync } = require("child_process");
-
-function ctl(subcommand, args = []) {
-  try {
-    const result = execSync(`ctl hook ${subcommand} ${args.join(" ")}`, {
-      encoding: "utf-8",
+function ctlAsync(subcommand: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("ctl", ["hook", ...subcommand.split(" ")], {
       timeout: 5000,
       stdio: ["pipe", "pipe", "pipe"],
+    }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      resolve(stdout);
     });
-    return JSON.parse(result);
-  } catch {
-    return null;
-  }
+  });
 }
 
-function ctlCheck(path) {
+function ctlSync(subcommand: string): string | null {
   try {
-    const result = execSync(`ctl hook check-write --path "${path.replace(/"/g, '\\"')}"`, {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
+    const { execFileSync } = require("child_process");
+    return execFileSync("ctl", ["hook", ...subcommand.split(" ")], {
+      encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
     });
-    return JSON.parse(result);
-  } catch {
-    return { allowed: true, reason: "hook_error" };
-  }
-}
-
-function ctlRecord(data) {
-  try {
-    const json = JSON.stringify(data).replace(/"/g, '\\"');
-    execSync(`ctl hook record-decision --data "${json}"`, {
-      encoding: "utf-8",
-      timeout: 3000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch { /* best effort */ }
+  } catch { return null; }
 }
 
 export default function (pi: HookAPI): void {
 
   // ═══════════════════════════════════════════
-  // 1. CONTEXT — inject session context on every LLM call
-  // ═══════════════════════════════════════════
-  pi.on("context", async (_event) => {
-    const ctx = ctl("context");
-    if (!ctx) return;
-
-    const lines = ["# Control Plane Context", ""];
-    lines.push(`Binary: ${ctx.binary || "ctl"}`);
-    if (ctx.tasks) {
-      const t = ctx.tasks;
-      lines.push(`Tasks: ${t.total} total` +
-        (t.by_phase?.Completed ? `, ${t.by_phase.Completed} completed` : "") +
-        (t.by_phase?.InProgress ? `, ${t.by_phase.InProgress} in-progress` : ""));
-    }
-    lines.push("");
-    if (ctx.active_tasks?.length > 0) {
-      lines.push("## Active Tasks");
-      for (const t of ctx.active_tasks) {
-        lines.push(`  - **${t.id}**: ${t.objective}`);
-      }
-      lines.push("");
-    }
-    if (ctx.spec_layers?.length > 0) {
-      lines.push("## Spec Layers: " + ctx.spec_layers.join(", "));
-      lines.push("");
-    }
-    lines.push("Control plane commands: ctl <subcommand>");
-
-    return {
-      messages: [
-        { role: "user", content: [{ type: "text", text: lines.join("\n") }], timestamp: Date.now() },
-      ],
-    };
-  });
-
-  // ═══════════════════════════════════════════
-  // 2. BEFORE AGENT START — task breadcrumb
-  // ═══════════════════════════════════════════
-  pi.on("before_agent_start", async (_event) => {
-    const bc = ctl("breadcrumb");
-    if (!bc || bc === null) return;
-
-    const text = [`Task: ${bc.task_id} | Phase: ${bc.phase}`, `Next: ${bc.next}`];
-    if (bc.hold) text.push("⚠️ HELD — resolve before continuing");
-
-    return {
-      message: {
-        customType: "ctl-state",
-        content: text.join("\n"),
-        display: text.join("\n"),
-        details: { source: "ctl-hook", taskId: bc.task_id },
-      },
-    };
-  });
-
-  // ═══════════════════════════════════════════
-  // 3. TOOL CALL — guard out-of-scope writes
+  // 1. TOOL CALL — write guard (blocking)
   // ═══════════════════════════════════════════
   pi.on("tool_call", async (event) => {
-    const writeTools = ["write", "edit"];
-    if (!writeTools.includes(event.toolName)) return;
+    if (!["write", "edit"].includes(event.toolName)) return;
 
     const targetPath = event.input?.path || event.input?._i;
     if (!targetPath) return;
 
-    const check = ctlCheck(targetPath);
+    // Must be sync — tool_call handlers can block
+    const raw = ctlSync(`check-write --path "${targetPath.replace(/"/g, '\\"')}"`);
+    if (!raw) return;
+
+    let check: any;
+    try { check = JSON.parse(raw); } catch { return; }
+
     if (!check.allowed && check.reason === "out_of_scope") {
-      ctlRecord({
-        signal: "boundary_reject",
-        task_id: check.task_id,
-        tool: event.toolName,
-        path: targetPath,
-        action_taken: "blocked",
-      });
       return {
         block: true,
-        reason: `ctl write guard: '${targetPath}' is outside write_allow for task '${check.task_id}'. Use /ctl-apply instead.`,
+        reason: `ctl: '${targetPath}' is outside write_allow for task '${check.task_id}'. Use /ctl-apply.`,
       };
     }
   });
 
   // ═══════════════════════════════════════════
-  // 4. TOOL RESULT — audit ctl commands
+  // 2. AGENT END — spec drift detection
   // ═══════════════════════════════════════════
-  pi.on("tool_result", async (event) => {
-    if (event.toolName !== "bash" || event.isError) return;
-    const cmd = String(event.input?.command || "");
-    if (!cmd.includes("ctl ")) return;
+  pi.on("agent_end", async () => {
+    const raw = await ctlAsync("spec-status");
+    if (!raw) return;
 
-    ctlRecord({
-      signal: "ctl_command",
-      source_command: cmd.trim(),
-      action_taken: "executed",
-    });
+    let spec: any;
+    try { spec = JSON.parse(raw); } catch { return; }
+
+    if (spec.drift && typeof process.stderr?.write === "function") {
+      process.stderr.write(
+        `\n📝 Specs stale (${spec.source_files} source > ${spec.spec_files} specs). Run /ctl-spec-bootstrap.\n`
+      );
+    }
   });
 
   // ═══════════════════════════════════════════
-  // 5. TURN END — record M5 decision data
+  // 3. SESSION SHUTDOWN — unfinished task reminder
   // ═══════════════════════════════════════════
-  pi.on("turn_end", async (_event) => {
-    const bc = ctl("breadcrumb");
-    if (!bc || bc.phase !== "InProgress") return;
-
-    ctlRecord({
-      signal: "turn_end",
-      task_id: bc.task_id,
-      phase_at_decision: bc.phase,
-      action_taken: "clean_continue",
-    });
-  });
-
-  // ═══════════════════════════════════════════
-  // 6. AGENT END — check for held tasks + spec drift
-  // ═══════════════════════════════════════════
-  pi.on("agent_end", async (_event) => {
-    const bc = ctl("breadcrumb");
-    if (bc?.hold) {
-      ctlRecord({
-        signal: "task_held_after_agent",
-        task_id: bc.task_id,
-        phase: bc.phase,
-        action_taken: "needs_attention",
-      });
+  pi.on("session_shutdown", async () => {
+    // Check unfinished tasks
+    const raw = await ctlAsync("context");
+    if (raw) {
+      try {
+        const ctx = JSON.parse(raw);
+        const ip = ctx.tasks?.by_phase?.InProgress || 0;
+        const rv = ctx.tasks?.by_phase?.Review || 0;
+        if ((ip + rv) > 0 && typeof process.stderr?.write === "function") {
+          process.stderr.write(`\n⚠️ Unfinished: ${ip} in-progress, ${rv} in review. 'ctl task status --id <id>'.\n`);
+        }
+      } catch { /* ignore */ }
     }
 
-    // Spec drift detection
-    try {
-      const specRaw = execSync(`ctl hook spec-status`, {
-        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-      });
-      const spec = JSON.parse(specRaw);
-      if (spec.drift) {
-        ctlRecord({
-          signal: "spec_drift_detected",
-          spec_files: spec.spec_files,
-          source_files: spec.source_files,
-          action_taken: "suggest_refresh",
-        });
-      }
-    } catch { /* best effort */ }
-  });
-
-  // ═══════════════════════════════════════════
-  // 7. SESSION SHUTDOWN — remind about unfinished tasks + stale specs
-  // ═══════════════════════════════════════════
-  pi.on("session_shutdown", async (_event) => {
-    const ctx = ctl("context");
-    if (ctx?.tasks?.by_phase) {
-      const inProgress = ctx.tasks.by_phase.InProgress || 0;
-      const inReview = ctx.tasks.by_phase.Review || 0;
-
-      if ((inProgress + inReview) > 0 && typeof process.stderr?.write === "function") {
-        process.stderr.write(
-          `\n⚠️ Unfinished tasks: ${inProgress} in-progress, ${inReview} in review\n` +
-          `Run 'ctl task status --id <id>' to check.\n`
-        );
-      }
+    // Check spec staleness
+    const specRaw = await ctlAsync("spec-status");
+    if (specRaw) {
+      try {
+        const spec = JSON.parse(specRaw);
+        if (spec.drift && typeof process.stderr?.write === "function") {
+          process.stderr.write(`\n📝 Specs stale. Run /ctl-spec-bootstrap to refresh.\n`);
+        }
+      } catch { /* ignore */ }
     }
-
-    // Spec staleness warning
-    try {
-      const specRaw = execSync(`ctl hook spec-status`, {
-        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-      });
-      const spec = JSON.parse(specRaw);
-      if (spec.drift && typeof process.stderr?.write === "function") {
-        process.stderr.write(
-          `\n📝 Specs are stale (${spec.source_files} source files newer than ${spec.spec_files} spec files).\n` +
-          `Run /ctl-spec-bootstrap to refresh.\n`
-        );
-      }
-    } catch { /* best effort */ }
   });
 }
