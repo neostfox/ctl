@@ -148,7 +148,9 @@ fn build_allowed_env() -> HashMap<String, String> {
 
     std::env::vars()
         .filter(|(key, _)| {
-            !BLOCKED_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+            !BLOCKED_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
         })
         .collect()
 }

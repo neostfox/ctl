@@ -107,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         command: ScheduleCommands,
     },
+    /// Hook integration commands (called by OMP hooks)
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
     /// Agent run status report (M6)
     AgentReport,
 }
@@ -434,6 +439,26 @@ enum ScheduleCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Output session context as JSON for OMP hooks
+    Context,
+    /// Output active task breadcrumb as JSON for OMP hooks
+    Breadcrumb,
+    /// Check if a path is within write_allow for the active task
+    CheckWrite {
+        /// Path to check
+        #[arg(long)]
+        path: String,
+    },
+    /// Append a decision record to decisions.jsonl
+    RecordDecision {
+        /// JSON object to record
+        #[arg(long)]
+        data: String,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let dry_run = cli.dry_run;
@@ -457,6 +482,7 @@ pub fn run() -> Result<()> {
         Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
         Commands::Schedule { command } => cmd_schedule(command, dry_run),
+        Commands::Hook { command } => cmd_hook(command),
         Commands::AgentReport => cmd_agent_report(),
     }
 }
@@ -466,12 +492,28 @@ fn app_open(dry_run: bool) -> Result<ControlApp> {
 }
 
 fn cmd_init(dry_run: bool) -> Result<()> {
+    let project_root = std::env::current_dir()?;
     if dry_run {
-        println!("[dry-run] Would initialize local task ledger");
+        println!(
+            "[dry-run] Would initialize local task ledger + inject control-plane skills & hooks"
+        );
         return Ok(());
     }
-    ControlApp::init(&std::env::current_dir()?)?;
+    ControlApp::init(&project_root)?;
     println!("Initialized local task ledger.");
+
+    // Inject control-plane skills, hooks, and OMP settings
+    let file_count = crate::infrastructure::skills::inject_all(&project_root)?;
+    if file_count > 0 {
+        println!(
+            "Injected {} file(s) into .omp/ (skills + hooks).",
+            file_count
+        );
+    } else {
+        println!("All control-plane files already present in .omp/.");
+    }
+
+    println!("Control-plane active: auto-load skill + session hooks configured.");
     Ok(())
 }
 
@@ -997,7 +1039,7 @@ fn boundary_explain(path_str: &str) -> Result<()> {
     }
     let protected = [
         ".git",
-        ".trellis",
+        ".ctl",
         ".control",
         "schemas",
         "Cargo.toml",
@@ -1759,7 +1801,7 @@ fn cmd_schedule_plan(max_concurrent: usize, tasks: &[String], dry_run: bool) -> 
     if !dry_run {
         let plan_path = app
             .project_root
-            .join(".trellis")
+            .join(".ctl")
             .join(format!("plans/{}.json", plan.plan_id));
         std::fs::create_dir_all(plan_path.parent().unwrap())?;
         std::fs::write(&plan_path, &json)?;
@@ -1824,5 +1866,235 @@ fn cmd_agent_report() -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+// ── Hook integration commands ──────────────────────────────────────────
+
+fn cmd_hook(command: &HookCommands) -> Result<()> {
+    match command {
+        HookCommands::Context => cmd_hook_context(),
+        HookCommands::Breadcrumb => cmd_hook_breadcrumb(),
+        HookCommands::CheckWrite { path } => cmd_hook_check_write(path),
+        HookCommands::RecordDecision { data } => cmd_hook_record_decision(data),
+    }
+}
+
+fn cmd_hook_context() -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let app = ControlApp::open(&project_root, false)?;
+    let reports = app.generate_status_report()?;
+
+    let mut total = 0u32;
+    let mut by_phase: BTreeMap<String, u32> = BTreeMap::new();
+    let mut active = Vec::new();
+
+    for report in &reports {
+        total += 1;
+        let phase = report
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
+        *by_phase.entry(phase.to_string()).or_default() += 1;
+        if phase == "InProgress" {
+            active.push(serde_json::json!({
+                "id": report.get("task_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "objective": report.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
+            }));
+        }
+    }
+
+    // Spec layers
+    let spec_dir = project_root.join(".ctl").join("spec");
+    let mut spec_layers = Vec::new();
+    if spec_dir.exists() {
+        for entry in fs::read_dir(&spec_dir)?.flatten() {
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if spec_dir.join(&name).join("index.md").exists() {
+                    spec_layers.push(name);
+                }
+            }
+        }
+    }
+
+    let output = serde_json::json!({
+        "binary": "ctl",
+        "tasks": { "total": total, "by_phase": by_phase },
+        "active_tasks": active,
+        "spec_layers": spec_layers,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_hook_breadcrumb() -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let tasks_dir = project_root.join(".ctl").join("tasks");
+    if !tasks_dir.exists() {
+        println!("null");
+        return Ok(());
+    }
+
+    let mut latest: Option<(String, serde_json::Value, std::time::SystemTime)> = None;
+    for entry in fs::read_dir(&tasks_dir)?.flatten() {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let task_path = tasks_dir.join(&id).join("task.json");
+        let mtime = entry.metadata()?.modified()?;
+        if let Ok(content) = fs::read_to_string(&task_path) {
+            if let Ok(task) = serde_json::from_str::<serde_json::Value>(&content) {
+                if latest.as_ref().is_none_or(|(_, _, t)| mtime > *t) {
+                    latest = Some((id, task, mtime));
+                }
+            }
+        }
+    }
+
+    let Some((id, task)) = latest.map(|(i, t, _)| (i, t)) else {
+        println!("null");
+        return Ok(());
+    };
+
+    let next_map = serde_json::json!({
+        "Planning": "Revise scope, then `ctl task ready`",
+        "Ready": "`ctl task start` to begin work",
+        "InProgress": "Implement in worktree, then `/ctl-apply` → `/ctl-close`",
+        "Review": "`ctl task finish` (interlock check)",
+        "Completed": "`ctl task archive` to clean up",
+        "Cancelled": "`ctl task archive` to clean up",
+    });
+
+    let phase = task
+        .get("phase")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let hold = task.get("hold").and_then(|v| v.as_bool()).unwrap_or(false);
+    let next = next_map
+        .get(phase)
+        .and_then(|v| v.as_str())
+        .unwrap_or("Check with ctl task status");
+    let write_allow: Vec<String> = task
+        .get("write_allow")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let output = serde_json::json!({
+        "task_id": id,
+        "phase": phase,
+        "next": next,
+        "hold": hold,
+        "objective": task.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
+        "write_allow": write_allow,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+fn cmd_hook_check_write(target_path: &str) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let tasks_dir = project_root.join(".ctl").join("tasks");
+    if !tasks_dir.exists() {
+        let output = serde_json::json!({ "allowed": true, "reason": "no_tasks_dir" });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // Find most recently modified in-progress task
+    let mut active: Option<(String, Vec<String>, std::time::SystemTime)> = None;
+    for entry in fs::read_dir(&tasks_dir)?.flatten() {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let task_path = tasks_dir.join(&id).join("task.json");
+        let mtime = entry.metadata()?.modified()?;
+        if let Ok(content) = fs::read_to_string(&task_path) {
+            if let Ok(task) = serde_json::from_str::<serde_json::Value>(&content) {
+                let phase = task.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                if phase == "InProgress" && active.as_ref().is_none_or(|(_, _, t)| mtime > *t) {
+                    let write_allow: Vec<String> = task
+                        .get("write_allow")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    active = Some((id, write_allow, mtime));
+                }
+            }
+        }
+    }
+
+    let Some((task_id, write_allow)) = active.map(|(i, w, _)| (i, w)) else {
+        let output = serde_json::json!({ "allowed": true, "reason": "no_active_in_progress_task" });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    };
+
+    if write_allow.is_empty() {
+        let output = serde_json::json!({ "allowed": true, "reason": "empty_write_allow" });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    let resolved = if Path::new(target_path).is_relative() {
+        project_root.join(target_path)
+    } else {
+        Path::new(target_path).to_path_buf()
+    };
+
+    let in_scope = write_allow
+        .iter()
+        .any(|allow| resolved.starts_with(project_root.join(allow)));
+
+    let output = serde_json::json!({
+        "allowed": in_scope,
+        "task_id": task_id,
+        "path": target_path,
+        "write_allow": write_allow,
+        "reason": if in_scope { "in_scope" } else { "out_of_scope" }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_hook_record_decision(data: &str) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let decisions_dir = project_root.join(".ctl");
+    fs::create_dir_all(&decisions_dir)?;
+
+    let decisions_path = decisions_dir.join("decisions.jsonl");
+
+    // Validate it's valid JSON
+    let parsed: serde_json::Value = serde_json::from_str(data)?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let mut entry = parsed.as_object().cloned().unwrap_or_default();
+    entry.insert("ts".to_string(), serde_json::json!(ts));
+    let entry = serde_json::Value::Object(entry);
+
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&decisions_path)?;
+    writeln!(file, "{}", entry)?;
+
+    let output = serde_json::json!({ "recorded": true });
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

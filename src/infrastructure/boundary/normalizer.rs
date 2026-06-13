@@ -13,7 +13,7 @@ impl PathNormalizer {
             root,
             protected_paths: vec![
                 ".git".into(),
-                ".trellis".into(),
+                ".ctl".into(),
                 ".trellis/tasks".into(),
                 ".control".into(),
                 "schemas".into(),
@@ -137,7 +137,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("omp_norm_test_{}", nanos));
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::create_dir_all(dir.join(".trellis")).unwrap();
+        fs::create_dir_all(dir.join(".ctl")).unwrap();
         fs::create_dir_all(dir.join(".control")).unwrap();
         fs::create_dir_all(dir.join("schemas")).unwrap();
         fs::write(dir.join("Cargo.toml"), "").unwrap();

@@ -1,404 +1,349 @@
 ---
 name: control-guard
-description: "Agent-driven control plane integration. The agent automatically detects task boundaries, proposes structured task creation, enforces write scope during implementation, runs gates, checks boundaries, and verifies completion interlock."
+description: "Central orchestrator. Auto-loaded every session. Routes ALL control operations through /ctl-* skills. Auto-triggers: First Principles for proposals, Bayesian Reasoning for failures, Spec Loading before dev, Spec Update after close, 5-dimension root cause analysis for bugs."
 ---
 
-# Control Guard — Agent-Driven Control Plane (M3)
+# Control Guard — Orchestration Layer (M4)
 
-You are operating inside an OMP agent session with the `control` CLI available on PATH. This skill teaches you to weave the control plane into every phase of your work automatically — the human should never need to run `control` commands manually.
+You are the control plane orchestrator. You run every session automatically. You:
+1. Detect when control plane mediation is needed
+2. Apply the right thinking framework automatically
+3. Route to the correct `/ctl-*` skill
+4. The main agent NEVER runs `ctl` commands directly
 
-## Core Loop (M3)
+## Inviolable Rule
 
-```text
-Human request
-  → Agent classifies: is this a task?
-    → Yes: Agent proposes boundaries → asks human → creates control task
-    → No: Skip control, work freely
-  → Agent starts task
-  → Agent builds context snapshot
-  → Agent exports assignment for external execution
-  → Agent implements within scope (or external executor does)
-  → Agent ingests execution results as evidence
-  → Agent runs gates through control layer
-  → Agent checks boundaries
-  → Agent submits for review
-  → Agent generates audit report
-  → Agent verifies completion interlock
-  → Agent finishes and archives
-```
+**The main agent NEVER runs `ctl` commands directly.**
+
+## Skill Routing Table
+
+| Trigger | Auto-trigger first | Route to |
+|---|---|---|
+| User describes code change | Spec Loading + First Principles | → `/ctl-new` |
+| Agent finishes implementing | — | → `/ctl-apply` |
+| Changes applied, ready to close | — | → `/ctl-close` |
+| Task completed, knowledge gained | Spec Update check | → `/ctl-spec-update` (if needed) |
+| Something broke mid-run | Bayesian + Root Cause | → `/ctl-abort` (if confidence ≥ 70%) |
+| Gate failure during close | Bayesian + Root Cause | → Fix, re-run gate |
+| User asks "status" / "进展" | — | → `/ctl-status` |
+| User asks "health" / "check" | — | → `/ctl-health` |
 
 ## When to Engage
 
-Engage the control plane when the human's request meets ANY of these:
+Engage when: modifying source files, clear verifiable objective, multi-file change, feature/bugfix/refactoring.
 
-1. Involves modifying source files (not just reading/explaining)
-2. Has a clear objective that can be verified (tests pass, feature works)
-3. Touches more than one file or one module
-4. The human describes a feature, bug fix, or refactoring
+Skip when: pure conversation, read-only, user says "skip control".
 
-Skip the control plane when:
+---
 
-1. Pure conversation, explanation, or question
-2. Reading or searching without modification intent
-3. The human explicitly says "skip control" or "just do it"
+## Auto-Trigger 1: Spec Loading (before every task proposal)
 
-## Phase 1: Automatic Task Proposal
+**When**: You detect a task-worthy request and are about to propose boundaries.
 
-When you detect a task-worthy request, DO NOT immediately start coding. Instead:
+**Auto-apply**: `/ctl-spec-before` — load project specs before proposing.
 
-### Step 1.1: Infer boundaries
+1. Read `.ctl/spec/backend/index.md` for architecture overview and pre-dev checklist
+2. Read layer-specific specs for the affected layers
+3. Read cross-cutting guides if the change spans multiple layers
+4. Check `ARCHITECTURE_GUARDRAILS.md` for milestone scope
 
-Analyze the request and codebase to infer:
+Extract key constraints to carry into the proposal:
+- Dependency direction (domain MUST NOT import from infrastructure/cli)
+- Truth model (events.jsonl is append-only, task.json is projection)
+- Reducer purity (no side effects, no I/O)
+- Allowed dependencies (clap, serde, anyhow, sha2 only)
+- Event types need: reducer branch + schema + fixture coverage
 
-- `objective`: One clear sentence of what will be achieved.
-- `read_scope`: Which directories/files the agent will need to read.
-- `write_allow`: Which directories/files the agent will modify.
-- `write_deny`: Paths that must NOT be touched (protected files, config, unrelated modules).
-- `risk_triggers`: What could go wrong (dependency changes, schema changes, breaking API).
-- `gates`: Which verification commands must pass.
+---
 
-Infer gates based on project type:
-- Rust project: `cargo_fmt_check`, `cargo_check`, `cargo_test`, `cargo_clippy`
-- The default set for this project: `cargo_fmt_check`, `cargo_check`, `cargo_test`, `cargo_clippy`
+## Auto-Trigger 2: First Principles (on every task proposal)
 
-### Step 1.2: Present proposal to human
+**When**: After spec loading, before proposing boundaries.
 
-Show the inferred task boundary in a compact format and ask for confirmation:
+1. **Restate the problem**: One sentence about what needs to be true when done.
+   > Bad: "Add Redis caching" → Good: "Profile data loads too slowly"
+2. **List fundamental truths**: Physical constraints, business rules, technical invariants, user needs.
+3. **Challenge assumptions**: Fact or convention? What if removed? Solving problem or symptom?
+4. **Build up**: Minimum viable scope from truths. Each addition must answer "which truth requires this?"
+5. **Validate**: Does it solve the original problem? Simplest experiment?
+
+---
+
+## Auto-Trigger 3: Complexity Classification (after inference)
+
+**When**: After inferring boundaries, before presenting proposal.
+
+| Complexity | Criteria | Action |
+|---|---|---|
+| **Trivial** | Single-line fix, typo | Skip control plane, implement directly |
+| **Simple** | Clear goal, 1-2 files | Ask 1 confirm, then `/ctl-new` |
+| **Moderate** | Multi-file, some ambiguity | Light brainstorm (2-3 questions), then `/ctl-new` |
+| **Complex** | Vague goal, architectural choices | Full brainstorm before `/ctl-new` |
+
+---
+
+## Auto-Trigger 4: Expansion Sweep (for Moderate/Complex tasks)
+
+**When**: Before converging on MVP scope.
+
+Before presenting the proposal, consider:
+
+1. **Future evolution**: What might this become in 1-3 months? What extension points are worth preserving?
+2. **Related scenarios**: What adjacent flows should stay consistent? Parity expectations?
+3. **Failure & edge cases**: Conflicts, offline failure, retries, idempotency, rollback, security boundaries.
+
+Then: what's in MVP → `write_allow`. What's excluded → note in risks.
+
+---
+
+## Phase 1: Full Proposal Flow
+
+When you detect a task-worthy request:
+
+### 1.1 Spec loading (auto)
+
+Auto-trigger `/ctl-spec-before`. Load constraints into context.
+
+### 1.2 First principles (auto)
+
+Auto-apply FP-1 through FP-5. Derive minimum scope from truths.
+
+### 1.3 Read codebase
+
+Read relevant source files. Never propose blind.
+
+### 1.4 Infer fields
+
+| Field | Inference rule |
+|---|---|
+| `id` | Kebab-case, 2-4 words |
+| `objective` | From FP-1 restatement |
+| `read_scope` | Context files + tests |
+| `write_allow` | Minimum from FP-4 build-up |
+| `gates` | Default: `cargo_fmt_check`, `cargo_check`, `cargo_test` |
+
+Heuristics:
+- **Bug fix**: bug file(s) + tests
+- **New feature**: new/modified source + tests
+- **Refactoring**: moved files + dependents
+- **Config/build**: high-risk, flag for approval
+
+### 1.5 Complexity classification (auto)
+
+Determine Trivial/Simple/Moderate/Complex.
+
+### 1.6 Expansion sweep (auto, Moderate+)
+
+Diverge before converging. Add edge cases and future considerations to risks.
+
+### 1.7 Present proposal
 
 ```
-📋 Control task proposal:
+📋 Task Proposal: fix-auth-timeout
 
-  Objective: Fix config parsing to handle nested TOML
+  Objective: 确保 auth 模块超时后返回错误而非挂起
   
-  Read:    src/config/, tests/config/
-  Write:   src/config/, tests/config/
-  Deny:    .env, Cargo.toml, schemas/
-  Risks:   existing config backward compat
-  Gates:   cargo_fmt_check, cargo_check, cargo_test, cargo_clippy
+  📖 Read:    src/auth/timeout.rs, tests/auth_test.rs
+  ✏️ Write:   src/auth/timeout.rs, tests/auth_test.rs
+  🔍 Gates:   cargo_fmt_check, cargo_check, cargo_test
+  ⚠️ Risks:   callers may need timeout handling updates
+  📋 Specs:   domain-layer, cross-layer guide
   
-  Approve? (yes / adjust / skip)
-```
-
-Wait for human response:
-
-- `yes` → proceed to Step 1.3
-- `adjust` → ask what to change, update proposal, re-present
-- `skip` → work without control plane for this request
-
-### Step 1.3: Create control task
-
-```bash
-# Ensure the control ledger exists
-control init
-
-# Create the task with the approved boundary
-control task create \
-  --id "<slug>" \
-  --objective "<objective>" \
-  --read-scope <path> \
-  --write-allow <path> \
-  --write-deny <path> \
-  --risk-triggers <trigger> \
-  --gates <gate_id>
-```
-
-Then mark ready and start:
-
-```bash
-control task ready --id "<slug>"
-control task start --id "<slug>"
-```
-
-Store the task id for the rest of the session. All subsequent control commands reference this id.
-
-## Phase 2: Context Build
-
-After starting the task, immediately build a context snapshot:
-
-```bash
-control context build --id "<slug>"
-```
-
-This hashes all files in the task's `read_scope` into `.trellis/tasks/<slug>/context.json`. The boundary checker will use this baseline to detect modifications.
-
-## Phase 2b: Assignment Export (M3)
-
-After context build, export a structured assignment for the executor (manual or future adapter):
-
-```bash
-control assignment export --id "<slug>"
-```
-
-This writes `.trellis/tasks/<slug>/assignment.json` containing the full boundary + context snapshot. The assignment file is the contract between the control layer and any executor.
-
-## Phase 2c: Result Ingest (M3)
-
-After execution (manual or by external tool), ingest the result as evidence:
-
-```bash
-control run ingest --id "<slug>" --adapter manual --result <result_file>
-```
-
-The result file must be valid JSON with:
-
-```json
-{
-  "source": "manual",
-  "touched_files": ["src/main.rs", "tests/test_foo.rs"],
-  "exit_code": 0,
-  "summary": "What was done"
-}
-```
-
-The control layer validates:
-- `source` must be `"manual"` for the manual adapter
-- All `touched_files` must be within `write_allow` and not in `write_deny`
-- Malformed results are rejected with `evidence_rejected` events
-Accepted results generate `evidence_accepted` canonical events.
-
-## Phase 3: Scoped Implementation
-
-### Before every file write
-
-Before modifying any file, check:
-
-```
-Is the target path within write_allow?
-  → Yes: proceed
-  → No: STOP. Tell the human this path is outside scope.
-    Ask: extend scope, or find an in-scope approach?
-```
-
-You can validate a path against the current task scope:
-
-```bash
-control boundary check --path <target_path>
-```
-
-If the path is rejected and you believe it should be in scope, ask the human. Do NOT silently write outside scope.
-
-### During implementation
-
-After each meaningful change (file saved, test passing), you MAY run:
-
-```bash
-control validate
-```
-
-This checks that the event stream is still clean.
-
-### Tracking touched files
-
-Maintain a mental list of every file you modify. You will need this list for boundary verification.
-
-## Phase 4: Gate Verification
-
-When you believe implementation is complete, run ALL required gates through the control layer:
-
-```bash
-control gate run --id "<slug>" --gate cargo_fmt_check
-control gate run --id "<slug>" --gate cargo_check
-control gate run --id "<slug>" --gate cargo_test
-control gate run --id "<slug>" --gate cargo_clippy
-```
-
-Each gate execution is recorded as a canonical `gate_checked` event. The control layer runs gates with EXEC-002 controls: bounded output, environment allowlist, and 60-second timeout.
-
-If any gate fails:
-
-1. Fix the issue
-2. Re-run the failed gate
-3. Do NOT declare completion until ALL gates pass
-
-After all gates pass:
-
-```bash
-control architecture check
-```
-
-## Phase 5: Boundary Check
-
-After all gates pass, check boundaries:
-
-```bash
-control boundary check-by-id --id "<slug>"
-```
-
-This compares the current workspace against the context snapshot. Any file modified outside `write_allow` generates a `boundary_violation_recorded` event and puts the task on hold.
-
-If violations are detected:
-
-1. STOP. The task is now on hold.
-2. Tell the human what files were modified outside scope.
-3. Wait for human direction: adjust scope, revert changes, or create a new task.
-
-## Phase 6: Audit and Completion (M3)
-
-When all gates pass AND boundary check is clean:
-
-### Step 6.1: Generate audit report
-
-```bash
-control audit --id "<slug>"
-```
-
-This produces a deterministic audit report from events + evidence. The report includes:
-- Gate results and pass/fail status
-- Evidence accepted/rejected counts
-- Boundary violation count
-- Completion interlock verdict (allow/blocked/completed)
-
-The report is written to `.trellis/tasks/<slug>/audit-report.json`.
-
-### Step 6.2: Submit for review
-
-```bash
-control task submit --id "<slug>"
-```
-
-The submit command now checks:
-- No active hold
-- No boundary violations recorded
-- Phase must be InProgress
-
-Present a completion summary:
-
-```
-✅ Task "<slug>" completion summary:
-
-  Objective: Fix config parsing to handle nested TOML
+  Constraints:
+  - Layer: domain + infrastructure
+  - No new deps needed
+  - Event type needs schema + fixture
   
-  Files modified:
-    - src/config/parser.rs
-    - tests/config/parser_test.rs
-  
-  Evidence: 1 accepted, 0 rejected
-  
-  Gates:
-    ✓ cargo_fmt_check
-    ✓ cargo_check
-    ✓ cargo_test
-    ✓ cargo_clippy
-  
-  Scope check: all modifications within write_allow
-  
-  Boundary check: clean
-  Audit interlock: allow
+  ✅ approve  ✏️ adjust  ❌ skip
 ```
 
-Ask the human: "Mark as verified?"
+Wait for approval. Do NOT proceed without it.
 
-### Step 6.3: After human confirms
+### 1.8 After approval → `/ctl-new`
 
-```bash
-# Human verifies the change and finishes the task
-control task finish --id "<slug>"
+---
 
-# Optionally archive
-control task archive --id "<slug>"
-```
+## Phase 2: Implementation in Worktree
 
-The `finish` command enforces full completion interlock:
-- Phase must be `review`
-- No active hold
-- All required gates must have latest passing results
-- No rejected evidence
+After `/ctl-new` succeeds, agent works inside the OMP worktree.
 
-## M3 Command Reference
+**Before every file write**: verify target is within `write_allow`.
+
+**When implementation is complete**: auto-invoke `/ctl-apply`.
+
+---
+
+## Phase 3: Apply and Close (auto-chain)
+
+After `/ctl-apply` → auto `/ctl-close`.
+
+After `/ctl-close` completes → check if spec update is needed:
+- Did the task reveal non-obvious patterns?
+- Did Bayesian diagnosis find a root cause worth preserving?
+- Any new conventions established?
+
+If yes → auto-trigger `/ctl-spec-update`.
+
+---
+
+## Auto-Trigger 5: Bayesian Reasoning (on every failure)
+
+**When**: Gate fails, OMP crashes, boundary violation, health check fails, considering abort.
+
+### B-1: Establish Priors
+
+| Hypothesis | Prior | Reasoning |
+|------------|-------|-----------|
+| H1: (most likely) | 40% | ... |
+| H2: (second) | 30% | ... |
+| H3: (other) | 30% | Catch-all |
+
+### B-2: Observe Evidence
+
+What exactly happened? How reliable? Could multiple hypotheses explain this?
+
+### B-3: Update Beliefs
+
+Which hypothesis does the evidence support? Direction > calculation.
+
+### B-4: Seek Discriminating Evidence
+
+"What would I see if H1 is true but not H3?" Check for that.
+
+### B-5: State Confidence
+
+| Confidence | Action |
+|---|---|
+| 90%+ | Proceed with fix, monitor |
+| 70-90% | Proceed, add fallback |
+| 50-70% | Test hypothesis first |
+| <50% | Need more evidence |
+
+### B-6: Watch for Fallacies
+
+| Fallacy | Correction |
+|---|---|
+| Base rate neglect | How often does this happen for other reasons? |
+| Confirmation bias | Actively seek evidence AGAINST top hypothesis |
+| Anchoring | Priors from current context, not last time |
+
+---
+
+## Auto-Trigger 6: Root Cause Analysis (after Bayesian converges on a bug)
+
+**When**: Bayesian reasoning converges on a specific root cause (confidence ≥ 70%).
+
+### 5-Dimension Root Cause Analysis
+
+Classify the bug:
+
+| Category | Characteristics | Example |
+|---|---|---|
+| **A. Missing Spec** | No documentation on how to do it | New event type without fixture |
+| **B. Cross-Layer Contract** | Interface between layers unclear | CLI arg format ≠ event payload format |
+| **C. Change Propagation Failure** | Changed one place, missed others | New reducer branch, no CLI command |
+| **D. Test Coverage Gap** | Unit passes, integration fails | Works alone, breaks with other events |
+| **E. Implicit Assumption** | Code relies on undocumented assumption | Path separator `\` vs `/` on Windows |
+
+### Why fixes failed (if multiple attempts)
+
+- **Surface fix**: Fixed symptom, not root cause
+- **Incomplete scope**: Found root cause, didn't cover all cases
+- **Tool limitation**: Search missed it, type check wasn't strict
+- **Mental model**: Kept looking in same layer, didn't think cross-layer
+
+### Systematic expansion
+
+- **Similar issues**: Where else might this exist?
+- **Design flaw**: Fundamental architecture issue?
+- **Process flaw**: Development process improvement?
+
+### Knowledge capture → `/ctl-spec-update`
+
+If the root cause reveals something worth preserving:
+- New event type convention → update domain-layer spec
+- Cross-layer format mismatch → update cross-layer guide
+- Path handling gotcha → update infrastructure spec
+- Testing gap → update quality guidelines
+
+---
+
+## Auto-Trigger 7: Spec Update (after close or diagnosis)
+
+**When**: After task completion OR after root cause analysis reveals a pattern.
+
+Auto-check: did this task or diagnosis produce knowledge worth preserving?
+
+| Signal | Target |
+|---|---|
+| New design decision | `.ctl/spec/backend/index.md` |
+| Layer-specific pattern | Relevant layer spec |
+| Cross-layer gotcha | `.ctl/spec/guides/cross-layer-thinking-guide.md` |
+| Code reuse insight | `.ctl/spec/guides/code-reuse-thinking-guide.md` |
+| Error handling lesson | `.ctl/spec/backend/error-handling.md` |
+| Quality gap | `.ctl/spec/backend/quality-guidelines.md` |
+
+If yes → auto-trigger `/ctl-spec-update`.
+
+---
+
+## Orchestration Flow (complete)
 
 ```text
-control init                                    # Initialize ledger
-control task create --id --objective ...        # Create task
-control task revise --id [--objective ...]       # Revise in Planning
-control task ready --id                         # Planning → Ready
-control task start --id                         # Ready → InProgress
-control task status --id                        # Print task view
-control task submit --id                        # InProgress → Review (checks hold/violations)
-control task reopen --id                        # Review → InProgress
-control task finish --id                        # Review → Completed (full interlock)
-control task cancel --id                        # → Cancelled
-control task archive --id                       # terminal → archived
-control context build --id                      # Hash read_scope files
-control assignment export --id                  # Export structured assignment JSON (M3)
-control run ingest --id --adapter manual --result <file>  # Ingest manual result as evidence (M3)
-control audit --id                              # Generate deterministic audit report (M3)
-control report                                  # Summary of all tasks (M3)
-control boundary check --path <path>            # Validate a single path
-control boundary check-by-id --id               # Check task workspace diff
-control boundary explain --path <path>          # Explain path decision
-control gate run --id --gate <gate_id>          # Execute gate via EXEC-002
-control gate record --id --gate --passed --evidence  # Record external result
-control replay [--task <id>]                    # Rebuild projections
-control reconcile                               # Rebuild all projections
-control validate                                # Validate event logs
-control doctor                                  # Diagnose ledger health
-control architecture check                      # Architecture compliance
+User message arrives
+  │
+  ├─ Code change request?
+  │   YES → AUTO: Spec Loading
+  │       → AUTO: First Principles
+  │       → Infer boundaries from codebase
+  │       → AUTO: Complexity Classification
+  │       → AUTO: Expansion Sweep (Moderate+)
+  │       → Present proposal for approval
+  │       → User approves → /ctl-new
+  │       → Agent implements in worktree
+  │       → Auto /ctl-apply when done
+  │       → Auto /ctl-close after apply
+  │       → AUTO: Spec Update (if knowledge gained)
+  │
+  ├─ Status/progress question?
+  │   YES → /ctl-status
+  │
+  ├─ Health/check request?
+  │   YES → /ctl-health
+  │
+  ├─ Abort/give up/something broke?
+  │   YES → AUTO: Bayesian Reasoning
+  │       → AUTO: Root Cause Analysis
+  │       → AUTO: Spec Update (if pattern found)
+  │       → /ctl-abort (only if confidence ≥ 70%)
+  │
+  └─ None of the above?
+      → Work freely
 ```
 
-## Multi-Task Sessions
+---
 
-If the human's request contains multiple independent deliverables:
+## Recovery Routing
 
-1. Propose a parent task + children structure
-2. Create the parent first
-3. Create each child with its own scope
-4. Work through children one at a time
-5. Each child gets its own context build, gate verification, and boundary check cycle
+| Situation | Auto-triggers | Route to |
+|---|---|---|
+| OMP crash | Bayesian → Root Cause → Spec Update | → `/ctl-abort` if ≥ 70% |
+| Task held | Bayesian (scope vs code?) | → `/ctl-status` to inspect |
+| Scope too narrow | — | → Cancel, new `/ctl-new` |
+| Gate failure | Bayesian → Root Cause | → Fix, re-run gate |
+| Health failure | Bayesian (common cause?) | → Fix root, re-run all |
 
-## Recovery
-
-### Aborting a task
-
-If the human says to abandon the current task:
-
-```bash
-control task cancel --id "<slug>"
-```
-
-### Task on hold (boundary violation or gate failure)
-
-If the task enters hold due to boundary violation:
-
-1. The `boundary_violation_recorded` event automatically puts the task on hold
-2. You CANNOT continue writing while on hold
-3. Ask the human to resolve: revert the violation, or adjust scope via new task
-
-### Extending scope mid-task
-
-If during implementation you discover the write_allow is too narrow:
-
-1. STOP modifying files
-2. Tell the human what additional path is needed and why
-3. Wait for approval
-4. Cancel the current task and create a new one with expanded scope (MVP does not support scope expansion after Ready per STATE-014)
+---
 
 ## Anti-Patterns
 
-- ❌ Never run `control` commands silently without showing the human
-- ❌ Never modify files outside `write_allow` without explicit human approval
-- ❌ Never skip gate verification because "it probably passes"
-- ❌ Never declare completion with a failing gate
-- ❌ Never skip boundary check before submitting for review
-- ❌ Never create a control task for pure conversation or read-only requests
-- ❌ Never use `--scope` (legacy); always use `--read-scope` / `--write-allow`
-- ❌ Never bypass `control gate run` by running cargo commands directly — results must be recorded through the control layer
-
-## Integration with Trellis
-
-When Trellis is active in the same project:
-
-1. The control task id should match or reference the Trellis task slug
-2. The control task boundary should be reflected in the Trellis PRD
-3. Gate verification results feed into the Trellis check phase
-4. The control `events.jsonl` is the canonical timeline; Trellis markdown is human-readable planning
-
-Suggested Trellis PRD addition:
-
-```markdown
-## Control Layer Boundary
-
-Task ID: `<slug>`
-Write scope: `<write_allow paths>`
-Gates: `<gate list>`
-Verify with: `control task status --id <slug>`
-```
+- ❌ NEVER run `ctl` directly — always through `/ctl-*`
+- ❌ NEVER skip spec loading before proposing boundaries
+- ❌ NEVER skip first principles before deriving write_allow
+- ❌ NEVER skip Bayesian before aborting or diagnosing failure
+- ❌ NEVER skip root cause analysis after finding a bug
+- ❌ NEVER skip gate verification — all gates must pass
+- ❌ NEVER modify files outside `write_allow`
+- ❌ NEVER manually edit `events.jsonl` or `task.json`
+- ❌ NEVER express binary certainty with incomplete evidence
+- ❌ NEVER let knowledge stay in chat — capture to specs via `/ctl-spec-update`

@@ -1,0 +1,9 @@
+{
+  "name": "@ai-dev/ctl-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "ctl binary for Linux x64 (GNU)",
+  "files": ["ctl"],
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "license": "MIT"
+}

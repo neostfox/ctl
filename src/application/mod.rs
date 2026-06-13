@@ -1358,7 +1358,7 @@ impl ControlApp {
         // Cleanup worktree if it exists
         let worktree_path = self
             .project_root
-            .join(".trellis")
+            .join(".ctl")
             .join("tasks")
             .join(task_id)
             .join("worktree");
@@ -1393,7 +1393,7 @@ impl ControlApp {
     fn get_worktree_path(&self, task_id: &str) -> Result<PathBuf> {
         let worktree_path = self
             .project_root
-            .join(".trellis")
+            .join(".ctl")
             .join("tasks")
             .join(task_id)
             .join("worktree");
@@ -1874,12 +1874,9 @@ mod tests {
 
         assert!(dir
             .path()
-            .join(".trellis/tasks/ledger-task/events.jsonl")
+            .join(".ctl/tasks/ledger-task/events.jsonl")
             .exists());
-        assert!(dir
-            .path()
-            .join(".trellis/tasks/ledger-task/task.json")
-            .exists());
+        assert!(dir.path().join(".ctl/tasks/ledger-task/task.json").exists());
         assert!(!dir.path().join(".control").join("events.jsonl").exists());
     }
 

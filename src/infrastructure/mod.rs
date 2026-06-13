@@ -7,3 +7,5 @@ pub mod schema_validator;
 pub mod store;
 #[allow(dead_code)]
 pub mod workspace;
+#[allow(dead_code)]
+pub mod skills;

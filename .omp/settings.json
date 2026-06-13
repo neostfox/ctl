@@ -14,7 +14,7 @@
       "enabled": false
     },
     "env": {
-      "PATH": "C:\\Users\\shaob\\.cargo\\bin;%PATH%"
+      "PATH": "C:\\Users\\shaob\\AppData\\Roaming\\npm;C:\\Users\\shaob\\.cargo\\bin;%PATH%"
     }
   },
   "task": {

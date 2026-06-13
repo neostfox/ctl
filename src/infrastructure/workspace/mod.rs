@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// Returns the worktree path.
 pub fn create_worktree(project_root: &Path, task_id: &str) -> Result<PathBuf> {
     let worktree_path = project_root
-        .join(".trellis")
+        .join(".ctl")
         .join("tasks")
         .join(task_id)
         .join("worktree");

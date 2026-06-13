@@ -35,7 +35,7 @@ adapters/manual → application DTO
 ## Canonical Truth Model
 
 ```
-events.jsonl   = append-only canonical truth (per task, under .trellis/tasks/<id>/)
+events.jsonl   = append-only canonical truth (per task, under .ctl/tasks/<id>/)
 task.json      = replay projection (delete and rebuild, never hand-edit)
 control.json   = reconcile projection (M5+)
 ```
@@ -65,13 +65,13 @@ Current milestone scope: **M0–M3**.
 2. **Reducer**: Pure function `apply(&mut TaskState, &Event)`. No side effects. State machine: `Planning → Ready → InProgress → Review → Completed` (plus `Cancelled`).
 3. **Hold**: Orthogonal to phase. Violation, gate failure, or human pause triggers hold. No `start`/`submit`/`finish` while held.
 4. **Gates**: Only predefined templates (`cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`). M0 does NOT execute gates — runner is stubbed.
-5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git/`, `.trellis/tasks/*/events.jsonl`, `schemas/`, `Cargo.toml`).
+5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git/`, `.ctl/tasks/*/events.jsonl`, `schemas/`, `Cargo.toml`).
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
 
 ## Spec & Documentation
 
-- `.trellis/spec/backend/` — Layer-specific coding guidelines.
-- `.trellis/spec/guides/` — Cross-cutting thinking guides.
+- `.ctl/spec/backend/` — Layer-specific coding guidelines.
+- `.ctl/spec/guides/` — Cross-cutting thinking guides.
 - `ARCHITECTURE_GUARDRAILS.md` — Inviolable architecture rules.
 - `ROADMAP.md` — Milestone definitions, exit criteria, and decisions.
 - `schemas/` — JSON Schema contracts (Draft 2020-12, `unevaluatedProperties: false`).

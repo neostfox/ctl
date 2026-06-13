@@ -14,14 +14,14 @@ pub struct FileEventStore {
 impl FileEventStore {
     /// Create the `.trellis/tasks/` root used by M1 task ledgers.
     pub fn init(project_root: &Path) -> Result<Self> {
-        let tasks_dir = project_root.join(".trellis").join("tasks");
+        let tasks_dir = project_root.join(".ctl").join("tasks");
         fs::create_dir_all(&tasks_dir)?;
         Ok(Self { tasks_dir })
     }
 
     /// Open an existing `.trellis/tasks/` task ledger root.
     pub fn open(project_root: &Path) -> Result<Self> {
-        let tasks_dir = project_root.join(".trellis").join("tasks");
+        let tasks_dir = project_root.join(".ctl").join("tasks");
         if !tasks_dir.exists() {
             return Err(anyhow!(
                 ".trellis/tasks/ not found. Run 'control init' first."

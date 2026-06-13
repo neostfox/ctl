@@ -17,7 +17,7 @@ pub struct RunEventStore {
 impl RunEventStore {
     /// Create the `.trellis/runs/` root directory.
     pub fn init(project_root: &Path) -> Result<Self> {
-        let runs_dir = project_root.join(".trellis").join("runs");
+        let runs_dir = project_root.join(".ctl").join("runs");
         fs::create_dir_all(&runs_dir)?;
         Ok(Self { runs_dir })
     }

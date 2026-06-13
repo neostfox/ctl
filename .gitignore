@@ -10,3 +10,5 @@ Thumbs.db
 .idea/
 /.trellis/
 .vscode/
+npm/node_modules/
+/.ctl/
