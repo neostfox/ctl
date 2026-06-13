@@ -374,6 +374,10 @@ enum ApprovalCommands {
         /// Reason for the approval request
         #[arg(long)]
         reason: String,
+        /// Action this approval authorizes for the active task (e.g. `deps`).
+        /// Recorded in the approval scope and read by the governance gate.
+        #[arg(long)]
+        action: Option<String>,
         /// TTL in seconds (default 86400)
         #[arg(long, default_value_t = 86400)]
         ttl: u64,
@@ -816,12 +820,25 @@ fn cmd_workspace(command: &WorkspaceCommands, dry_run: bool) -> Result<()> {
 fn cmd_approval(command: &ApprovalCommands, dry_run: bool) -> Result<()> {
     let app = app_open(dry_run)?;
     match command {
-        ApprovalCommands::Request { id, reason, ttl } => {
-            let scope = serde_json::json!({});
+        ApprovalCommands::Request {
+            id,
+            reason,
+            action,
+            ttl,
+        } => {
+            let scope = match action {
+                Some(a) => serde_json::json!({ "action": a }),
+                None => serde_json::json!({}),
+            };
             let event = app.approval_request(id, reason, scope, *ttl)?;
+            let request_id = event
+                .payload
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             println!(
-                "Created approval request for task '{}' at seq {}.",
-                id, event.seq
+                "Created approval request '{}' for task '{}' at seq {}.\nGrant with: ctl approval grant --id {} --request {}",
+                request_id, id, event.seq, id, request_id
             );
         }
         ApprovalCommands::Grant { id, request } => {
@@ -2210,6 +2227,9 @@ enum GovState {
         task_id: String,
         write_allow: Vec<String>,
         is_held: bool,
+        /// Actions authorized by granted approvals on this task (e.g. `deps`),
+        /// read by the step-up gate. Derived from `pending_approvals`.
+        approved_actions: Vec<String>,
     },
     /// A task is in review
     Review,
@@ -2252,10 +2272,23 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
 
         if phase == "in_progress" {
             let state = app.replay_task(&task_id)?;
+            // Collect actions authorized by granted approvals on this task.
+            let approved_actions: Vec<String> = state
+                .pending_approvals
+                .values()
+                .filter(|a| a.is_granted())
+                .filter_map(|a| {
+                    a.scope
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect();
             return Ok(GovState::InProgress {
                 task_id,
                 write_allow: state.write_allow.iter().cloned().collect(),
                 is_held,
+                approved_actions,
             });
         }
     }
@@ -2478,20 +2511,43 @@ fn cmd_hook_gate(
                     }
                 },
                 "git_push" => {
+                    // Push rides the completed commit-window: a task that just
+                    // passed its gates and completed may push its commit before
+                    // archiving. No separate approval primitive needed.
+                    let allowed = matches!(&state, GovState::Completed { .. });
                     let output = serde_json::json!({
-                        "allowed": false,
+                        "allowed": allowed,
                         "state": gov_state_str(&state),
-                        "reason": "git push requires step-up approval",
-                        "remedy": "ctl approval request --action push"
+                        "reason": if allowed {
+                            "push window open for completed task"
+                        } else {
+                            "git push only allowed in a completed task's commit window"
+                        },
+                        "remedy": if allowed { "" } else {
+                            "finish a task (ctl task submit --id <id> && ctl task finish --id <id>), then commit and push before archiving"
+                        }
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 "cargo_deps" => {
+                    // Dependency changes require a granted step-up approval
+                    // (action=deps) on the active in_progress task.
+                    let allowed = matches!(
+                        &state,
+                        GovState::InProgress { approved_actions, .. }
+                            if approved_actions.iter().any(|a| a == "deps")
+                    );
                     let output = serde_json::json!({
-                        "allowed": false,
+                        "allowed": allowed,
                         "state": gov_state_str(&state),
-                        "reason": "dependency changes require step-up approval",
-                        "remedy": "ctl approval request --action deps"
+                        "reason": if allowed {
+                            "dependency change approved for active task"
+                        } else {
+                            "dependency changes require a granted step-up approval (action=deps)"
+                        },
+                        "remedy": if allowed { "" } else {
+                            "ctl approval request --id <id> --action deps --reason <why>, then ctl approval grant --id <id> --request <request_id>"
+                        }
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
