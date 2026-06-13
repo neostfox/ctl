@@ -457,6 +457,8 @@ enum HookCommands {
         #[arg(long)]
         data: String,
     },
+    /// Check if .ctl/spec/ is fresh relative to source changes
+    SpecStatus,
 }
 
 pub fn run() -> Result<()> {
@@ -1877,6 +1879,7 @@ fn cmd_hook(command: &HookCommands) -> Result<()> {
         HookCommands::Breadcrumb => cmd_hook_breadcrumb(),
         HookCommands::CheckWrite { path } => cmd_hook_check_write(path),
         HookCommands::RecordDecision { data } => cmd_hook_record_decision(data),
+        HookCommands::SpecStatus => cmd_hook_spec_status(),
     }
 }
 
@@ -2095,6 +2098,134 @@ fn cmd_hook_record_decision(data: &str) -> Result<()> {
     writeln!(file, "{}", entry)?;
 
     let output = serde_json::json!({ "recorded": true });
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_hook_spec_status() -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let spec_dir = project_root.join(".ctl").join("spec");
+    let src_dir = project_root.join("src");
+
+    if !spec_dir.exists() {
+        let output = serde_json::json!({
+            "has_specs": false,
+            "status": "no_specs",
+            "message": "Run /ctl-spec-bootstrap to generate specs"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // Find the most recent mtime among spec files
+    let mut spec_mtime: Option<std::time::SystemTime> = None;
+    let mut spec_count = 0u32;
+    if spec_dir.exists() {
+        fn scan_dir(
+            dir: &Path,
+            mtime: &mut Option<std::time::SystemTime>,
+            count: &mut u32,
+        ) -> Result<()> {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                if meta.is_dir() {
+                    scan_dir(&entry.path(), mtime, count)?;
+                } else if entry.path().extension().is_some_and(|e| e == "md") {
+                    *count += 1;
+                    let t = meta.modified()?;
+                    *mtime = Some(mtime.map_or(
+                        t,
+                        |prev: std::time::SystemTime| if t > prev { t } else { prev },
+                    ));
+                }
+            }
+            Ok(())
+        }
+        scan_dir(&spec_dir, &mut spec_mtime, &mut spec_count)?;
+    }
+
+    // Find the most recent mtime among source files
+    let mut src_mtime: Option<std::time::SystemTime> = None;
+    let mut src_count = 0u32;
+    if src_dir.exists() {
+        fn scan_src(
+            dir: &Path,
+            mtime: &mut Option<std::time::SystemTime>,
+            count: &mut u32,
+        ) -> Result<()> {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                if meta.is_dir() {
+                    scan_src(&entry.path(), mtime, count)?;
+                } else {
+                    let ext_str = entry
+                        .path()
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(String::from);
+                    if ext_str.as_ref().is_some_and(|e| {
+                        [
+                            "rs", "ts", "tsx", "js", "jsx", "java", "go", "py", "vue", "svelte",
+                        ]
+                        .contains(&e.as_str())
+                    }) {
+                        *count += 1;
+                        let t = meta.modified()?;
+                        *mtime = Some(mtime.map_or(
+                            t,
+                            |prev: std::time::SystemTime| if t > prev { t } else { prev },
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        scan_src(&src_dir, &mut src_mtime, &mut src_count)?;
+    }
+
+    // Also check root config files (Cargo.toml, package.json, pom.xml, go.mod, pyproject.toml)
+    let config_markers = [
+        "Cargo.toml",
+        "package.json",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "go.mod",
+        "pyproject.toml",
+    ];
+    for marker in &config_markers {
+        let p = project_root.join(marker);
+        if p.exists() {
+            if let Ok(meta) = p.metadata() {
+                if let Ok(t) = meta.modified() {
+                    src_mtime = Some(src_mtime.map_or(t, |prev| if t > prev { t } else { prev }));
+                }
+            }
+        }
+    }
+
+    let (fresh, drift) = match (spec_mtime, src_mtime) {
+        (_, None) => (true, false),       // no source to compare
+        (None, Some(_)) => (false, true), // specs missing, source exists
+        (Some(s), Some(c)) => (s >= c, c > s),
+    };
+
+    let output = serde_json::json!({
+        "has_specs": true,
+        "spec_files": spec_count,
+        "source_files": src_count,
+        "fresh": fresh,
+        "drift": drift,
+        "status": if fresh { "fresh" } else { "stale" },
+        "message": if fresh {
+            "Specs are up to date"
+        } else {
+            "Source files changed since last spec refresh. Consider running /ctl-spec-bootstrap"
+        }
+    });
+
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

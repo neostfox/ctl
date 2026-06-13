@@ -158,13 +158,11 @@ export default function (pi: HookAPI): void {
   });
 
   // ═══════════════════════════════════════════
-  // 6. AGENT END — check for held tasks
+  // 6. AGENT END — check for held tasks + spec drift
   // ═══════════════════════════════════════════
   pi.on("agent_end", async (_event) => {
     const bc = ctl("breadcrumb");
-    if (!bc) return;
-
-    if (bc.hold) {
+    if (bc?.hold) {
       ctlRecord({
         signal: "task_held_after_agent",
         task_id: bc.task_id,
@@ -172,23 +170,53 @@ export default function (pi: HookAPI): void {
         action_taken: "needs_attention",
       });
     }
+
+    // Spec drift detection
+    try {
+      const specRaw = execSync(`ctl hook spec-status`, {
+        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+      });
+      const spec = JSON.parse(specRaw);
+      if (spec.drift) {
+        ctlRecord({
+          signal: "spec_drift_detected",
+          spec_files: spec.spec_files,
+          source_files: spec.source_files,
+          action_taken: "suggest_refresh",
+        });
+      }
+    } catch { /* best effort */ }
   });
 
   // ═══════════════════════════════════════════
-  // 7. SESSION SHUTDOWN — remind about unfinished tasks
+  // 7. SESSION SHUTDOWN — remind about unfinished tasks + stale specs
   // ═══════════════════════════════════════════
   pi.on("session_shutdown", async (_event) => {
     const ctx = ctl("context");
-    if (!ctx?.tasks?.by_phase) return;
+    if (ctx?.tasks?.by_phase) {
+      const inProgress = ctx.tasks.by_phase.InProgress || 0;
+      const inReview = ctx.tasks.by_phase.Review || 0;
 
-    const inProgress = ctx.tasks.by_phase.InProgress || 0;
-    const inReview = ctx.tasks.by_phase.Review || 0;
-
-    if ((inProgress + inReview) > 0 && typeof process.stderr?.write === "function") {
-      process.stderr.write(
-        `\n⚠️ Unfinished tasks: ${inProgress} in-progress, ${inReview} in review\n` +
-        `Run 'ctl task status --id <id>' to check.\n`
-      );
+      if ((inProgress + inReview) > 0 && typeof process.stderr?.write === "function") {
+        process.stderr.write(
+          `\n⚠️ Unfinished tasks: ${inProgress} in-progress, ${inReview} in review\n` +
+          `Run 'ctl task status --id <id>' to check.\n`
+        );
+      }
     }
+
+    // Spec staleness warning
+    try {
+      const specRaw = execSync(`ctl hook spec-status`, {
+        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+      });
+      const spec = JSON.parse(specRaw);
+      if (spec.drift && typeof process.stderr?.write === "function") {
+        process.stderr.write(
+          `\n📝 Specs are stale (${spec.source_files} source files newer than ${spec.spec_files} spec files).\n` +
+          `Run /ctl-spec-bootstrap to refresh.\n`
+        );
+      }
+    } catch { /* best effort */ }
   });
 }
