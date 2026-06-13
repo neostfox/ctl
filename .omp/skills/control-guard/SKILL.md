@@ -25,7 +25,7 @@ You are the control plane orchestrator. You run every session automatically. You
 | Task completed, knowledge gained | Spec Update check | → `/ctl-spec-update` (if needed) |
 | Something broke mid-run | Bayesian + Root Cause | → `/ctl-abort` (if confidence ≥ 70%) |
 | Gate failure during close | Bayesian + Root Cause | → Fix, re-run gate |
-| User asks "status" / "进展" | — | → `/ctl-status` |
+| User asks to generate/refresh specs | — | → `/ctl-spec-bootstrap` |
 | User asks "health" / "check" | — | → `/ctl-health` |
 
 ## When to Engage

@@ -46,6 +46,10 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-spec-update/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-spec-update/SKILL.md"),
         },
+        EmbeddedFile {
+            relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-spec-bootstrap/SKILL.md"),
+        },
         // Hooks (OMP native extension format)
         EmbeddedFile {
             relative_path: "hooks/pre/ctl-context.js",
