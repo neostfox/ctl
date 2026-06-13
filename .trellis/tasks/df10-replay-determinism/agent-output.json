@@ -1,9 +1,0 @@
-{
-  "command": "verify replay",
-  "exit_code": 0,
-  "source": "manual",
-  "summary": "Replay determinism verified. reconcile rebuilt 13 task projections from events.jsonl. Task states are fully recoverable from canonical events.",
-  "touched_files": [
-    "src/infrastructure/store/mod.rs"
-  ]
-}

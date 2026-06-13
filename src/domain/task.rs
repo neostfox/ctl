@@ -16,6 +16,24 @@ pub enum Phase {
     Cancelled,
 }
 
+impl Phase {
+    /// Canonical machine string form (serde `snake_case`), matching the
+    /// `phase` field written to `task.json` and the schema enum. This is the
+    /// single source of truth for the wire/string form — do NOT derive phase
+    /// strings from `format!("{:?}", ..)` (which yields `inprogress`, an
+    /// incompatible spelling that silently breaks gate matching).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Phase::Planning => "planning",
+            Phase::Ready => "ready",
+            Phase::InProgress => "in_progress",
+            Phase::Review => "review",
+            Phase::Completed => "completed",
+            Phase::Cancelled => "cancelled",
+        }
+    }
+}
+
 impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

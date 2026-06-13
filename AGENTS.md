@@ -79,18 +79,18 @@ Current milestone scope: **M0–M3**.
 ## Commands (M0–M1 Surface)
 
 ```text
-control init
-control task create --id <id> --objective <text> --read-scope <path> --write-allow <path> --gates <gate>
-control task revise --id <id> [boundary fields]
-control task ready --id <id>
-control task status --id <id>
-control replay [--task <id>]
-control validate
-control doctor
-control schema validate --file <path>
-control boundary check --path <path>
-control boundary explain --path <path>
-control architecture check
+ctl init
+ctl task create --id <id> --objective <text> --read-scope <path> --write-allow <path> --gates <gate>
+ctl task revise --id <id> [boundary fields]
+ctl task ready --id <id>
+ctl task status --id <id>
+ctl replay [--task <id>]
+ctl validate
+ctl doctor
+ctl schema validate --file <path>
+ctl boundary check --path <path>
+ctl boundary explain --path <path>
+ctl architecture check
 ```
 
 ## Forbidden

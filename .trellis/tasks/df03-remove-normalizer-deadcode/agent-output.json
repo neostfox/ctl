@@ -1,9 +1,0 @@
-{
-  "command": "edit normalizer.rs",
-  "exit_code": 0,
-  "source": "manual",
-  "summary": "Removed #[allow(dead_code)] from PathNormalizer struct, new(), normalize(), and is_protected(). These are all actively used by the application layer.",
-  "touched_files": [
-    "src/infrastructure/boundary/normalizer.rs"
-  ]
-}

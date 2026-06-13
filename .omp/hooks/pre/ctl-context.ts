@@ -132,7 +132,7 @@ export default function (pi: HookAPI): void {
       const boundary = [
         `📋 Active ctl task boundaries — stay within write scope:`,
         ...lines,
-        `\nAll tool calls are gated by the ctl state machine. Writes outside scope, git commits without completed task, and pushes will be blocked.`,
+        `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
       ].join("\n");
 
       return {
@@ -214,7 +214,25 @@ export default function (pi: HookAPI): void {
 
     // ── Gate check ──
     const gate = checkGate(tool, path, command, agentType);
-    if (!gate) return; // ctl unavailable — don't block
+    if (!gate) {
+      // ctl unavailable (missing binary, timeout, or crash). Fail CLOSED for
+      // mutating tools — an unenforceable boundary must never silently allow
+      // writes or commands. Read-only tools are unaffected.
+      const mutating =
+        tool === "write" ||
+        tool === "edit" ||
+        tool === "multiedit" ||
+        tool === "bash" ||
+        tool === "task";
+      if (mutating) {
+        return {
+          block: true,
+          reason:
+            "ctl gate unavailable (binary missing, timeout, or error) — failing closed. Mutating tools are blocked until `ctl` responds. Check that `ctl` is on PATH.",
+        };
+      }
+      return; // read-only / non-mutating — allow
+    }
 
     if (!gate.allowed) {
       const remedy = gate.remedy ? `\n💡 ${gate.remedy}` : "";
@@ -294,7 +312,7 @@ export default function (pi: HookAPI): void {
         total: number;
       };
       const byPhase = tasks?.by_phase;
-      const ip = byPhase?.inprogress ?? 0;
+      const ip = byPhase?.["in_progress"] ?? 0;
       const rv = byPhase?.review ?? 0;
       if (
         (ip + rv) > 0 &&

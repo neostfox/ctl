@@ -120,7 +120,7 @@ enum Commands {
 enum TaskCommands {
     /// Create a Planning task with a structured M1 boundary
     Create {
-        /// Stable task identifier; maps to .trellis/tasks/<id>/
+        /// Stable task identifier; maps to .ctl/tasks/<id>/
         #[arg(long)]
         id: String,
         /// Non-empty task objective
@@ -1197,14 +1197,61 @@ fn check_modules() -> Result<()> {
         return Err(anyhow::anyhow!("src/domain/ missing"));
     }
 
+    // MODULE-001/002: domain/ must stay a pure reducer. Non-test code may not
+    // import infrastructure/cli/adapters, nor touch the filesystem, process,
+    // network, or wall-clock time. Test modules live under an indented
+    // `#[cfg(test)]` block by convention, so module top-level (column-0) lines
+    // are the non-test surface we enforce here. Without this scan the guardrail
+    // was unenforced — `check_modules` only verified file extensions.
+    let forbidden_use = [
+        "use crate::infrastructure",
+        "use crate::cli",
+        "use crate::adapters",
+        "use crate::application",
+        "use std::fs",
+        "use std::io",
+        "use std::net",
+        "use std::process",
+        "use std::time",
+    ];
     for entry in fs::read_dir(domain_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().is_none_or(|e| e != "rs") {
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "rs") {
             return Err(anyhow::anyhow!(
                 "Non-rust file in domain module: {:?}",
                 path
             ));
+        }
+        let content = fs::read_to_string(&path)?;
+        for (idx, line) in content.lines().enumerate() {
+            // Skip indented lines — these belong to function bodies or the
+            // indented `#[cfg(test)]` module, which is exempt.
+            if line.starts_with(char::is_whitespace) || !line.starts_with("use ") {
+                if !line.starts_with(char::is_whitespace)
+                    && (line.contains("SystemTime") || line.contains("Instant"))
+                {
+                    return Err(anyhow::anyhow!(
+                        "Domain purity violation (MODULE-002, wall-clock time) at {:?}:{} — `{}`",
+                        path,
+                        idx + 1,
+                        line.trim()
+                    ));
+                }
+                continue;
+            }
+            if let Some(pat) = forbidden_use.iter().find(|p| line.starts_with(**p)) {
+                return Err(anyhow::anyhow!(
+                    "Domain dependency violation (MODULE-001/002) at {:?}:{} — `{}` ({})",
+                    path,
+                    idx + 1,
+                    line.trim(),
+                    pat
+                ));
+            }
         }
     }
 
@@ -1412,6 +1459,7 @@ fn check_milestone_scope() -> Result<()> {
             "context",
             "doctor",
             "gate",
+            "hook",
             "init",
             "reconcile",
             "replay",
@@ -1960,7 +2008,7 @@ fn cmd_hook_context() -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown");
         *by_phase.entry(phase.to_string()).or_default() += 1;
-        if phase == "inprogress" {
+        if phase == "in_progress" {
             let task_id = report.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
             // Replay to get full boundary for context injection
             let boundary = app
@@ -2099,7 +2147,7 @@ fn cmd_hook_check_write(target_path: &str) -> Result<()> {
         if let Ok(content) = fs::read_to_string(&task_path) {
             if let Ok(task) = serde_json::from_str::<serde_json::Value>(&content) {
                 let phase = task.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                if phase == "InProgress" && active.as_ref().is_none_or(|(_, _, t)| mtime > *t) {
+                if phase == "in_progress" && active.as_ref().is_none_or(|(_, _, t)| mtime > *t) {
                     let write_allow: Vec<String> = task
                         .get("write_allow")
                         .and_then(|v| v.as_array())
@@ -2202,7 +2250,7 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
             continue;
         }
 
-        if phase == "inprogress" {
+        if phase == "in_progress" {
             let state = app.replay_task(&task_id)?;
             return Ok(GovState::InProgress {
                 task_id,

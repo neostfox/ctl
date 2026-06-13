@@ -3,7 +3,7 @@
 //! Each run is an independent aggregate with its own event stream.
 //! A run represents a single agent execution within a task boundary.
 //!
-//! Storage: `.trellis/runs/<run_id>/events.jsonl`
+//! Storage: `.ctl/runs/<run_id>/events.jsonl`
 //!
 //! Run lifecycle:
 //!   Queued → Running → Completed | Failed | Aborted
@@ -399,7 +399,7 @@ mod tests {
             2,
             "run_started",
             json!({
-                "worktree_path": ".trellis/runs/r1/worktree",
+                "worktree_path": ".ctl/runs/r1/worktree",
                 "lease_id": "lease-1"
             }),
         );
@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(state.phase, RunPhase::Running);
         assert_eq!(
             state.worktree_path,
-            Some(".trellis/runs/r1/worktree".to_string())
+            Some(".ctl/runs/r1/worktree".to_string())
         );
         assert_eq!(state.lease_id, Some("lease-1".to_string()));
 

@@ -8,7 +8,11 @@
 Thumbs.db
 .env
 .idea/
-/.trellis/
 .vscode/
 npm/node_modules/
+# Prebuilt platform binaries are build artifacts, not source
+npm/platforms/**/ctl
+npm/platforms/**/ctl.exe
 /.ctl/
+__pycache__/
+*.pyc

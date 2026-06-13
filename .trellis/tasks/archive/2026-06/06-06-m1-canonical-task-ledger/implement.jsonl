@@ -1,3 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/tasks/06-06-remaining-design-deviations/design.md", "reason": "Parent decisions: canonical store and structured task boundary"}
-{"file": "ROADMAP.md", "reason": "M1 sequencing and milestone boundaries"}

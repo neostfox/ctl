@@ -15,6 +15,26 @@
 
 ---
 
+## 实现现状（截至 2026-06-13 架构收敛）
+
+本文是**设计与愿景记录**。为避免「文档脱离实际架构」，这里明确区分已落地与规划中。
+
+**已实现并强制（M0–M3 + 本次收敛）**
+
+- 事件溯源任务账本：`events.jsonl` 为唯一事实源，`task.json` 为可重建投影；存储根为 **`.ctl/`**（由 `.trellis/` 迁移，后者已整体退役）。
+- 分层 Rust（`domain` 纯 reducer / `application` / `infrastructure` / `cli` / `adapters`）。`domain` 纯度与依赖方向由 `ctl architecture check` 的 `check_modules` **机器强制**（禁止 `use crate::{infrastructure,cli,adapters,application}` 与 `std::{fs,io,net,process,time}`）。
+- 路径边界（`PathNormalizer`）、gate 模板（`cargo_check/test/fmt/clippy`）、受控执行状态机（Planning→Ready→InProgress→Review→Completed，正交 hold）。phase 机器串统一为 serde `in_progress`（`Phase::as_str()` 为唯一来源）。
+- 运行时治理 hook：**OMP**（`.omp/hooks/pre/ctl-context.ts`）与 **Claude Code**（`.claude/hooks/ctl-gate.py`，PreToolUse）。写操作越界 **fail-closed**；`ctl` 不可用时写工具拦截而非放行。
+
+**规划中 / 愿景（M4–M6+，下文有描述但尚未实现）**
+
+- `telemetry.jsonl` 证据索引、`control.json` reconcile 决策投影、drift 分数、`audit_hold` 确定性审计。
+- lease / worktree 隔离（部分）、多 agent 并发、Codex / OpenCode adapter。
+
+**当前激活平台**：OMP（原生 hook）+ Claude Code（PreToolUse / SessionStart hook）。`.cursor / .opencode / .pi` 与 Trellis 旧体系已移除；skills 单一来源内嵌于 `ctl` 二进制，经 `ctl init` 注入 `.omp/`。下文凡出现 `telemetry / control.json / drift / audit_hold / Codex / OpenCode / 多 run 并发` 处，均属上面「规划中」一列，阅读时按愿景理解。
+
+---
+
 ## 第一原则：边界优先
 
 边界是第一优先级，高于功能数量、自动化程度和模型能力。
@@ -129,8 +149,9 @@ Claude/Codex/OpenCode = 兼容目标或备用执行器
 团队推广时保持兼容：
 
 ```text
-仓库里放 .trellis / .agents/skills / AGENTS.md / .omp/skills
-让 OMP、Codex、Claude、OpenCode 都能读。
+仓库里放 .omp/skills（单一来源，内嵌于 ctl 二进制）/ .claude/hooks / AGENTS.md
+让 OMP 与 Claude Code 读取并强制治理。
+（注：.cursor / .opencode / .pi 与 Trellis 旧体系已退役；Codex / OpenCode 为规划中的兼容目标。）
 ```
 
 当前仓库已经先落地 OMP 项目级围栏配置，入口为：[.omp/settings.json](./.omp/settings.json)。
@@ -175,9 +196,9 @@ modelRoles:
 
 Trellis 不是纯 Python 项目，主体仓库是 TypeScript，但落地到项目里的核心脚本大量使用 Python，例如：
 
-- `.trellis/scripts/task.py`
-- `.trellis/scripts/get_context.py`
-- `.trellis/scripts/add_session.py`
+- `.ctl/scripts/task.py`
+- `.ctl/scripts/get_context.py`
+- `.ctl/scripts/add_session.py`
 
 Rust 重写时，不应照搬实现语言或全部平台适配，而应吸收它的文件协议与生命周期。
 
@@ -186,7 +207,7 @@ Rust 重写时，不应照搬实现语言或全部平台适配，而应吸收它
 #### 1. 任务目录
 
 ```text
-.trellis/tasks/<MM-DD-slug>/
+.ctl/tasks/<MM-DD-slug>/
   task.json
   prd.md
   design.md
@@ -205,25 +226,25 @@ planning -> in_progress -> review -> completed -> archived
 #### 3. 归档
 
 ```text
-.trellis/tasks/archive/YYYY-MM/<task>/
+.ctl/tasks/archive/YYYY-MM/<task>/
 ```
 
 #### 4. workspace journal
 
 ```text
-.trellis/workspace/<developer>/journal-N.md
+.ctl/workspace/<developer>/journal-N.md
 ```
 
 #### 5. spec library
 
 ```text
-.trellis/spec/
+.ctl/spec/
 ```
 
 #### 6. context manifest
 
 ```jsonl
-{"file": ".trellis/spec/backend/index.md", "reason": "backend conventions"}
+{"file": ".ctl/spec/backend/index.md", "reason": "backend conventions"}
 ```
 
 ### 不建议照搬
@@ -335,7 +356,7 @@ src/
 兼容 Trellis 路径，减少迁移成本：
 
 ```text
-.trellis/
+.ctl/
   spec/
   tasks/
   workspace/
@@ -345,7 +366,7 @@ src/
 每个任务：
 
 ```text
-.trellis/tasks/<task>/
+.ctl/tasks/<task>/
   task.json          # 机器状态
   events.jsonl       # 状态事件日志
   telemetry.jsonl    # 执行观测数据
@@ -387,7 +408,7 @@ CLI 是底层能力；日常使用不需要手动敲命令。OMP agent 通过 `.
 
 ```text
 用户请求 → agent 判断是否是任务
-  → 是：agent 推断边界 → 展示提案 → 用户确认/调整 → 自动创建 control task
+  → 是：agent 推断边界 → 展示提案 → 用户确认/调整 → 自动创建 ctl task
   → 否：跳过 control，自由工作
 → agent 在 write_allow 范围内实现
 → agent 自动运行 gates (fmt/check/test/clippy)
@@ -403,13 +424,13 @@ CLI 是底层能力；日常使用不需要手动敲命令。OMP agent 通过 `.
 |---|---|
 | 检测任务请求，推断 objective/scope/gates | agent 内部推理 |
 | 展示任务提案，等待人类确认 | agent 对话 |
-| 创建 control task | `control init` + `control task create` + `control task ready` |
-| 检查写入是否在 scope 内 | `control boundary check --path <path>` |
-| 验证事件流 | `control validate` |
+| 创建 ctl task | `ctl init` + `ctl task create` + `ctl task ready` |
+| 检查写入是否在 scope 内 | `ctl boundary check --path <path>` |
+| 验证事件流 | `ctl validate` |
 | 运行全部 gates | `cargo fmt/check/test/clippy` |
-| 架构合规 | `control architecture check` |
-| 展示完成摘要 | `control task status --id <id>` |
-| 重建投影 | `control replay --task <id>` |
+| 架构合规 | `ctl architecture check` |
+| 展示完成摘要 | `ctl task status --id <id>` |
+| 重建投影 | `ctl replay --task <id>` |
 
 ### 需要 M2/M3 才能自动化的
 
@@ -430,22 +451,22 @@ CLI 是底层能力；日常使用不需要手动敲命令。OMP agent 通过 `.
 第一版发布边界是 `M3 Manual 闭环 MVP`，不接模型，不做全平台大一统。详细里程碑见：[ROADMAP.md](./ROADMAP.md)。
 
 ```text
-control init
-control task create
-control task ready
-control task start
-control context build
-control task submit
-control task finish
-control task archive
-control task status
-control assignment create
-control assignment export
-control run ingest --adapter manual
-control replay
-control reconcile
-control validate
-control doctor
+ctl init
+ctl task create
+ctl task ready
+ctl task start
+ctl context build
+ctl task submit
+ctl task finish
+ctl task archive
+ctl task status
+ctl assignment create
+ctl assignment export
+ctl run ingest --adapter manual
+ctl replay
+ctl reconcile
+ctl validate
+ctl doctor
 ```
 
 ### MVP 目标
@@ -485,7 +506,7 @@ control doctor
 可吸收为：
 
 ```text
-.trellis/spec/constitution.md
+.ctl/spec/constitution.md
 ```
 
 ### Kiro
@@ -553,7 +574,7 @@ reconcile(spec, status) -> next action
 task.json       = desired task state + materialized status
 events.jsonl    = observed facts
 control.json    = last reconciliation decision
-control reconcile <task>
+ctl reconcile <task>
 ```
 
 #### Cedar
@@ -873,7 +894,7 @@ adapter output / human output / gate output
 每个任务下保留子智能体输出：
 
 ```text
-.trellis/tasks/<task>/
+.ctl/tasks/<task>/
   agents/
     research-agent/
       output.md
@@ -893,8 +914,8 @@ adapter output / human output / gate output
 如果输出需要被后续执行读取，应再显式加入 `implement.jsonl` 或 `check.jsonl`：
 
 ```jsonl
-{"file": ".trellis/tasks/<task>/agents/research-agent/output.md", "reason": "research findings for implementation"}
-{"file": ".trellis/tasks/<task>/agents/review-agent/findings.json", "reason": "review findings for verification"}
+{"file": ".ctl/tasks/<task>/agents/research-agent/output.md", "reason": "research findings for implementation"}
+{"file": ".ctl/tasks/<task>/agents/review-agent/findings.json", "reason": "review findings for verification"}
 ```
 
 ### 子智能体调度协议
@@ -910,7 +931,7 @@ adapter output / human output / gate output
   "context": [
     "prd.md",
     "design.md",
-    ".trellis/spec/architecture/super.md"
+    ".ctl/spec/architecture/super.md"
   ],
   "write_policy": "code_and_tests",
   "acceptance": [
@@ -981,8 +1002,8 @@ control agent list
 control agent run <agent> --task <task>
 control agent report <task>
 control agent telemetry <task>
-control schedule plan <task>
-control schedule run <task>
+ctl schedule plan <task>
+ctl schedule run <task>
 ```
 
 ### OMP 集成方式
@@ -990,7 +1011,7 @@ control schedule run <task>
 Rust 控制层不直接实现模型调用。它生成结构化 assignment，然后交给 OMP 的 subagent 能力执行。
 
 ```text
-control schedule plan <task>  -> 生成 agent assignments
+ctl schedule plan <task>  -> 生成 agent assignments
 OMP task tool                 -> 并发执行
 control agent ingest          -> 读取不可信输出，验证后写入 evidence 与 canonical events
 control drift compute         -> 计算下一步控制动作
@@ -1028,8 +1049,8 @@ telemetry    = 带来源标记的不可信 evidence
 这样以后可以做：
 
 ```text
-control replay <task>
-control audit <task>
+ctl replay <task>
+ctl audit <task>
 control explain-drift <task>
 ```
 
@@ -1048,9 +1069,9 @@ control explain-drift <task>
 Rust CLI 提供：
 
 ```text
-control doctor
+ctl doctor
 control migrate
-control validate
+ctl validate
 ```
 
 否则一旦任务文件格式演进，旧任务会不可读。
@@ -1188,7 +1209,7 @@ git commit / push
 
 ```text
 control status --json
-control report <task>
+ctl report <task>
 control drift explain <task>
 control agents report <task>
 ```
@@ -1232,13 +1253,13 @@ baseline 回退
 最小可落地不是“写完整平台”，而是先完成 `M0-M3`，替换 Trellis 的基础 task 能力并形成 manual 闭环。详细退出条件见：[ROADMAP.md](./ROADMAP.md)。
 
 ```text
-control init
-control task create/ready/start/submit/finish/archive
-control context build
+ctl init
+ctl task create/ready/start/submit/finish/archive
+ctl context build
 control status
-control assignment create/export
-control run ingest --adapter manual
-control replay/reconcile/validate
+ctl assignment create/export
+ctl run ingest --adapter manual
+ctl replay/reconcile/validate
 ```
 
 低级事件入口不能作为 agent 或普通用户路径。外部只能提交 evidence，由控制层验证后生成 canonical event。

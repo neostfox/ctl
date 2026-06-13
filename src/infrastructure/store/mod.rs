@@ -12,23 +12,23 @@ pub struct FileEventStore {
 }
 
 impl FileEventStore {
-    /// Create the `.trellis/tasks/` root used by M1 task ledgers.
+    /// Create the `.ctl/tasks/` root used by M1 task ledgers.
     pub fn init(project_root: &Path) -> Result<Self> {
         let tasks_dir = project_root.join(".ctl").join("tasks");
         fs::create_dir_all(&tasks_dir)?;
         Ok(Self { tasks_dir })
     }
 
-    /// Open an existing `.trellis/tasks/` task ledger root.
+    /// Open an existing `.ctl/tasks/` task ledger root.
     pub fn open(project_root: &Path) -> Result<Self> {
         let tasks_dir = project_root.join(".ctl").join("tasks");
         if !tasks_dir.exists() {
             return Err(anyhow!(
-                ".trellis/tasks/ not found. Run 'control init' first."
+                ".ctl/tasks/ not found. Run 'control init' first."
             ));
         }
         if !tasks_dir.is_dir() {
-            return Err(anyhow!(".trellis/tasks exists but is not a directory."));
+            return Err(anyhow!(".ctl/tasks exists but is not a directory."));
         }
         Ok(Self { tasks_dir })
     }
@@ -42,7 +42,7 @@ impl FileEventStore {
         Ok(self.task_dir(task_id)?.join("events.jsonl"))
     }
 
-    /// Append a single event to `.trellis/tasks/<task>/events.jsonl`.
+    /// Append a single event to `.ctl/tasks/<task>/events.jsonl`.
     pub fn append(&self, event: &Event) -> Result<()> {
         let task_dir = self.task_dir(&event.task_id)?;
         fs::create_dir_all(&task_dir)?;
@@ -57,7 +57,7 @@ impl FileEventStore {
         Ok(())
     }
 
-    /// Read all task events from `.trellis/tasks/*/events.jsonl`.
+    /// Read all task events from `.ctl/tasks/*/events.jsonl`.
     /// Skips blank lines. Returns errors for malformed JSON.
     pub fn read_all(&self) -> Result<Vec<Event>> {
         let mut events = Vec::new();
@@ -142,7 +142,7 @@ impl FileEventStore {
         Ok(ids)
     }
 
-    /// Write a task view projection to `.trellis/tasks/<task>/task.json`.
+    /// Write a task view projection to `.ctl/tasks/<task>/task.json`.
     /// Uses atomic write (temp + rename) to avoid corruption.
     pub fn write_task_view(
         &self,
@@ -180,7 +180,7 @@ fn validate_task_id(task_id: &str) -> Result<()> {
     }
     if task_id == "." || task_id == ".." || task_id.contains('/') || task_id.contains('\\') {
         return Err(anyhow!(
-            "Task id '{}' must be a single .trellis/tasks child directory",
+            "Task id '{}' must be a single .ctl/tasks child directory",
             task_id
         ));
     }

@@ -137,16 +137,16 @@ drift 只能触发暂停、解释或重规划 proposal，不能自动扩权
 8. M1 不实现 gate runner、adapter、telemetry drift、scheduler、OMP runtime。
 
 需要实现的命令：
-- control init
-- control task create
-- control task revise
-- control task ready
-- control task start
-- control task status
-- control task cancel
-- control replay
-- control validate
-- control doctor
+- ctl init
+- ctl task create
+- ctl task revise
+- ctl task ready
+- ctl task start
+- ctl task status
+- ctl task cancel
+- ctl replay
+- ctl validate
+- ctl doctor
 
 验收：
 - 临时目录内可以 create -> ready -> start -> cancel。
@@ -206,16 +206,16 @@ drift 只能触发暂停、解释或重规划 proposal，不能自动扩权
 7. M2 不实现自动 agent、不实现 OMP adapter、不实现 drift 自动化。
 
 需要实现的命令：
-- control context build
-- control boundary check
-- control boundary explain
-- control gate run
-- control gate record
-- control task submit
-- control task reopen
-- control task finish
-- control task archive
-- control reconcile
+- ctl context build
+- ctl boundary check
+- ctl boundary explain
+- ctl gate run
+- ctl gate record
+- ctl task submit
+- ctl task reopen
+- ctl task finish
+- ctl task archive
+- ctl reconcile
 
 验收：
 - 越界修改能被检测并阻止 finish。
@@ -277,11 +277,11 @@ drift 只能触发暂停、解释或重规划 proposal，不能自动扩权
 6. assignment.json / agent-output.json 作为后续 OMP adapter contract baseline。
 
 需要实现的命令：
-- control assignment create
-- control assignment export
-- control run ingest --adapter manual
-- control audit
-- control report
+- ctl assignment create
+- ctl assignment export
+- ctl run ingest --adapter manual
+- ctl audit
+- ctl report
 
 验收：
 - 从 task create 到 assignment export 再到 output ingest 可端到端完成。
@@ -393,14 +393,14 @@ M3 完成后不要马上进 M4。先用它治理真实小任务。
 8. 自动 reviewer 只能提交 evidence，completion interlock 仍由控制层执行。
 
 需要实现的命令：
-- control adapter capabilities omp
-- control workspace create
-- control workspace diff
-- control workspace apply
-- control run start --adapter omp
-- control approval request
-- control approval grant
-- control approval deny
+- ctl adapter capabilities omp
+- ctl workspace create
+- ctl workspace diff
+- ctl workspace apply
+- ctl run start --adapter omp
+- ctl approval request
+- ctl approval grant
+- ctl approval deny
 
 验收：
 - OMP 中断后可以恢复或明确失败。
@@ -524,11 +524,11 @@ M3 完成后不要马上进 M4。先用它治理真实小任务。
 8. 共享 .git 风险必须有明确防护。
 
 需要实现的命令：
-- control schedule plan
-- control schedule validate
-- control schedule run
+- ctl schedule plan
+- ctl schedule validate
+- ctl schedule run
 - control agent report
-- control workspace merge-candidate
+- ctl workspace merge-candidate
 
 验收：
 - 重叠写入被拒绝。

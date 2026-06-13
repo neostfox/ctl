@@ -1,6 +1,6 @@
 //! Run event store for M6 multi-agent concurrency.
 //!
-//! Mirrors `FileEventStore` but operates under `.trellis/runs/`.
+//! Mirrors `FileEventStore` but operates under `.ctl/runs/`.
 //! Each run has its own directory with `events.jsonl` and `run.json`.
 
 use anyhow::{anyhow, Result};
@@ -15,24 +15,24 @@ pub struct RunEventStore {
 }
 
 impl RunEventStore {
-    /// Create the `.trellis/runs/` root directory.
+    /// Create the `.ctl/runs/` root directory.
     pub fn init(project_root: &Path) -> Result<Self> {
         let runs_dir = project_root.join(".ctl").join("runs");
         fs::create_dir_all(&runs_dir)?;
         Ok(Self { runs_dir })
     }
 
-    /// Path to a specific run directory: `.trellis/runs/<run_id>/`
+    /// Path to a specific run directory: `.ctl/runs/<run_id>/`
     pub fn run_dir(&self, run_id: &str) -> PathBuf {
         self.runs_dir.join(run_id)
     }
 
-    /// Path to a run's event log: `.trellis/runs/<run_id>/events.jsonl`
+    /// Path to a run's event log: `.ctl/runs/<run_id>/events.jsonl`
     pub fn events_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("events.jsonl")
     }
 
-    /// Append a single event to `.trellis/runs/<run_id>/events.jsonl`.
+    /// Append a single event to `.ctl/runs/<run_id>/events.jsonl`.
     ///
     /// Uses the event's `task_id` field as the run directory key
     /// (consistent with how FileEventStore::append uses `event.task_id`).
@@ -125,7 +125,7 @@ impl RunEventStore {
         Ok(ids)
     }
 
-    /// Write a run view projection to `.trellis/runs/<run_id>/run.json`.
+    /// Write a run view projection to `.ctl/runs/<run_id>/run.json`.
     /// Uses atomic write (temp + rename) to avoid corruption.
     pub fn write_run_view(&self, run_id: &str, state: &AgentRunState) -> Result<()> {
         validate_run_id(run_id)?;

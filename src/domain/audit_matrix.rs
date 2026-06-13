@@ -1880,7 +1880,7 @@ mod tests {
                 "t-ws1",
                 "workspace_created",
                 json!({
-                    "worktree_path": ".trellis/tasks/t-ws1/worktree", "branch": "omp-run-t-ws1"
+                    "worktree_path": ".ctl/tasks/t-ws1/worktree", "branch": "omp-run-t-ws1"
                 }),
             ),
         );
@@ -1907,7 +1907,7 @@ mod tests {
                 "t-ws2",
                 "workspace_cleaned",
                 json!({
-                    "worktree_path": ".trellis/tasks/t-ws2/worktree"
+                    "worktree_path": ".ctl/tasks/t-ws2/worktree"
                 }),
             ),
         );

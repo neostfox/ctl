@@ -198,10 +198,10 @@ schemas/
   control.event-envelope.v1.schema.json
   control.task-view.v1.schema.json
 
-control schema validate
-control boundary check
-control boundary explain
-control architecture check
+ctl schema validate
+ctl boundary check
+ctl boundary explain
+ctl architecture check
 ```
 
 定义：
@@ -238,16 +238,16 @@ control architecture check
 **命令**
 
 ```text
-control init
-control task create
-control task revise
-control task ready
-control task start
-control task status
-control task cancel
-control replay
-control validate
-control doctor
+ctl init
+ctl task create
+ctl task revise
+ctl task ready
+ctl task start
+ctl task status
+ctl task cancel
+ctl replay
+ctl validate
+ctl doctor
 ```
 
 **实现约束**
@@ -279,16 +279,16 @@ control doctor
 **命令**
 
 ```text
-control context build
-control boundary check
-control boundary explain
-control gate run
-control gate record
-control task submit
-control task reopen
-control task finish
-control task archive
-control reconcile
+ctl context build
+ctl boundary check
+ctl boundary explain
+ctl gate run
+ctl gate record
+ctl task submit
+ctl task reopen
+ctl task finish
+ctl task archive
+ctl reconcile
 ```
 
 **实现约束**
@@ -321,11 +321,11 @@ control reconcile
 **命令**
 
 ```text
-control assignment create
-control assignment export
-control run ingest --adapter manual
-control audit
-control report
+ctl assignment create
+ctl assignment export
+ctl run ingest --adapter manual
+ctl audit
+ctl report
 ```
 
 **实现约束**
@@ -358,14 +358,14 @@ OMP 可以执行单个 assignment，同时守住主工作区边界。
 **命令**
 
 ```text
-control adapter capabilities omp
-control workspace create
-control workspace diff
-control workspace apply
-control run start --adapter omp
-control approval request
-control approval grant
-control approval deny
+ctl adapter capabilities omp
+ctl workspace create
+ctl workspace diff
+ctl workspace apply
+ctl run start --adapter omp
+ctl approval request
+ctl approval grant
+ctl approval deny
 ```
 
 **实现约束**
@@ -432,11 +432,11 @@ control next-action
 **命令**
 
 ```text
-control schedule plan
-control schedule validate
-control schedule run
+ctl schedule plan
+ctl schedule validate
+ctl schedule run
 control agent report
-control workspace merge-candidate
+ctl workspace merge-candidate
 ```
 
 **实现约束**
@@ -464,16 +464,16 @@ control workspace merge-candidate
 最早验证路径：
 
 ```powershell
-control init
-control task create --mode small --title "fix config parsing" `
+ctl init
+ctl task create --mode small --title "fix config parsing" `
   --scope src/config.rs --gate "cargo test"
-control task ready
-control task start
-control context build
+ctl task ready
+ctl task start
+ctl context build
 # 人或任意 AI 工具完成修改
-control task submit
-control task finish
-control task archive
+ctl task submit
+ctl task finish
+ctl task archive
 control status
 ```
 

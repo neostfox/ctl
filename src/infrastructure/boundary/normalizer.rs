@@ -14,7 +14,7 @@ impl PathNormalizer {
             protected_paths: vec![
                 ".git".into(),
                 ".ctl".into(),
-                ".trellis/tasks".into(),
+                ".ctl/tasks".into(),
                 ".control".into(),
                 "schemas".into(),
                 "Cargo.toml".into(),
@@ -225,7 +225,7 @@ mod tests {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
         assert!(norm
-            .normalize_write(".trellis/control/events.jsonl")
+            .normalize_write(".ctl/control/events.jsonl")
             .is_err());
     }
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         let root = PathBuf::from(".");
         let norm = PathNormalizer::new(root);
         assert!(norm
-            .normalize_write(".trellis/tasks/example-task/events.jsonl")
+            .normalize_write(".ctl/tasks/example-task/events.jsonl")
             .is_err());
     }
     #[test]

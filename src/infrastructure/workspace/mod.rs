@@ -122,7 +122,7 @@ pub fn cleanup_worktree(project_root: &Path, worktree_path: &Path) -> Result<()>
 /// Detect high-risk changes from a diff.
 /// Returns a list of (risk_type, file_path) pairs.
 pub fn detect_high_risk(files: &[(String, String)]) -> Vec<(String, String)> {
-    let protected_prefixes = [".omp/", ".trellis/spec/", "schemas/"];
+    let protected_prefixes = [".omp/", ".ctl/spec/", "schemas/"];
     let protected_exact = ["Cargo.toml", "Cargo.lock"];
 
     let mut risks = Vec::new();

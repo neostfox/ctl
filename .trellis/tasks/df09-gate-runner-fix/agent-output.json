@@ -1,9 +1,0 @@
-{
-  "command": "edit gates/mod.rs",
-  "exit_code": 0,
-  "source": "manual",
-  "summary": "Added SystemRoot, TEMP, TMP, OS, PROCESSOR_* to gate runner env allowlist. cargo_test gate now passes on Windows.",
-  "touched_files": [
-    "src/infrastructure/gates/mod.rs"
-  ]
-}

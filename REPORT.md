@@ -21,7 +21,7 @@ All tasks have evidence in `events.jsonl`. All completed tasks pass replay deter
 | df01-event-isvalid | Remove dead `#[allow(dead_code)]` on `Event::is_valid()`, wire into store validation | Completed + archived |
 | df02-assignment-fields | Add `contract`, `context_hashes`, `required_capabilities`, `acceptance` to assignment export | Completed + archived |
 | df03-remove-normalizer-deadcode | Remove `#[allow(dead_code)]` from `PathNormalizer` methods actually in use | Completed + archived |
-| df04-status-json | Add `--json` flag to `control task status`, human-readable default | Completed + archived |
+| df04-status-json | Add `--json` flag to `ctl task status`, human-readable default | Completed + archived |
 | df05-schema-evidence-types | Verify `evidence_accepted`/`evidence_rejected` schema + payload validation | Completed + archived |
 | df06-context-build | Verify `context build` produces file hashes in read_scope | Completed + archived |
 | df07-audit-output | Verify audit command outputs gate results and evidence summary | Completed + archived |
@@ -40,28 +40,28 @@ All tasks have evidence in `events.jsonl`. All completed tasks pass replay deter
 
 ### Finding 2: Schema missing M3 event types (BLOCKING)
 
-**Symptom**: `control run ingest` fails with "Value at root.type not in enum".
+**Symptom**: `ctl run ingest` fails with "Value at root.type not in enum".
 **Root cause**: `evidence_accepted` and `evidence_rejected` event types used by M3 code were not in the `control.event-envelope.v1.schema.json` enum.
 **Fix**: Added `evidence_accepted`, `evidence_rejected` to event type enum and added payload schemas.
 **Severity**: STOP — M3 ingest flow completely blocked.
 
 ### Finding 3: Path separator mismatch on Windows scope check (BLOCKING)
 
-**Symptom**: `control run ingest` rejects files that ARE in write_allow scope.
+**Symptom**: `ctl run ingest` rejects files that ARE in write_allow scope.
 **Root cause**: `PathNormalizer::normalize()` returns `\`-separated paths on Windows, but write_allow strings from CLI use `/`. Scope comparison fails.
 **Fix**: Normalize both paths to `/` before comparison in `ingest_manual_result()`.
 **Severity**: STOP — evidence ingest broken on Windows.
 
 ### Finding 4: Completion interlock counts ALL historical rejections (DESIGN BUG)
 
-**Symptom**: `control task finish` fails after a transient ingest error was rejected, even though later ingest succeeded.
+**Symptom**: `ctl task finish` fails after a transient ingest error was rejected, even though later ingest succeeded.
 **Root cause**: Completion interlock counts all `evidence_rejected` events, not just unresolved ones.
 **Fix**: Changed interlock to track rejected files, resolving them when subsequent `evidence_accepted` covers them.
 **Severity**: HIGH — any temporary validation error permanently blocks task completion.
 
 ### Finding 5: PathNormalizer marks schemas/ as protected for read scope (DESIGN GAP)
 
-**Symptom**: `control task create --read-scope schemas/` fails with "Path is protected".
+**Symptom**: `ctl task create --read-scope schemas/` fails with "Path is protected".
 **Root cause**: `is_protected()` applies to ALL scope paths, including read-only scope. Protected check should only apply to write scope.
 **Fix**: Not yet fixed — requires separating read vs write protection in PathNormalizer.
 **Severity**: MEDIUM — limits ability to track schema changes as tasks.
@@ -120,7 +120,7 @@ All tasks use manual adapter (git worktree not functional on Windows due to UNC 
 - JSON view now includes `active_run`, `leases_active` count, `pending_approvals` count
 - Human output shows run info, active lease count, approval status per request
 
-### 1.2 `control run abort` command
+### 1.2 `ctl run abort` command
 - New `RunCommands::Abort { id, reason }` CLI variant
 - Application method `run_abort()`: revokes lease, cleans worktree, emits `run_failed`
 - Enables recovery after OMP crash
@@ -189,8 +189,8 @@ Total: 124 tests pass (105 existing + 19 new).
 - ✅ `cargo build` clean
 - ✅ `architecture check` passes
 - ✅ 21 dogfood tasks completed through full lifecycle
-- ✅ `control doctor` shows all tasks healthy
-- ✅ `control task status` displays M4 fields (active_run, leases, approvals)
+- ✅ `ctl doctor` shows all tasks healthy
+- ✅ `ctl task status` displays M4 fields (active_run, leases, approvals)
 - ⚠️ Git worktree non-functional on Windows (UNC path issue) — manual adapter used as fallback
 
 ## Dogfood Observations

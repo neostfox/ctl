@@ -46,7 +46,7 @@ impl ExecutorAdapter for OmpAdapter {
             run_id: run_id.to_string(),
             task_id: task_id.to_string(),
             adapter: "omp".to_string(),
-            assignment_path: format!(".trellis/tasks/{}/assignment.json", task_id),
+            assignment_path: format!(".ctl/tasks/{}/assignment.json", task_id),
             worktree_path: worktree.to_string_lossy().to_string(),
             lease_id: lease_id.to_string(),
             write_allow: write_allow.to_vec(),

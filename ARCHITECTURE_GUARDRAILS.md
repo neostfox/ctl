@@ -120,6 +120,8 @@ main.rs = composition root
 | `MODULE-004` | STOP | OMP、Codex、Claude、OpenCode 的专有逻辑不能进入 `domain/` 或 `application/`。 |
 | `MODULE-005` | REVIEW | 新增顶层模块或拆分 crate 必须说明边界收益和迁移成本。 |
 
+> **强制现状（2026-06-13 收敛后）**：`MODULE-001` / `MODULE-002` 已由 `ctl architecture check` 的 `check_modules` **机器强制**——扫描 `src/domain/**` 模块顶层（列 0）行，禁止 `use crate::{infrastructure,cli,adapters,application}` 与 `use std::{fs,io,net,process,time}` 及 `SystemTime`/`Instant`。`#[cfg(test)]` 测试模块（缩进代码）按约定豁免。此前 `check_modules` 仅校验文件扩展名，规则形同虚设。
+
 ## 文件与路径围栏
 
 控制层必须先 canonicalize，再授权，再执行，执行后再次检查实际 diff。
@@ -141,8 +143,8 @@ UNC
 
 ```text
 .git/**
-.trellis/control/**
-.trellis/tasks/**/events.jsonl
+.ctl/control/**
+.ctl/tasks/**/events.jsonl
 schemas/**
 Cargo.toml
 Cargo.lock
@@ -387,10 +389,10 @@ SDD 风格的 `effort_delta`、`super_delta`、`unplanned_deps` 可以作为 tel
 ## M0 必须实现的机器检查
 
 ```text
-control schema validate
-control boundary check
-control boundary explain
-control architecture check
+ctl schema validate
+ctl boundary check
+ctl boundary explain
+ctl architecture check
 ```
 
 M0 必须冻结 baseline manifest。它至少记录：
@@ -403,7 +405,7 @@ required gate 集合
 测试用例数量或等价的稳定检查项
 ```
 
-`control architecture check` 至少要检查：
+`ctl architecture check` 至少要检查：
 
 - schema 未知字段。
 - 非法状态转换。
@@ -460,7 +462,7 @@ M3 前无网络、数据库、daemon、Web UI
 3. Windows 路径规范化的精确算法。
 4. JSONL append 的文件锁、checksum、`fsync` 与崩溃恢复策略。
 5. gate 命令模板格式与默认 allowlist。
-6. `.trellis/` 兼容路径是否作为长期 canonical layout。
+6. `.ctl/` 兼容路径是否作为长期 canonical layout。
 7. 架构例外记录进入 task event，还是独立 policy journal。
 8. proposal、scoped lease、audit report 与 baseline manifest 的精确 schema。
 9. completion interlock 的固定证据清单和解除 `audit_hold` 的事件协议。

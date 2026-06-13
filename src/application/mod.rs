@@ -708,7 +708,7 @@ impl ControlApp {
         let report = serde_json::json!({
             "schema": "control.audit-report.v1",
             "task_id": task_id,
-            "phase": format!("{:?}", state.phase).to_lowercase(),
+            "phase": state.phase.as_str(),
             "is_held": state.is_held,
             "is_archived": state.is_archived,
             "objective": state.objective,
@@ -750,7 +750,7 @@ impl ControlApp {
             let state = self.replay_task(task_id)?;
             reports.push(serde_json::json!({
                 "task_id": task_id,
-                "phase": format!("{:?}", state.phase).to_lowercase(),
+                "phase": state.phase.as_str(),
                 "is_held": state.is_held,
                 "is_archived": state.is_archived,
                 "objective": state.objective,
