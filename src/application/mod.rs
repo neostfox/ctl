@@ -604,6 +604,9 @@ impl ControlApp {
 
     pub fn doctor(&self) -> Result<Vec<String>> {
         let mut results = Vec::new();
+        let mut score: i32 = 100;
+        let mut task_count = 0u32;
+        let mut replay_errors = 0u32;
 
         // Check events.jsonl readable
         match self.store.read_all() {
@@ -612,6 +615,7 @@ impl ControlApp {
 
                 // Try to replay each task
                 let task_ids = self.store.task_ids()?;
+                task_count = task_ids.len() as u32;
                 for tid in &task_ids {
                     match self.replay_task(tid) {
                         Ok(state) => {
@@ -621,15 +625,29 @@ impl ControlApp {
                             ));
                         }
                         Err(e) => {
+                            replay_errors += 1;
+                            score -= 15;
                             results.push(format!("Task '{}': REPLAY ERROR: {}", tid, e));
                         }
                     }
                 }
             }
             Err(e) => {
+                score -= 30;
                 results.push(format!("events.jsonl: ERROR: {}", e));
             }
         }
+
+        // Health Score deductions
+        if score < 0 {
+            score = 0;
+        }
+        results.push(String::new());
+        results.push(format!("Health Score: {}/100", score));
+        results.push(format!(
+            "Tasks: {} total, {} replay errors",
+            task_count, replay_errors
+        ));
 
         Ok(results)
     }

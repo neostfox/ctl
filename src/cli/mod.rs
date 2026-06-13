@@ -504,6 +504,41 @@ fn cmd_init(dry_run: bool) -> Result<()> {
     ControlApp::init(&project_root)?;
     println!("Initialized local task ledger.");
 
+    // Write default config if not present
+    let config_path = project_root.join(".ctl").join("config.toml");
+    if !config_path.exists() {
+        let default_config = r#"# ctl Control Plane Configuration
+# Customize which decay risks are enabled and their severity.
+
+[risk]
+# Production code decay risks (R1-R6). Set false to disable.
+R1_cognitive_overload = true
+R2_change_propagation = true
+R3_knowledge_duplication = true
+R4_accidental_complexity = true
+R5_dependency_disorder = true
+R6_domain_distortion = true
+
+# Test decay risks (T1-T6). Set false to disable.
+T1_test_obscurity = true
+T2_test_brittleness = true
+T3_test_duplication = true
+T4_mock_abuse = true
+T5_coverage_illusion = true
+T6_architecture_mismatch = true
+
+[severity]
+# Override severity: "critical", "warning", "suggestion"
+# R1 = "warning"
+
+[scope]
+# Glob patterns to exclude from analysis
+# ignore = ["**/*.generated.*", "**/vendor/**"]
+"#;
+        std::fs::write(&config_path, default_config)?;
+        println!("Created default .ctl/config.toml");
+    }
+
     // Inject control-plane skills, hooks, and OMP settings
     let file_count = crate::infrastructure::skills::inject_all(&project_root)?;
     if file_count > 0 {
