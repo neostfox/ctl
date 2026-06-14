@@ -695,7 +695,11 @@ impl ControlApp {
         }
 
         let result = crate::infrastructure::gates::run_gate(gate_id, &self.project_root)?;
-        let evidence = if result.passed {
+        let evidence = if result.timed_out {
+            // Reaching here means run_gate confirmed the process tree was reaped
+            // (containment failure would have returned Err and recorded nothing).
+            "exit=timeout termination=process_tree termination_result=confirmed".to_string()
+        } else if result.passed {
             format!("exit={} stdout={}B", result.exit_code, result.stdout.len())
         } else {
             // Include stderr for failed gates (truncated for evidence field)

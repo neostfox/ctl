@@ -1,11 +1,14 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc;
 use std::time::Duration;
 
 /// Default gate execution timeout (EXEC-002).
 const GATE_TIMEOUT_SECS: u64 = 60;
+
+/// Grace period between SIGTERM and SIGKILL when terminating a timed-out process
+/// tree (Unix). Windows uses `taskkill /F` (immediate force).
+const GRACE_MS: u64 = 1000;
 
 /// Maximum captured output per stream (EXEC-002).
 const OUTPUT_CAP: usize = 64 * 1024;
@@ -56,6 +59,12 @@ pub struct GateRunResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// True when the gate exceeded the timeout and its process tree was
+    /// terminated (and confirmed reaped) before this result was produced. A
+    /// timed-out gate is never `passed`. If the process tree could NOT be
+    /// confirmed terminated, `run_gate` returns an `Err` instead (execution
+    /// containment failure) — it is never reported as an ordinary failed gate.
+    pub timed_out: bool,
 }
 
 /// Find a gate template by ID.
@@ -69,49 +78,211 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
 /// - Environment: full inherit with proxy/auth denylist (EXEC-003: no network deps)
 /// - Output cap: 64KB per stream, truncated if exceeded
 /// - Explicit working directory
+/// - On timeout, the ENTIRE spawned process tree is terminated and reaped before
+///   this returns; if the tree cannot be confirmed dead, returns `Err`
+///   (execution containment failure) rather than an ordinary failed gate.
 pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
     let template =
         find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
-
-    let allowed_env = build_allowed_env();
-    let gate_id_owned = gate_id.to_string();
-    let command = template.command.to_string();
     let args: Vec<String> = template.args.iter().map(|s| s.to_string()).collect();
-    let working_dir_owned = working_dir.to_path_buf();
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = std::process::Command::new(&command)
-            .args(&args)
-            .current_dir(&working_dir_owned)
-            .env_clear()
-            .envs(&allowed_env)
-            .output();
-        let _ = tx.send(result);
-    });
-
-    let output = match rx.recv_timeout(Duration::from_secs(GATE_TIMEOUT_SECS)) {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(anyhow!("Failed to execute gate '{}': {}", gate_id_owned, e)),
-        Err(_) => {
-            return Err(anyhow!(
-                "Gate '{}' timed out after {}s",
-                gate_id_owned,
-                GATE_TIMEOUT_SECS
-            ))
-        }
-    };
-
-    let stdout = cap_output(&output.stdout);
-    let stderr = cap_output(&output.stderr);
+    let sup = supervise(
+        template.command,
+        &args,
+        working_dir,
+        Duration::from_secs(GATE_TIMEOUT_SECS),
+    )
+    .map_err(|e| anyhow!("Gate '{}': {}", gate_id, e))?;
 
     Ok(GateRunResult {
-        gate_id: gate_id_owned,
-        passed: output.status.success(),
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout,
-        stderr,
+        gate_id: gate_id.to_string(),
+        passed: sup.success,
+        exit_code: sup.exit_code,
+        stdout: cap_output(&sup.stdout),
+        stderr: cap_output(&sup.stderr),
+        timed_out: sup.timed_out,
     })
+}
+
+/// Outcome of supervising one child process to completion or timeout.
+struct Supervised {
+    success: bool,
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
+/// Spawn `command` (Unix: in its own process group) and supervise it to
+/// completion or `timeout`. On timeout the ENTIRE process tree is terminated and
+/// reaped before returning. Returns `Err` ONLY when termination cannot be
+/// confirmed (execution containment failure) — a normal timeout with confirmed
+/// termination returns `Ok` with `timed_out = true` and `success = false`.
+fn supervise(
+    command: &str,
+    args: &[String],
+    working_dir: &Path,
+    timeout: Duration,
+) -> Result<Supervised> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let allowed_env = build_allowed_env();
+    let mut cmd = Command::new(command);
+    cmd.args(args)
+        .current_dir(working_dir)
+        .env_clear()
+        .envs(&allowed_env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Unix: give the child its own process group so the whole tree can be
+    // signalled at once via `kill -- -<pgid>`. Descendants inherit the group.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("failed to execute: {}", e))?;
+    let pid = child.id();
+
+    // Drain stdout/stderr on threads so a chatty gate cannot deadlock on a full
+    // pipe while we poll for completion.
+    let mut out_pipe = child.stdout.take().expect("stdout piped");
+    let mut err_pipe = child.stderr.take().expect("stderr piped");
+    let out_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b);
+        b
+    });
+
+    let deadline = Instant::now() + timeout;
+    let poll = Duration::from_millis(50);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = out_h.join().unwrap_or_default();
+                let stderr = err_h.join().unwrap_or_default();
+                return Ok(Supervised {
+                    success: status.success(),
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout,
+                    stderr,
+                    timed_out: false,
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let confirmed = terminate_process_tree(pid);
+                    let _ = child.wait(); // reap the direct child
+                    if !confirmed {
+                        // Surviving descendants may hold the pipes open and block
+                        // read_to_end forever — do NOT join the drain threads on
+                        // this error path; leaking them is acceptable here.
+                        return Err(anyhow!(
+                            "execution containment failure: gate timed out after {}s, but \
+                             process-tree termination could not be confirmed",
+                            timeout.as_secs()
+                        ));
+                    }
+                    // Tree is dead → pipes closed → joins return promptly.
+                    let stdout = out_h.join().unwrap_or_default();
+                    let stderr = err_h.join().unwrap_or_default();
+                    return Ok(Supervised {
+                        success: false,
+                        exit_code: -1,
+                        stdout,
+                        stderr,
+                        timed_out: true,
+                    });
+                }
+                std::thread::sleep(poll);
+            }
+            Err(e) => return Err(anyhow!("failed while waiting on child: {}", e)),
+        }
+    }
+}
+
+/// Terminate the process tree rooted at `pid` and confirm it is gone. Returns
+/// `true` when no managed process from the tree remains running.
+#[cfg(windows)]
+fn terminate_process_tree(pid: u32) -> bool {
+    use std::process::{Command, Stdio};
+    // `taskkill /T` force-terminates the process AND its descendants. Its exit
+    // code is unreliable when descendants are a moving target (a build tool
+    // spawning/exiting children), so we do not trust it — we confirm by polling
+    // the ROOT (the process ctl manages) until it is gone. taskkill /T has made
+    // a best-effort sweep of descendants (which is what kills build grandchildren
+    // like rustc/build.rs); confirming the root is the reliable managed signal.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    for _ in 0..20 {
+        if !root_alive_windows(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+/// Whether a process with `pid` is still listed (Windows). Query failure is
+/// treated as "not alive" (best effort).
+#[cfg(windows)]
+fn root_alive_windows(pid: u32) -> bool {
+    match std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&format!("\"{}\"", pid)),
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(pid: u32) -> bool {
+    use std::process::{Command, Stdio};
+    // The child leads its own process group (pgid == pid). Signal the whole group
+    // via the negative pid: SIGTERM, grace, then SIGKILL. `kill -0 -<pgid>`
+    // probes whether any group member remains.
+    let group = format!("-{}", pid);
+    let probe = |grp: &str| {
+        Command::new("kill")
+            .args(["-0", grp])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+
+    let _ = Command::new("kill")
+        .args(["-TERM", &group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(GRACE_MS));
+    if !probe(&group) {
+        return true; // exited on TERM
+    }
+    let _ = Command::new("kill")
+        .args(["-KILL", &group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(100));
+    !probe(&group)
 }
 
 /// Build the execution environment with a denylist approach (EXEC-002, EXEC-003).
@@ -282,5 +453,157 @@ mod tests {
             env.contains_key("CARGO_HOME"),
             "CARGO_HOME must NOT be caught by the CARGO_REGISTRY_HTTP_ prefix"
         );
+    }
+
+    // ── process-tree termination ──
+
+    use std::time::Instant;
+
+    /// A command that runs ~`secs` seconds as a DIRECT child.
+    #[cfg(windows)]
+    fn sleeper(secs: u32) -> (&'static str, Vec<String>) {
+        // `ping -n N` sends N pings ~1s apart ≈ (N-1) seconds.
+        (
+            "ping",
+            vec!["-n".into(), (secs + 1).to_string(), "127.0.0.1".into()],
+        )
+    }
+    #[cfg(unix)]
+    fn sleeper(secs: u32) -> (&'static str, Vec<String>) {
+        ("sleep", vec![secs.to_string()])
+    }
+
+    /// A command that runs the real sleeper as a GRANDCHILD (under a shell).
+    #[cfg(windows)]
+    fn nested_sleeper(secs: u32) -> (&'static str, Vec<String>) {
+        (
+            "cmd",
+            vec!["/c".into(), format!("ping -n {} 127.0.0.1 >nul", secs + 1)],
+        )
+    }
+    #[cfg(unix)]
+    fn nested_sleeper(secs: u32) -> (&'static str, Vec<String>) {
+        ("sh", vec!["-c".into(), format!("sleep {}", secs)])
+    }
+
+    fn quick(code: i32) -> (&'static str, Vec<String>) {
+        #[cfg(windows)]
+        {
+            ("cmd", vec!["/c".into(), format!("exit {}", code)])
+        }
+        #[cfg(unix)]
+        {
+            ("sh", vec!["-c".into(), format!("exit {}", code)])
+        }
+    }
+
+    #[test]
+    fn supervise_quick_success_is_not_timeout() {
+        let (c, a) = quick(0);
+        let dir = std::env::current_dir().unwrap();
+        let s = supervise(c, &a, &dir, Duration::from_secs(10)).unwrap();
+        assert!(s.success && !s.timed_out, "exit={}", s.exit_code);
+    }
+
+    #[test]
+    fn supervise_quick_failure_reaped_not_timeout() {
+        let (c, a) = quick(3);
+        let dir = std::env::current_dir().unwrap();
+        let s = supervise(c, &a, &dir, Duration::from_secs(10)).unwrap();
+        assert!(!s.success && !s.timed_out);
+        assert_eq!(s.exit_code, 3);
+    }
+
+    #[test]
+    fn supervise_timeout_kills_direct_child_promptly() {
+        let (c, a) = sleeper(30);
+        let dir = std::env::current_dir().unwrap();
+        let start = Instant::now();
+        let s = supervise(c, &a, &dir, Duration::from_secs(1)).unwrap();
+        assert!(s.timed_out && !s.success);
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "did not return promptly: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn supervise_timeout_kills_grandchild_promptly() {
+        let (c, a) = nested_sleeper(30);
+        let dir = std::env::current_dir().unwrap();
+        let start = Instant::now();
+        let s = supervise(c, &a, &dir, Duration::from_secs(1)).unwrap();
+        assert!(s.timed_out);
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "did not return promptly: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn supervise_timeout_stops_side_effects() {
+        let dir = std::env::temp_dir();
+        let marker = dir.join(format!("ctl-ptt-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mp = marker.to_string_lossy().to_string();
+
+        #[cfg(windows)]
+        let (c, a) = (
+            "cmd",
+            vec![
+                "/c".to_string(),
+                format!(
+                    "for /L %i in (1,1,100000) do (echo x>>\"{}\" & ping -n 1 -w 30 127.0.0.1 >nul)",
+                    mp
+                ),
+            ],
+        );
+        #[cfg(unix)]
+        let (c, a) = (
+            "sh",
+            vec![
+                "-c".to_string(),
+                format!("while true; do echo x >> '{}'; sleep 0.03; done", mp),
+            ],
+        );
+
+        let s = supervise(c, &a, &dir, Duration::from_secs(1)).unwrap();
+        assert!(s.timed_out);
+        // After return, the tree is dead → the file must stop growing.
+        let size1 = std::fs::metadata(&marker).map(|m| m.len()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(600));
+        let size2 = std::fs::metadata(&marker).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&marker);
+        assert_eq!(
+            size1, size2,
+            "side effects continued after termination ({size1} → {size2})"
+        );
+    }
+
+    #[test]
+    fn supervise_repeated_timeouts_no_hang() {
+        let dir = std::env::current_dir().unwrap();
+        for _ in 0..3 {
+            let (c, a) = sleeper(30);
+            let s = supervise(c, &a, &dir, Duration::from_secs(1)).unwrap();
+            assert!(s.timed_out);
+        }
+    }
+
+    /// A process that ignores SIGTERM must still be SIGKILLed (Unix only).
+    #[cfg(unix)]
+    #[test]
+    fn supervise_kills_term_ignoring_process() {
+        let dir = std::env::current_dir().unwrap();
+        let (c, a) = (
+            "sh",
+            vec!["-c".to_string(), "trap '' TERM; sleep 30".to_string()],
+        );
+        let start = Instant::now();
+        let s = supervise(c, &a, &dir, Duration::from_secs(1)).unwrap();
+        assert!(s.timed_out);
+        assert!(start.elapsed() < Duration::from_secs(15));
     }
 }
