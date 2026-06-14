@@ -226,9 +226,9 @@ pub fn validate_plan(
                 }
             };
 
-            if state.phase != "Ready" && state.phase != "InProgress" {
+            if state.phase != "ready" && state.phase != "in_progress" {
                 errors.push(format!(
-                    "task {} phase is {} (expected Ready or InProgress)",
+                    "task {} phase is {} (expected ready or in_progress)",
                     task_id, state.phase
                 ));
             }
@@ -335,6 +335,47 @@ mod tests {
         for g in &plan.groups {
             assert!(g.task_ids.len() <= 2);
         }
+    }
+
+    fn tcs(id: &str, phase: &str, held: bool, paths: &[&str]) -> TaskCurrentState {
+        TaskCurrentState {
+            task_id: id.to_string(),
+            phase: phase.to_string(),
+            is_held: held,
+            write_allow: wa(paths),
+        }
+    }
+
+    #[test]
+    fn validate_plan_accepts_active_phases_rejects_others_and_held() {
+        let tasks: Vec<(String, BTreeSet<String>)> = vec![
+            ("t1".into(), wa(&["src/a/"])),
+            ("t2".into(), wa(&["src/b/"])),
+        ];
+        let plan = plan_schedule(&tasks, 10);
+
+        // in_progress + ready → valid (canonical as_str phase forms).
+        let ok = vec![
+            tcs("t1", "in_progress", false, &["src/a/"]),
+            tcs("t2", "ready", false, &["src/b/"]),
+        ];
+        assert!(validate_plan(&plan, &ok).is_ok());
+
+        // planning phase → invalid.
+        let bad_phase = vec![
+            tcs("t1", "planning", false, &["src/a/"]),
+            tcs("t2", "ready", false, &["src/b/"]),
+        ];
+        let errs = validate_plan(&plan, &bad_phase).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("planning")));
+
+        // held task → invalid.
+        let held = vec![
+            tcs("t1", "in_progress", true, &["src/a/"]),
+            tcs("t2", "ready", false, &["src/b/"]),
+        ];
+        let errs = validate_plan(&plan, &held).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("held")));
     }
 
     #[test]

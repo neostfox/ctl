@@ -82,6 +82,14 @@ enum Commands {
     },
     /// Show summary report of all tasks (M3)
     Report,
+    /// Cross-task control board: phase / hold / active / gate / review per task,
+    /// plus aggregate totals. Reads the same projection `reconcile` writes to
+    /// `.ctl/control.json` (M-b).
+    Board {
+        /// Output as JSON (default is a human-readable table)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Run commands (M3 manual + M4 OMP)
     Run {
         #[command(subcommand)]
@@ -517,6 +525,7 @@ pub fn run() -> Result<()> {
         Commands::Assignment { command } => cmd_assignment(command, dry_run),
         Commands::Audit { id } => cmd_audit(id),
         Commands::Report => cmd_report(),
+        Commands::Board { json } => cmd_board(*json),
         Commands::Run { command } => cmd_run(command, dry_run),
         Commands::Workspace { command } => cmd_workspace(command, dry_run),
         Commands::Approval { command } => cmd_approval(command, dry_run),
@@ -821,6 +830,73 @@ fn cmd_report() -> Result<()> {
             println!("{}: {} [{}]{}", task_id, objective, phase, status);
         }
     }
+    Ok(())
+}
+
+fn cmd_board(json: bool) -> Result<()> {
+    let app = app_open(false)?;
+    let board = app.generate_board()?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&board)?);
+        return Ok(());
+    }
+
+    let empty = Vec::new();
+    let tasks = board
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
+    if tasks.is_empty() {
+        println!("No tasks found.");
+        return Ok(());
+    }
+
+    // Size the TASK column to the widest id (min 4 for the "TASK" header).
+    let id_w = tasks
+        .iter()
+        .filter_map(|t| t.get("task_id").and_then(|v| v.as_str()).map(str::len))
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    let s = |t: &Value, k: &str| t.get(k).and_then(|v| v.as_str()).unwrap_or("?").to_string();
+    let b = |t: &Value, k: &str| t.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let n = |t: &Value, k: &str| t.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    println!(
+        "{:<id_w$}  {:<12}  {:^3} {:^3}  {:<7}  REVIEW",
+        "TASK", "PHASE", "H", "A", "GATES"
+    );
+    for t in tasks {
+        let gates = format!("{}/{}", n(t, "gates_passing"), n(t, "gates_total"));
+        println!(
+            "{:<id_w$}  {:<12}  {:^3} {:^3}  {:<7}  {}",
+            s(t, "task_id"),
+            s(t, "phase"),
+            if b(t, "held") { "*" } else { "-" },
+            if b(t, "active") { "*" } else { "-" },
+            gates,
+            s(t, "review"),
+        );
+    }
+
+    let g = |k: &str| {
+        board
+            .get("totals")
+            .and_then(|v| v.get(k))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
+    println!(
+        "\n{} tasks · {} active · {} held · {} needs-work · {} completed · {} archived",
+        g("tasks"),
+        g("active"),
+        g("held"),
+        g("needs_work"),
+        g("completed"),
+        g("archived"),
+    );
     Ok(())
 }
 
@@ -1541,6 +1617,7 @@ fn check_milestone_scope() -> Result<()> {
             "architecture",
             "assignment",
             "audit",
+            "board",
             "boundary",
             "context",
             "doctor",
@@ -2007,16 +2084,112 @@ fn cmd_schedule_plan(max_concurrent: usize, tasks: &[String], dry_run: bool) -> 
     Ok(())
 }
 
-fn cmd_schedule_validate(_plan: &str) -> Result<()> {
-    // TODO: Full validation requires reading plan file and re-checking task states
-    eprintln!("Schedule validation not yet implemented (requires plan persistence)");
-    Ok(())
+/// Read a persisted plan and snapshot the current state of every task it names.
+/// Shared by `schedule validate` and `schedule run` (M-c).
+fn load_plan_and_states(
+    app: &ControlApp,
+    plan_id: &str,
+) -> Result<(
+    crate::application::schedule::SchedulePlan,
+    Vec<crate::application::schedule::TaskCurrentState>,
+)> {
+    let plan_path = app
+        .project_root
+        .join(".ctl")
+        .join("plans")
+        .join(format!("{}.json", plan_id));
+    if !plan_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Plan '{}' not found at {} — run `ctl schedule plan` first",
+            plan_id,
+            plan_path.display()
+        ));
+    }
+    let plan: crate::application::schedule::SchedulePlan =
+        serde_json::from_str(&fs::read_to_string(&plan_path)?)?;
+
+    let mut states = Vec::new();
+    for group in &plan.groups {
+        for task_id in &group.task_ids {
+            let state = app.replay_task(task_id)?;
+            states.push(crate::application::schedule::TaskCurrentState {
+                task_id: task_id.clone(),
+                phase: state.phase.as_str().to_string(),
+                is_held: state.is_held,
+                write_allow: state.write_allow.iter().cloned().collect(),
+            });
+        }
+    }
+    Ok((plan, states))
 }
 
-fn cmd_schedule_run(_plan: &str, _poll_interval: u64, _timeout: u64, _dry_run: bool) -> Result<()> {
-    // TODO: Full execution engine requires file locking and process management
-    eprintln!(
-        "Schedule execution not yet implemented (requires file locking + process supervision)"
+fn cmd_schedule_validate(plan_id: &str) -> Result<()> {
+    let app = app_open(false)?;
+    let (plan, states) = load_plan_and_states(&app, plan_id)?;
+
+    match crate::application::schedule::validate_plan(&plan, &states) {
+        Ok(()) => {
+            println!(
+                "Schedule plan '{}' is valid: {} group(s), {} task(s), max_concurrent={}.",
+                plan_id,
+                plan.groups.len(),
+                states.len(),
+                plan.max_concurrent
+            );
+            Ok(())
+        }
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("INVALID: {}", e);
+            }
+            Err(anyhow::anyhow!(
+                "Schedule plan '{}' failed validation with {} issue(s)",
+                plan_id,
+                errors.len()
+            ))
+        }
+    }
+}
+
+fn cmd_schedule_run(
+    plan_id: &str,
+    _poll_interval: u64,
+    _timeout: u64,
+    _dry_run: bool,
+) -> Result<()> {
+    // M-c completes this stub up to the safety boundary: a plan is re-validated
+    // against live task state before anything runs, and an invalid plan is
+    // refused. Live concurrent supervision (worktree-per-agent, capability
+    // leases, file locking, crash recovery) is deferred to M6 by design — this
+    // command never spawns executors. It resolves and prints the safe execution
+    // order so groups can be run manually in the meantime.
+    let app = app_open(false)?;
+    let (plan, states) = load_plan_and_states(&app, plan_id)?;
+
+    if let Err(errors) = crate::application::schedule::validate_plan(&plan, &states) {
+        for e in &errors {
+            eprintln!("INVALID: {}", e);
+        }
+        return Err(anyhow::anyhow!(
+            "Refusing to run: plan '{}' failed validation with {} issue(s)",
+            plan_id,
+            errors.len()
+        ));
+    }
+
+    println!(
+        "Plan '{}' validated: {} group(s), max_concurrent={}. Execution order:",
+        plan_id,
+        plan.groups.len(),
+        plan.max_concurrent
+    );
+    for (i, group) in plan.groups.iter().enumerate() {
+        println!("  group {} (parallel-safe): {:?}", i, group.task_ids);
+    }
+    println!(
+        "\nLive concurrent execution is deferred to M6 (worktree-per-agent, capability leases, \
+         file locking, crash recovery). Run the groups above sequentially for now; tasks within a \
+         group have non-overlapping write scopes."
     );
     Ok(())
 }
@@ -2300,13 +2473,22 @@ enum GovState {
         /// read by the step-up gate. Derived from `pending_approvals`.
         approved_actions: Vec<String>,
     },
-    /// A task is in review
-    Review,
+    /// A task is in review. The commit window opens here (M-g): `git commit`
+    /// and `git push` are allowed in Review as well as Completed.
+    Review {
+        task_id: String,
+        write_allow: Vec<String>,
+    },
     /// A task is completed but not yet archived (commit window)
     Completed {
         task_id: String,
         write_allow: Vec<String>,
     },
+    /// More than one in_progress task declares a write scope (M-a). The gateway
+    /// cannot bind a single `write_allow`, so it fails closed rather than
+    /// silently governing only the first task. Resolve down to one active
+    /// write task (submit/hold the others) to restore write governance.
+    MultipleActive { task_ids: Vec<String> },
 }
 
 fn compute_gov_state(project_root: &Path) -> Result<GovState> {
@@ -2318,48 +2500,88 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
     let app = ControlApp::open(project_root, false)?;
     let reports = app.generate_status_report()?;
 
-    // Priority: Held > InProgress > Completed > Review > Idle
+    // ── Active in_progress tasks (M-a) ──────────────────────────────────
+    // Collect EVERY non-archived in_progress task, not just the first one.
+    // Pre-M-a this loop early-returned on the first in_progress task, so when
+    // several were active simultaneously (e.g. concurrent sub-agent reviews)
+    // the rest were silently ungoverned at the gateway. Now: if more than one
+    // active task declares a write scope, the gateway cannot bind a single
+    // write_allow and fails closed (MultipleActive); otherwise it binds to the
+    // one governing task as before.
+    struct ActiveTask {
+        task_id: String,
+        write_allow: Vec<String>,
+        is_held: bool,
+        approved_actions: Vec<String>,
+    }
+    let mut active: Vec<ActiveTask> = Vec::new();
     for report in &reports {
         let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-        let is_held = report
-            .get("is_held")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let is_archived = report
             .get("is_archived")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        if is_archived || phase != "in_progress" {
+            continue;
+        }
         let task_id = report
             .get("task_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let is_held = report
+            .get("is_held")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let state = app.replay_task(&task_id)?;
+        // Collect actions authorized by granted approvals on this task.
+        let approved_actions: Vec<String> = state
+            .pending_approvals
+            .values()
+            .filter(|a| a.is_granted())
+            .filter_map(|a| {
+                a.scope
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        active.push(ActiveTask {
+            task_id,
+            write_allow: state.write_allow.iter().cloned().collect(),
+            is_held,
+            approved_actions,
+        });
+    }
 
-        if is_archived {
-            continue;
-        }
-
-        if phase == "in_progress" {
-            let state = app.replay_task(&task_id)?;
-            // Collect actions authorized by granted approvals on this task.
-            let approved_actions: Vec<String> = state
-                .pending_approvals
-                .values()
-                .filter(|a| a.is_granted())
-                .filter_map(|a| {
-                    a.scope
-                        .get("action")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect();
-            return Ok(GovState::InProgress {
-                task_id,
-                write_allow: state.write_allow.iter().cloned().collect(),
-                is_held,
-                approved_actions,
+    if !active.is_empty() {
+        // Tasks with a non-empty write scope compete for write governance.
+        // Read-only in_progress tasks (empty write_allow) never write, so they
+        // do not create write ambiguity. Two or more write tasks → fail closed.
+        let write_task_ids: Vec<String> = active
+            .iter()
+            .filter(|t| !t.write_allow.is_empty())
+            .map(|t| t.task_id.clone())
+            .collect();
+        if write_task_ids.len() >= 2 {
+            return Ok(GovState::MultipleActive {
+                task_ids: write_task_ids,
             });
         }
+        // Bind to a single task. Prefer a held one (held fails closed across
+        // every tool), then the sole write task, then the first active task
+        // (all read-only). Priority: Held > the write task > read-only.
+        let chosen = active
+            .iter()
+            .find(|t| t.is_held)
+            .or_else(|| active.iter().find(|t| !t.write_allow.is_empty()))
+            .unwrap_or(&active[0]);
+        return Ok(GovState::InProgress {
+            task_id: chosen.task_id.clone(),
+            write_allow: chosen.write_allow.clone(),
+            is_held: chosen.is_held,
+            approved_actions: chosen.approved_actions.clone(),
+        });
     }
 
     // Check for completed (not archived) — commit window
@@ -2392,7 +2614,16 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !is_archived && phase == "review" {
-            return Ok(GovState::Review);
+            let task_id = report
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let state = app.replay_task(&task_id)?;
+            return Ok(GovState::Review {
+                task_id,
+                write_allow: state.write_allow.iter().cloned().collect(),
+            });
         }
     }
 
@@ -2476,6 +2707,46 @@ fn path_in_scope(project_root: &Path, path: &str, scopes: &[String]) -> bool {
         .any(|s| resolved.starts_with(project_root.join(s)))
 }
 
+/// M-c: the first OTHER active task (non-archived, phase `in_progress` or
+/// `review`) whose `write_allow` contains `path`. A write landing inside another
+/// active task's claimed scope is hard-denied even when it sits within the
+/// governing task's own scope — two active tasks must never write the same
+/// region. This is the single-path specialization of
+/// `schedule::detect_write_scope_overlap`; `ctl schedule validate` applies the
+/// set-vs-set form across a whole plan. "Active" matches the `ctl board`
+/// definition (in_progress | review), keeping one notion of active across
+/// M-a / M-b / M-c.
+fn first_overlapping_active_task(
+    project_root: &Path,
+    path: &str,
+    governing_task_id: &str,
+) -> Result<Option<String>> {
+    let app = ControlApp::open(project_root, false)?;
+    let reports = app.generate_status_report()?;
+    for report in &reports {
+        let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        let is_archived = report
+            .get("is_archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let task_id = report
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if is_archived || task_id == governing_task_id || !matches!(phase, "in_progress" | "review")
+        {
+            continue;
+        }
+        let state = app.replay_task(&task_id)?;
+        let scopes: Vec<String> = state.write_allow.iter().cloned().collect();
+        if path_in_scope(project_root, path, &scopes) {
+            return Ok(Some(task_id));
+        }
+    }
+    Ok(None)
+}
+
 /// Check if a path targets the spec directory (always writable for updates).
 fn is_spec_path(project_root: &Path, path: &str) -> bool {
     let resolved = if Path::new(path).is_relative() {
@@ -2491,8 +2762,9 @@ fn gov_state_str(state: &GovState) -> &'static str {
         GovState::Ungoverned => "ungoverned",
         GovState::Idle => "idle",
         GovState::InProgress { .. } => "in_progress",
-        GovState::Review => "review",
+        GovState::Review { .. } => "review",
         GovState::Completed { .. } => "completed",
+        GovState::MultipleActive { .. } => "multiple_active",
     }
 }
 
@@ -2564,12 +2836,41 @@ fn cmd_hook_gate(
                     ..
                 } => {
                     let in_scope = path_in_scope(&project_root, target, write_allow);
+                    // M-c: even within our own write_allow, a write must not land
+                    // inside another *active* task's claimed scope. Checked only
+                    // when in_scope (an out-of-scope write is already denied).
+                    let conflict = if in_scope {
+                        first_overlapping_active_task(&project_root, target, task_id)?
+                    } else {
+                        None
+                    };
+                    let output = if let Some(other) = conflict {
+                        serde_json::json!({
+                            "allowed": false,
+                            "state": "in_progress",
+                            "task_id": task_id,
+                            "conflicting_task": other,
+                            "reason": format!("path is inside active task '{}' write_allow — cross-task write overlap", other),
+                            "remedy": "narrow the write scopes so they don't overlap, or submit/cancel the other task first"
+                        })
+                    } else {
+                        serde_json::json!({
+                            "allowed": in_scope,
+                            "state": "in_progress",
+                            "task_id": task_id,
+                            "reason": if in_scope { "within write_allow" } else { "outside write_allow" },
+                            "remedy": if in_scope { "" } else { "widen scope via ctl task revise" }
+                        })
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                GovState::MultipleActive { task_ids } => {
                     let output = serde_json::json!({
-                        "allowed": in_scope,
-                        "state": "in_progress",
-                        "task_id": task_id,
-                        "reason": if in_scope { "within write_allow" } else { "outside write_allow" },
-                        "remedy": if in_scope { "" } else { "widen scope via ctl task revise" }
+                        "allowed": false,
+                        "state": "multiple_active",
+                        "task_ids": task_ids,
+                        "reason": "multiple in_progress tasks declare write scopes — gateway cannot bind a single write_allow",
+                        "remedy": "leave exactly one task in_progress: submit or hold the others (ctl task submit --id <id>)"
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
@@ -2590,15 +2891,22 @@ fn cmd_hook_gate(
 
             match action {
                 "git_commit" => match &state {
-                    GovState::Completed {
+                    // M-g: the commit window opens at Review and stays open
+                    // through Completed. Committing in Review is what lets the
+                    // finish interlock require a clean tree without deadlock.
+                    GovState::Review {
+                        task_id,
+                        write_allow,
+                    }
+                    | GovState::Completed {
                         task_id,
                         write_allow,
                     } => {
                         let output = serde_json::json!({
                             "allowed": true,
-                            "state": "completed",
+                            "state": gov_state_str(&state),
                             "task_id": task_id,
-                            "reason": "commit window open for completed task",
+                            "reason": "commit window open (review or completed)",
                             "scope": write_allow
                         });
                         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -2607,27 +2915,27 @@ fn cmd_hook_gate(
                         let output = serde_json::json!({
                             "allowed": false,
                             "state": gov_state_str(&state),
-                            "reason": "git commit only allowed when task is completed",
-                            "remedy": "ctl task submit --id <id> && ctl task finish --id <id>"
+                            "reason": "git commit only allowed in a task's commit window (Review or Completed)",
+                            "remedy": "ctl task submit --id <id> to open the commit window, then commit before ctl task finish"
                         });
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     }
                 },
                 "git_push" => {
-                    // Push rides the completed commit-window: a task that just
-                    // passed its gates and completed may push its commit before
-                    // archiving. No separate approval primitive needed.
-                    let allowed = matches!(&state, GovState::Completed { .. });
+                    // M-g: push rides the same commit window as commit — open
+                    // from Review through Completed.
+                    let allowed =
+                        matches!(&state, GovState::Review { .. } | GovState::Completed { .. });
                     let output = serde_json::json!({
                         "allowed": allowed,
                         "state": gov_state_str(&state),
                         "reason": if allowed {
-                            "push window open for completed task"
+                            "push window open (review or completed)"
                         } else {
-                            "git push only allowed in a completed task's commit window"
+                            "git push only allowed in a task's commit window (Review or Completed)"
                         },
                         "remedy": if allowed { "" } else {
-                            "finish a task (ctl task submit --id <id> && ctl task finish --id <id>), then commit and push before archiving"
+                            "ctl task submit --id <id> to open the commit window, then commit and push"
                         }
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -2655,13 +2963,16 @@ fn cmd_hook_gate(
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 "cargo_build" => {
-                    // cargo check/test/build/fmt allowed in InProgress, Review, Completed
+                    // cargo check/test/build/fmt are non-mutating verification —
+                    // allowed in every governed state, including MultipleActive
+                    // (so the agent can still build/test while disambiguating).
                     let allow = matches!(
                         &state,
                         GovState::InProgress { .. }
-                            | GovState::Review
+                            | GovState::Review { .. }
                             | GovState::Completed { .. }
                             | GovState::Idle
+                            | GovState::MultipleActive { .. }
                     );
                     let output = serde_json::json!({
                         "allowed": allow,

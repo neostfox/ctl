@@ -277,6 +277,28 @@ impl ControlApp {
             ));
         }
 
+        // Commit interlock (M-g): a task cannot complete with uncommitted work
+        // in its write scope. The commit window opens at Review, so by the time
+        // finish runs the agent must already have committed. Scoped to the
+        // task's write_allow and git-tracked paths (`.ctl/` is gitignored and
+        // thus excluded). Skipped for read-only tasks (empty write_allow) and
+        // outside a git repository, where there is nothing to commit / no way
+        // to verify.
+        let scope: Vec<String> = state.write_allow.iter().cloned().collect();
+        if !scope.is_empty() {
+            if let Some(dirty) =
+                crate::infrastructure::workspace::dirty_paths_in_scope(&self.project_root, &scope)?
+            {
+                if !dirty.is_empty() {
+                    return Err(anyhow!(
+                        "Completion interlock: uncommitted changes in write scope: {:?}. \
+                         Commit (and optionally push) within Review before finishing.",
+                        dirty
+                    ));
+                }
+            }
+        }
+
         let event = self.build_event(task_id, "task_completed", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -541,7 +563,138 @@ impl ControlApp {
             self.store.write_task_view(task_id, &state)?;
             rebuilt.push(task_id.clone());
         }
+        // M-b: reconcile also projects the cross-task control view.
+        self.project_control()?;
         Ok(rebuilt)
+    }
+
+    /// Per-task review verdict derived from the soft-layer verdict→evidence
+    /// events (M-b). `evidence_rejected` = reviewer found problems for a file;
+    /// a later `evidence_accepted` covering that file resolves it. Mirrors the
+    /// finish interlock, so the board reflects what actually blocks completion.
+    fn review_status_from_events(events: &[Event]) -> &'static str {
+        let mut rejected: HashSet<String> = HashSet::new();
+        let mut any_accepted = false;
+        for e in events {
+            match e.event_type.as_str() {
+                "evidence_rejected" => {
+                    if let Some(f) = e.payload.get("touched_file").and_then(|v| v.as_str()) {
+                        if !f.is_empty() {
+                            rejected.insert(f.to_string());
+                        }
+                    }
+                }
+                "evidence_accepted" => {
+                    any_accepted = true;
+                    if let Some(files) = e.payload.get("touched_files").and_then(|v| v.as_array()) {
+                        for f in files {
+                            if let Some(s) = f.as_str() {
+                                rejected.remove(s);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !rejected.is_empty() {
+            "needs_work"
+        } else if any_accepted {
+            "passed"
+        } else {
+            "none"
+        }
+    }
+
+    /// Build the cross-task control view (M-b): one row per task plus aggregate
+    /// totals. A deterministic projection over the event ledger — no wall-clock
+    /// field, so repeated reconciles stay byte-identical like `task.json`.
+    pub fn generate_board(&self) -> Result<serde_json::Value> {
+        let task_ids = self.store.task_ids()?;
+        let mut rows = Vec::with_capacity(task_ids.len());
+        let (mut active, mut held, mut needs_work, mut completed, mut archived) = (0, 0, 0, 0, 0);
+
+        for task_id in &task_ids {
+            let events = self.store.read_for_task(task_id)?;
+            let mut state = TaskState::new(task_id);
+            for event in &events {
+                apply(&mut state, event)
+                    .map_err(|e| anyhow!("Reducer error at seq {}: {}", event.seq, e))?;
+            }
+
+            // "active" aligns with the gateway/review focus set (M-a): a task in
+            // a live working phase that has not been archived.
+            let is_active =
+                !state.is_archived && matches!(state.phase, Phase::InProgress | Phase::Review);
+            let review = Self::review_status_from_events(&events);
+            let gates_total = state.gates.len();
+            let gates_passing = state
+                .gates
+                .iter()
+                .filter(|g| {
+                    state
+                        .gate_results
+                        .get(g.as_str())
+                        .map(|r| r.passed)
+                        .unwrap_or(false)
+                })
+                .count();
+
+            if is_active {
+                active += 1;
+            }
+            if state.is_held {
+                held += 1;
+            }
+            if review == "needs_work" {
+                needs_work += 1;
+            }
+            if state.phase == Phase::Completed {
+                completed += 1;
+            }
+            if state.is_archived {
+                archived += 1;
+            }
+
+            rows.push(serde_json::json!({
+                "task_id": task_id,
+                "objective": state.objective,
+                "phase": state.phase.as_str(),
+                "held": state.is_held,
+                "active": is_active,
+                "archived": state.is_archived,
+                "gates_passing": gates_passing,
+                "gates_total": gates_total,
+                "review": review,
+                "write_scope": state.write_allow.iter().collect::<Vec<_>>(),
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "version": 1,
+            "totals": {
+                "tasks": rows.len(),
+                "active": active,
+                "held": held,
+                "needs_work": needs_work,
+                "completed": completed,
+                "archived": archived,
+            },
+            "tasks": rows,
+        }))
+    }
+
+    /// Write the control view to `.ctl/control.json` (reconcile projection,
+    /// M-b / M5+). Atomic temp-file replace, mirroring the task.json projections.
+    pub fn project_control(&self) -> Result<PathBuf> {
+        let board = self.generate_board()?;
+        let ctl_dir = self.project_root.join(".ctl");
+        std::fs::create_dir_all(&ctl_dir)?;
+        let path = ctl_dir.join("control.json");
+        let tmp = ctl_dir.join("control.json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&board)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(path)
     }
 
     // ── Queries ──
@@ -1896,6 +2049,137 @@ mod tests {
             .exists());
         assert!(dir.path().join(".ctl/tasks/ledger-task/task.json").exists());
         assert!(!dir.path().join(".control").join("events.jsonl").exists());
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    fn drive_to_review(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "interlock test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.submit_task(id).unwrap();
+        app.record_gate(id, "cargo_check", true, "ok").unwrap();
+    }
+
+    #[test]
+    fn finish_blocked_by_uncommitted_work_in_scope() {
+        let dir = TempDir::new();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review(&app, "ilk");
+
+        // Uncommitted file inside write scope (src/) → finish must fail closed.
+        std::fs::write(dir.path().join("src/work.rs"), "fn w() {}\n").unwrap();
+        let err = app.finish_task("ilk").unwrap_err().to_string();
+        assert!(
+            err.contains("uncommitted changes"),
+            "expected commit interlock, got: {err}"
+        );
+
+        // Commit the work → tree clean in scope → finish succeeds.
+        git(dir.path(), &["add", "src/work.rs"]);
+        git(dir.path(), &["commit", "-qm", "work"]);
+        let event = app.finish_task("ilk").unwrap();
+        assert_eq!(event.event_type, "task_completed");
+    }
+
+    fn create_planning(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "board test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn board_aggregates_tasks_by_phase_and_activity() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // "a" → in_progress (active); "b" → stays planning (not active).
+        create_planning(&app, "a");
+        app.mark_ready("a").unwrap();
+        app.start_task("a").unwrap();
+        create_planning(&app, "b");
+
+        let board = app.generate_board().unwrap();
+        assert_eq!(board["totals"]["tasks"], 2);
+        assert_eq!(board["totals"]["active"], 1);
+        assert_eq!(board["totals"]["held"], 0);
+        assert_eq!(board["totals"]["needs_work"], 0);
+
+        let tasks = board["tasks"].as_array().unwrap();
+        let a = tasks.iter().find(|t| t["task_id"] == "a").unwrap();
+        assert_eq!(a["phase"], "in_progress");
+        assert_eq!(a["active"], true);
+        assert_eq!(a["review"], "none");
+        let b = tasks.iter().find(|t| t["task_id"] == "b").unwrap();
+        assert_eq!(b["active"], false);
+    }
+
+    #[test]
+    fn reconcile_projects_deterministic_control_json() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_planning(&app, "a");
+        create_planning(&app, "b");
+
+        app.reconcile().unwrap();
+        let path = dir.path().join(".ctl/control.json");
+        assert!(path.exists(), "reconcile must project control.json");
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        app.reconcile().unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            first, second,
+            "control.json must be byte-identical on replay"
+        );
+    }
+
+    #[test]
+    fn finish_skips_interlock_outside_git_repo() {
+        // Non-git temp dir: tree is unverifiable, so the interlock is skipped
+        // and finish falls through to its other checks (here: succeeds).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review(&app, "nogit");
+        std::fs::write(dir.path().join("src/work.rs"), "fn w() {}\n").unwrap();
+        let event = app.finish_task("nogit").unwrap();
+        assert_eq!(event.event_type, "task_completed");
     }
 
     #[test]
