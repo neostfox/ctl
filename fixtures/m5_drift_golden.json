@@ -1,0 +1,77 @@
+{
+  "_comment": "M5 golden fixtures: fixed (signals, phase) inputs map to fixed drift level/score and next-action. Drives src/domain/drift.rs::golden_fixtures_map_to_fixed_actions. Roadmap exit condition: golden fixtures correspond to fixed actions.",
+  "cases": [
+    {
+      "name": "clean task continues",
+      "signals": {},
+      "phase": "in_progress",
+      "expect_level": "none",
+      "expect_score": 0,
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "low drift (lint only) continues",
+      "signals": { "lint_errors": 3 },
+      "phase": "in_progress",
+      "expect_level": "low",
+      "expect_score": 5,
+      "expect_action": "pass",
+      "expect_rules": ["DRIFT-005"]
+    },
+    {
+      "name": "unknown signal fails closed to ask even with an out-of-scope signal",
+      "signals": { "unknown_signal": true, "boundary_violations": 1 },
+      "phase": "in_progress",
+      "expect_level": "medium",
+      "expect_score": 40,
+      "expect_action": "ask",
+      "expect_rules": ["DRIFT-001", "DRIFT-009"]
+    },
+    {
+      "name": "high drift with out-of-scope write stops",
+      "signals": { "boundary_violations": 1, "gate_failures": 1 },
+      "phase": "in_progress",
+      "expect_level": "high",
+      "expect_score": 50,
+      "expect_action": "stop",
+      "expect_rules": ["DRIFT-001", "DRIFT-002"]
+    },
+    {
+      "name": "high drift without out-of-scope replans",
+      "signals": { "unresolved_rejections": true, "gate_failures": 1, "test_failures": 1 },
+      "phase": "review",
+      "expect_level": "high",
+      "expect_score": 60,
+      "expect_action": "replan",
+      "expect_rules": ["DRIFT-002", "DRIFT-003", "DRIFT-004"]
+    },
+    {
+      "name": "medium drift during implementation rescopes",
+      "signals": { "gate_failures": 1 },
+      "phase": "in_progress",
+      "expect_level": "medium",
+      "expect_score": 20,
+      "expect_action": "rescope",
+      "expect_rules": ["DRIFT-002"]
+    },
+    {
+      "name": "medium drift in review asks",
+      "signals": { "unresolved_rejections": true },
+      "phase": "review",
+      "expect_level": "medium",
+      "expect_score": 25,
+      "expect_action": "ask",
+      "expect_rules": ["DRIFT-003"]
+    },
+    {
+      "name": "held low-drift task stops",
+      "signals": { "is_held": true },
+      "phase": "in_progress",
+      "expect_level": "low",
+      "expect_score": 10,
+      "expect_action": "stop",
+      "expect_rules": ["DRIFT-008"]
+    }
+  ]
+}

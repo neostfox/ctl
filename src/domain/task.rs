@@ -108,6 +108,10 @@ pub struct TaskState {
     pub write_deny: BTreeSet<String>,
     pub risk_triggers: BTreeSet<String>,
     pub gates: BTreeSet<String>,
+    /// M-d: Task IDs that must complete before this task can run (declared
+    /// dependency edges). Default empty; absent means no dependencies.
+    #[serde(default)]
+    pub depends_on: BTreeSet<String>,
     /// Latest gate results keyed by gate_id. Each gate retains only the most recent result.
     pub gate_results: HashMap<String, GateResult>,
     /// M4: Active run (at most one per task).
@@ -141,6 +145,7 @@ impl TaskState {
             write_deny: BTreeSet::new(),
             risk_triggers: BTreeSet::new(),
             gates: BTreeSet::new(),
+            depends_on: BTreeSet::new(),
             gate_results: HashMap::new(),
             active_run: None,
             active_runs: Vec::new(),
@@ -161,6 +166,7 @@ struct TaskBoundary {
     write_deny: BTreeSet<String>,
     risk_triggers: BTreeSet<String>,
     gates: BTreeSet<String>,
+    depends_on: BTreeSet<String>,
 }
 
 fn decode_task_boundary(payload: &serde_json::Value) -> Result<TaskBoundary, String> {
@@ -186,7 +192,33 @@ fn decode_task_boundary(payload: &serde_json::Value) -> Result<TaskBoundary, Str
         write_deny: string_set(payload, "write_deny", false)?,
         risk_triggers: string_set(payload, "risk_triggers", false)?,
         gates: string_set(payload, "gates", true)?,
+        depends_on: optional_string_set(payload, "depends_on")?,
     })
+}
+
+/// Parse an optional string-array field (M-d `depends_on`): absent → empty set.
+/// Unlike `string_set`, a missing key is not an error — keeping dependency-free
+/// events (which omit the field) valid and byte-identical to pre-M-d output.
+fn optional_string_set(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<BTreeSet<String>, String> {
+    let Some(value) = payload.get(field) else {
+        return Ok(BTreeSet::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{field} must be an array of strings"))?;
+    let mut set = BTreeSet::new();
+    for item in values {
+        let s = item
+            .as_str()
+            .ok_or_else(|| format!("{field} entries must be strings"))?;
+        if !s.is_empty() {
+            set.insert(s.to_string());
+        }
+    }
+    Ok(set)
 }
 
 fn string_set(
@@ -251,6 +283,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.write_deny = boundary.write_deny;
             state.risk_triggers = boundary.risk_triggers;
             state.gates = boundary.gates;
+            state.depends_on = boundary.depends_on;
         }
         "task_revised" => {
             if state.phase != Phase::Planning {
@@ -266,6 +299,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.write_deny = boundary.write_deny;
             state.risk_triggers = boundary.risk_triggers;
             state.gates = boundary.gates;
+            state.depends_on = boundary.depends_on;
         }
         "task_marked_ready" => {
             if state.phase != Phase::Planning {

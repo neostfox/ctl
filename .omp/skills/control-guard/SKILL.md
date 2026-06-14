@@ -85,17 +85,26 @@ After the ctl task is active, break the work into subtasks using your **todo lis
 
 ### Step 5: Close the task — completion audit first
 
-**Before `submit`, run the completion audit.** Dispatch `ctl-review` (mode B) over the
-whole task diff. Only proceed to `submit`/`finish` on a `pass` verdict; a `fail` sends the
-work back to fix-up.
+**Before finishing, run the completion audit.** Dispatch `ctl-review` (mode B) over the
+whole task diff, then **record its verdict on the ledger** — this is no longer convention:
+`ctl task finish` is hard-gated (M-f) and refuses to complete without a fresh passing
+`completion_audit`. The audit happens in **Review** (after `submit`), the commit window is
+also open in Review (M-g), so the order is: submit → record audit → commit → finish.
 
 ```bash
-# 1. completion audit (sub-agent, read-only) — see Sub-Agent Review Protocol
-# 2. only if VERDICT: pass —
-ctl task submit --id <id>
-ctl task finish --id <id>
+ctl task submit --id <id>                       # → Review (audit + commit window)
+# dispatch ctl-review (mode B); then translate its VERDICT to the ledger — as the
+# REVIEWER identity (M6: the implementer cannot accept its own audit):
+CTL_ACTOR=ctl-review ctl review accept --id <id> --note "<health/summary>"   # VERDICT: pass
+#   or, on VERDICT: fail —
+CTL_ACTOR=ctl-review ctl review reject --id <id> --note "<blocking findings>" # back to fix-up
+# only after a pass audit AND committing the work in scope:
+ctl task finish  --id <id>                      # interlock: fresh pass + clean tree
 ctl task archive --id <id>
 ```
+
+A `reject` (or no audit) blocks `finish`; rework, re-`submit`, and re-audit — a prior
+round's pass is stale once the task is re-submitted.
 
 ## Sub-Agent Review Protocol
 
@@ -113,9 +122,11 @@ the roadmap — see ROADMAP). Today it holds because you honor the verdict.
 
 ### Gate 2 — completion audit (任务完成 → 子代理审查)
 
-Before `ctl task submit`/`finish`, dispatch `ctl-review` (mode B) over `git diff`. It runs
+After `ctl task submit` (in Review), dispatch `ctl-review` (mode B) over `git diff`. It runs
 the closure checklist (build/test/lint **evidence**, not assertions) and emits a Health
-Score + `VERDICT`. `fail` → back to fix-up.
+Score + `VERDICT`. Record it with `ctl review accept|reject` (above). This gate is **hard**:
+`ctl task finish` refuses without a fresh `completion_audit` pass (M-f). `fail` → back to
+fix-up, re-submit, re-audit.
 
 ### Cross-task overlap check (before dispatching / editing)
 
@@ -127,9 +138,24 @@ how two tasks silently corrupt each other.
 
 ### Recording verdicts (verdict → event)
 
-A verdict is evidence, not chat. After each audit, record it on the task ledger as evidence
-(e.g. `ctl assignment`/evidence path, or the audit command if available) so the trail
-survives compaction and can feed a future board. Never hand-edit `events.jsonl`.
+A verdict is evidence, not chat. The read-only `ctl-review` sub-agent **finds and grades**
+but cannot write — so **you (control-guard) record its verdict** on the ledger, **under the
+reviewer's identity** (M6). Set `CTL_ACTOR` to a reviewer id distinct from the implementer:
+
+```bash
+CTL_ACTOR=ctl-review ctl review accept --id <id> --note "<Health: n; one-line summary>"  # pass
+CTL_ACTOR=ctl-review ctl review reject --id <id> --note "<the blocking 🔴 findings>"      # fail
+```
+
+For the **completion audit (mode B)** this is mandatory, not advisory: `ctl task finish`
+hard-blocks (M-f) until a fresh passing `completion_audit` exists (recorded after the last
+`submit`). **Reviewer-lease binding (M6):** the implementer of a task **cannot** record its
+own passing audit — the recording `CTL_ACTOR` must differ from whoever `start`ed/implemented
+it, or `ctl review accept` is refused. (A `reject` may come from anyone, including the
+implementer self-flagging.) Never hand-edit `events.jsonl`.
+
+For **edit reviews (mode A)** the verdict stays advisory today — you honor it before
+applying. The gate-enforced version is the `ctl apply` primitive (still on the roadmap).
 
 ### Dispatch constraints (injected into every sub-agent)
 
@@ -186,7 +212,8 @@ When the user describes a **large effort** (e.g., "rebuild all specs", "fix all 
 |---|---|
 | **New task** | `ctl task create --id <id> --objective "<text>" --read-scope <path>... --write-allow <path>... --gates <gate>...` → `ctl task ready --id <id>` → `ctl task start --id <id>` |
 | **Check status** | `ctl task status --id <id>` |
-| **Close task** | `ctl task submit --id <id>` → `ctl task finish --id <id>` → `ctl task archive --id <id>` |
+| **Close task** | `ctl task submit --id <id>` → `ctl review accept --id <id>` (mode-B pass) → commit → `ctl task finish --id <id>` → `ctl task archive --id <id>` |
+| **Record audit verdict** | `CTL_ACTOR=ctl-review ctl review accept --id <id> --note "<summary>"` · `… ctl review reject --id <id> --note "<findings>"` (reviewer ≠ implementer, M6) |
 | **Abort task** | `ctl task cancel --id <id>` |
 | **Health check** | `ctl doctor` |
 | **Plan / scope a task** | `ctl-brainstorm` (`/ctl-new`) |

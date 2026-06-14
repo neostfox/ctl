@@ -13,11 +13,32 @@ use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::FileEventStore;
 
+/// Evidence `source` that marks a reviewer's dedicated completion audit (M-f),
+/// distinct from implementer/adapter output evidence. The finish interlock
+/// requires a fresh PASS with this source; using a distinguished source keeps
+/// the canonical event schema unchanged.
+pub const COMPLETION_AUDIT_SOURCE: &str = "completion_audit";
+
 pub struct ControlApp {
     pub project_root: PathBuf,
     store: FileEventStore,
     validator: Option<SchemaValidator>,
     dry_run: bool,
+    /// Identity stamped on every event this instance appends (M6). Defaults to
+    /// `"human"`; set from the `CTL_ACTOR` env var so a reviewer sub-agent and
+    /// the implementer act under distinct identities. Read by the reviewer ≠
+    /// implementer interlock.
+    actor: String,
+}
+
+/// Resolve the acting identity from the environment (M6). Blank/unset → the
+/// unattributed default `"human"`.
+fn actor_from_env() -> String {
+    std::env::var("CTL_ACTOR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "human".to_string())
 }
 
 pub struct CreateTaskInput<'a> {
@@ -27,6 +48,8 @@ pub struct CreateTaskInput<'a> {
     pub write_deny: &'a [String],
     pub risk_triggers: &'a [String],
     pub gates: &'a [String],
+    /// M-d: task IDs that must complete before this one runs.
+    pub depends_on: &'a [String],
 }
 
 pub struct ReviseTaskInput<'a> {
@@ -36,6 +59,7 @@ pub struct ReviseTaskInput<'a> {
     pub write_deny: Option<&'a [String]>,
     pub risk_triggers: Option<&'a [String]>,
     pub gates: Option<&'a [String]>,
+    pub depends_on: Option<&'a [String]>,
 }
 
 impl ControlApp {
@@ -47,6 +71,7 @@ impl ControlApp {
             store,
             validator,
             dry_run: false,
+            actor: actor_from_env(),
         })
     }
 
@@ -58,7 +83,16 @@ impl ControlApp {
             store,
             validator,
             dry_run,
+            actor: actor_from_env(),
         })
+    }
+
+    /// Override the acting identity (M6). Used where the actor is known
+    /// explicitly rather than via `CTL_ACTOR` — e.g. tests separating an
+    /// implementer from a reviewer.
+    pub fn with_actor(mut self, actor: &str) -> Self {
+        self.actor = actor.to_string();
+        self
     }
 
     // ── Commands ──
@@ -75,7 +109,7 @@ impl ControlApp {
         let gates = validate_gate_templates(input.gates)?;
         validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "objective": input.objective,
             "read_scope": read_scope,
             "write_allow": write_allow,
@@ -83,6 +117,11 @@ impl ControlApp {
             "risk_triggers": input.risk_triggers,
             "gates": gates,
         });
+        // M-d: only emit depends_on when non-empty, keeping payloads minimal and
+        // dependency-free events byte-identical to pre-M-d output.
+        if !input.depends_on.is_empty() {
+            payload["depends_on"] = serde_json::json!(input.depends_on);
+        }
         let event = self.build_event(id, "task_created", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -125,9 +164,13 @@ impl ControlApp {
             Some(gates) => validate_gate_templates(gates)?,
             None => state.gates.iter().cloned().collect(),
         };
+        let depends_on: Vec<String> = match input.depends_on {
+            Some(deps) => deps.to_vec(),
+            None => state.depends_on.iter().cloned().collect(),
+        };
         validate_task_definition(&objective, &read_scope, &write_allow, &gates)?;
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "objective": objective,
             "read_scope": read_scope,
             "write_allow": write_allow,
@@ -135,6 +178,9 @@ impl ControlApp {
             "risk_triggers": risk_triggers,
             "gates": gates,
         });
+        if !depends_on.is_empty() {
+            payload["depends_on"] = serde_json::json!(depends_on);
+        }
         let event = self.build_event(task_id, "task_revised", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -277,6 +323,71 @@ impl ControlApp {
             ));
         }
 
+        // Commit interlock (M-g): a task cannot complete with uncommitted work
+        // in its write scope. The commit window opens at Review, so by the time
+        // finish runs the agent must already have committed. Scoped to the
+        // task's write_allow and git-tracked paths (`.ctl/` is gitignored and
+        // thus excluded). Skipped for read-only tasks (empty write_allow) and
+        // outside a git repository, where there is nothing to commit / no way
+        // to verify.
+        let scope: Vec<String> = state.write_allow.iter().cloned().collect();
+        if !scope.is_empty() {
+            if let Some(dirty) =
+                crate::infrastructure::workspace::dirty_paths_in_scope(&self.project_root, &scope)?
+            {
+                if !dirty.is_empty() {
+                    return Err(anyhow!(
+                        "Completion interlock: uncommitted changes in write scope: {:?}. \
+                         Commit (and optionally push) within Review before finishing.",
+                        dirty
+                    ));
+                }
+            }
+        }
+
+        // Hard review gate (M-f): completion requires a FRESH passing completion
+        // audit. A verdict counts only if recorded after the last submit — rework
+        // re-submits and invalidates a prior round's audit. The latest such
+        // verdict must be a PASS; a FAIL (or no audit at all) blocks finish. This
+        // upgrades review from convention (soft-layer ctl-review subagents) to a
+        // gateway interlock. `events` is already loaded above.
+        let last_submit_seq = events
+            .iter()
+            .filter(|e| e.event_type == "task_submitted_for_review")
+            .map(|e| e.seq)
+            .max();
+        let latest_audit = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.event_type.as_str(),
+                    "evidence_accepted" | "evidence_rejected"
+                )
+            })
+            .filter(|e| {
+                e.payload.get("source").and_then(|v| v.as_str())
+                    == Some(crate::application::COMPLETION_AUDIT_SOURCE)
+            })
+            .filter(|e| last_submit_seq.is_none_or(|s| e.seq > s))
+            .max_by_key(|e| e.seq);
+        match latest_audit {
+            Some(e) if e.event_type == "evidence_accepted" => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "Completion interlock: the latest completion audit is a FAIL. \
+                     Rework, then record a passing audit (ctl review accept --id {}) before finishing.",
+                    task_id
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "Completion interlock: no passing completion audit since submit. \
+                     A reviewer must record one: ctl review accept --id {}",
+                    task_id
+                ));
+            }
+        }
+
         let event = self.build_event(task_id, "task_completed", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -287,6 +398,95 @@ impl ControlApp {
 
     pub fn archive_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_archived", serde_json::json!({}))?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// The actors who performed implementation work on a task (M6). The reviewer
+    /// who records a passing completion audit must not be one of them. Implementer
+    /// signals: who `task_started` the task, and who produced non-audit work
+    /// evidence (`evidence_accepted` with a `source` other than the completion
+    /// audit, i.e. adapter/manual output).
+    fn implementer_actors(events: &[Event]) -> HashSet<String> {
+        let mut actors = HashSet::new();
+        for e in events {
+            match e.event_type.as_str() {
+                "task_started" => {
+                    actors.insert(e.actor.clone());
+                }
+                "evidence_accepted" => {
+                    let source = e.payload.get("source").and_then(|v| v.as_str());
+                    if source != Some(COMPLETION_AUDIT_SOURCE) {
+                        actors.insert(e.actor.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        actors
+    }
+
+    /// M-f: record a reviewer's completion-audit verdict on a submitted task.
+    ///
+    /// A PASS is the hard prerequisite the finish interlock requires; a FAIL
+    /// blocks completion until the work is reworked and re-audited. Modeled on
+    /// the existing evidence events with a distinguished `source`
+    /// ([`COMPLETION_AUDIT_SOURCE`]) so it needs no canonical-schema change; the
+    /// reviewer identity is the event `actor` (M6 — set via `CTL_ACTOR`).
+    /// Recorded only in Review — the post-submit audit window.
+    ///
+    /// M6 reviewer-lease binding: a PASS may **not** be recorded by an
+    /// implementer of the task (no self-approval). A FAIL is always allowed —
+    /// an implementer self-flagging a problem is healthy; only self-certifying
+    /// completion is the threat.
+    pub fn record_completion_audit(
+        &self,
+        task_id: &str,
+        pass: bool,
+        note: Option<&str>,
+    ) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::Review {
+            return Err(anyhow!(
+                "Completion audit can only be recorded in Review (task is {:?}); submit the task first",
+                state.phase
+            ));
+        }
+        let events = self.store.read_for_task(task_id)?;
+        if pass && Self::implementer_actors(&events).contains(&self.actor) {
+            return Err(anyhow!(
+                "Reviewer-lease binding: actor '{}' implemented this task and cannot record its own \
+                 passing completion audit. A different reviewer must accept it (set CTL_ACTOR to the \
+                 reviewer's identity).",
+                self.actor
+            ));
+        }
+        let evidence_id = generate_uuid();
+        let event = if pass {
+            let touched: Vec<String> = state.write_allow.iter().cloned().collect();
+            let payload = serde_json::json!({
+                "evidence_id": evidence_id,
+                "source": COMPLETION_AUDIT_SOURCE,
+                "touched_files": touched,
+                "result_file": note.unwrap_or(""),
+                "accepted_at": now_iso8601(),
+            });
+            self.build_event(task_id, "evidence_accepted", payload)?
+        } else {
+            let payload = serde_json::json!({
+                "evidence_id": evidence_id,
+                "source": COMPLETION_AUDIT_SOURCE,
+                "rejection_reason": note.unwrap_or("completion audit failed"),
+                // Empty: the generic rejected-evidence interlock keys on a
+                // per-file rejection; the completion-audit verdict is task-level
+                // and enforced by the dedicated M-f interlock instead.
+                "touched_file": "",
+            });
+            self.build_event(task_id, "evidence_rejected", payload)?
+        };
         self.validate_and_append(&event)?;
         if !self.dry_run {
             self.rebuild_task_view(task_id)?;
@@ -541,7 +741,222 @@ impl ControlApp {
             self.store.write_task_view(task_id, &state)?;
             rebuilt.push(task_id.clone());
         }
+        // M-b: reconcile also projects the cross-task control view.
+        self.project_control()?;
         Ok(rebuilt)
+    }
+
+    /// Per-task review verdict derived from the soft-layer verdict→evidence
+    /// events (M-b). `evidence_rejected` = reviewer found problems for a file;
+    /// a later `evidence_accepted` covering that file resolves it. Mirrors the
+    /// finish interlock, so the board reflects what actually blocks completion.
+    fn review_status_from_events(events: &[Event]) -> &'static str {
+        let mut rejected: HashSet<String> = HashSet::new();
+        let mut any_accepted = false;
+        for e in events {
+            match e.event_type.as_str() {
+                "evidence_rejected" => {
+                    if let Some(f) = e.payload.get("touched_file").and_then(|v| v.as_str()) {
+                        if !f.is_empty() {
+                            rejected.insert(f.to_string());
+                        }
+                    }
+                }
+                "evidence_accepted" => {
+                    any_accepted = true;
+                    if let Some(files) = e.payload.get("touched_files").and_then(|v| v.as_array()) {
+                        for f in files {
+                            if let Some(s) = f.as_str() {
+                                rejected.remove(s);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !rejected.is_empty() {
+            "needs_work"
+        } else if any_accepted {
+            "passed"
+        } else {
+            "none"
+        }
+    }
+
+    /// Build the cross-task control view (M-b): one row per task plus aggregate
+    /// totals. A deterministic projection over the event ledger — no wall-clock
+    /// field, so repeated reconciles stay byte-identical like `task.json`.
+    pub fn generate_board(&self) -> Result<serde_json::Value> {
+        let task_ids = self.store.task_ids()?;
+        let mut rows = Vec::with_capacity(task_ids.len());
+        let (mut active, mut held, mut needs_work, mut completed, mut archived) = (0, 0, 0, 0, 0);
+
+        for task_id in &task_ids {
+            let events = self.store.read_for_task(task_id)?;
+            let mut state = TaskState::new(task_id);
+            for event in &events {
+                apply(&mut state, event)
+                    .map_err(|e| anyhow!("Reducer error at seq {}: {}", event.seq, e))?;
+            }
+
+            // "active" aligns with the gateway/review focus set (M-a): a task in
+            // a live working phase that has not been archived.
+            let is_active =
+                !state.is_archived && matches!(state.phase, Phase::InProgress | Phase::Review);
+            let review = Self::review_status_from_events(&events);
+            let gates_total = state.gates.len();
+            let gates_passing = state
+                .gates
+                .iter()
+                .filter(|g| {
+                    state
+                        .gate_results
+                        .get(g.as_str())
+                        .map(|r| r.passed)
+                        .unwrap_or(false)
+                })
+                .count();
+
+            if is_active {
+                active += 1;
+            }
+            if state.is_held {
+                held += 1;
+            }
+            if review == "needs_work" {
+                needs_work += 1;
+            }
+            if state.phase == Phase::Completed {
+                completed += 1;
+            }
+            if state.is_archived {
+                archived += 1;
+            }
+
+            // M5: deterministic drift projection. Signals derive from events +
+            // the telemetry evidence index; the rule engine is pure, so this
+            // stays wall-clock-free and reconcile remains byte-identical.
+            let telemetry = self.store.read_telemetry_for_task(task_id)?;
+            let signals = drift_signals_from(&events, &state, &telemetry);
+            let report = crate::domain::drift::evaluate(task_id, &signals);
+            let action = crate::domain::drift::next_action(&report, state.phase.clone());
+
+            rows.push(serde_json::json!({
+                "task_id": task_id,
+                "objective": state.objective,
+                "phase": state.phase.as_str(),
+                "held": state.is_held,
+                "active": is_active,
+                "archived": state.is_archived,
+                "gates_passing": gates_passing,
+                "gates_total": gates_total,
+                "review": review,
+                "write_scope": state.write_allow.iter().collect::<Vec<_>>(),
+                "depends_on": state.depends_on.iter().collect::<Vec<_>>(),
+                "drift_level": report.level.as_str(),
+                "drift_score": report.score,
+                "drift_rules": report.fired_ids(),
+                "recommended_action": action.action.as_str(),
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "version": 1,
+            "totals": {
+                "tasks": rows.len(),
+                "active": active,
+                "held": held,
+                "needs_work": needs_work,
+                "completed": completed,
+                "archived": archived,
+            },
+            "tasks": rows,
+        }))
+    }
+
+    /// Write the control view to `.ctl/control.json` (reconcile projection,
+    /// M-b / M5+). Atomic temp-file replace, mirroring the task.json projections.
+    pub fn project_control(&self) -> Result<PathBuf> {
+        let board = self.generate_board()?;
+        let ctl_dir = self.project_root.join(".ctl");
+        std::fs::create_dir_all(&ctl_dir)?;
+        let path = ctl_dir.join("control.json");
+        let tmp = ctl_dir.join("control.json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&board)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(path)
+    }
+
+    // ── M5: telemetry + drift + next-action (explainable control loop) ──
+
+    /// Append one telemetry evidence record to the evidence index (M5). This is
+    /// the only M5 write op; drift/next-action are read-only projections. The
+    /// `recorded_at` provenance timestamp is stamped here (the domain stays
+    /// time-free). Unknown `kind`s are accepted as evidence but the drift engine
+    /// fails closed on them.
+    pub fn telemetry_add(
+        &self,
+        task_id: &str,
+        kind: &str,
+        value: i64,
+        source: &str,
+    ) -> Result<crate::domain::telemetry::TelemetryEntry> {
+        // The task must exist so telemetry is always attributable.
+        if self.store.read_for_task(task_id)?.is_empty() {
+            return Err(anyhow!("Task '{}' does not exist", task_id));
+        }
+        let entry = crate::domain::telemetry::TelemetryEntry::new(
+            task_id,
+            kind,
+            value,
+            &now_iso8601(),
+            source,
+        );
+        if self.dry_run {
+            println!(
+                "[dry-run] Would append telemetry: task={}, kind={}, value={}",
+                task_id, kind, value
+            );
+            return Ok(entry);
+        }
+        self.store.append_telemetry(&entry)?;
+        Ok(entry)
+    }
+
+    /// Derive the drift signals for a task from the event ledger and the
+    /// telemetry evidence index. Pure projection — emits no events.
+    fn collect_drift_signals(
+        &self,
+        task_id: &str,
+    ) -> Result<(crate::domain::drift::DriftSignals, Phase)> {
+        let events = self.store.read_for_task(task_id)?;
+        if events.is_empty() {
+            return Err(anyhow!("Task '{}' does not exist", task_id));
+        }
+        let mut state = TaskState::new(task_id);
+        for event in &events {
+            apply(&mut state, event)
+                .map_err(|e| anyhow!("Reducer error at seq {}: {}", event.seq, e))?;
+        }
+        let telemetry = self.store.read_telemetry_for_task(task_id)?;
+        let signals = drift_signals_from(&events, &state, &telemetry);
+        Ok((signals, state.phase))
+    }
+
+    /// Compute the drift report for a task (M5). Read-only.
+    pub fn compute_drift(&self, task_id: &str) -> Result<crate::domain::drift::DriftReport> {
+        let (signals, _phase) = self.collect_drift_signals(task_id)?;
+        Ok(crate::domain::drift::evaluate(task_id, &signals))
+    }
+
+    /// Recommend the next action for a task (M5). Read-only and advisory — it
+    /// emits no events and, for replan/rescope, only returns a structured
+    /// proposal for a human to act on.
+    pub fn next_action(&self, task_id: &str) -> Result<crate::domain::drift::NextActionProposal> {
+        let (signals, phase) = self.collect_drift_signals(task_id)?;
+        let report = crate::domain::drift::evaluate(task_id, &signals);
+        Ok(crate::domain::drift::next_action(&report, phase))
     }
 
     // ── Queries ──
@@ -791,7 +1206,7 @@ impl ControlApp {
             task_id: task_id.to_string(),
             seq,
             occurred_at: now_iso8601(),
-            actor: "human".to_string(),
+            actor: self.actor.clone(),
             event_type: event_type.to_string(),
             payload,
         })
@@ -985,21 +1400,7 @@ impl ControlApp {
         );
         let mut files_to_apply = Vec::new();
         for (status, path) in &diff_files {
-            let normalized = normalizer
-                .normalize(path)
-                .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
-            let normalized_str = normalized.to_string_lossy().replace('\\', "/");
-            let in_scope = state.write_allow.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
-            });
-            let in_deny = state.write_deny.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
-            });
-            if !in_scope || in_deny {
+            if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
                 return Err(anyhow!(
                     "File '{}' is out of write scope or in deny list. Rule: scope_enforcement",
                     path
@@ -1089,6 +1490,109 @@ impl ControlApp {
             self.rebuild_task_view(task_id)?;
         }
         Ok(event)
+    }
+
+    /// M6: Read-only "is this worktree a clean merge candidate?" verdict.
+    ///
+    /// Emits NO events and never merges — the human reviews this, then runs
+    /// `workspace apply` to actually merge. A candidate is `mergeable` iff all
+    /// touched files are in the task's write scope, none collide with another
+    /// active task's write scope, and the main workspace has no conflicting
+    /// dirty state in those paths. High-risk changes are surfaced for human
+    /// attention but do not by themselves block the candidate (the apply path
+    /// still gates them via approval).
+    pub fn merge_candidate(&self, task_id: &str) -> Result<serde_json::Value> {
+        let state = self.replay_task(task_id)?;
+        let worktree_path = self.get_worktree_path(task_id)?;
+        let diff_files =
+            crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
+        let touched: Vec<String> = diff_files.iter().map(|(_, p)| p.clone()).collect();
+
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+
+        // (1) Every touched file must be inside this task's write scope.
+        let mut out_of_scope = Vec::new();
+        for (_status, path) in &diff_files {
+            if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
+                out_of_scope.push(path.clone());
+            }
+        }
+
+        // (2) No touched file may fall into another ACTIVE task's write scope
+        // (in_progress | review, non-archived) — that would be a concurrent-write
+        // collision. Mirrors the gateway's cross-task overlap rule (M-c).
+        let mut cross_task_conflicts = Vec::new();
+        let empty_deny = std::collections::BTreeSet::new();
+        for report in &self.generate_status_report()? {
+            let other_id = report.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            let archived = report
+                .get("is_archived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if other_id == task_id || archived || !matches!(phase, "in_progress" | "review") {
+                continue;
+            }
+            let other = self.replay_task(other_id)?;
+            for (_status, path) in &diff_files {
+                if file_in_write_scope(&normalizer, path, &other.write_allow, &empty_deny)? {
+                    cross_task_conflicts.push(serde_json::json!({
+                        "path": path,
+                        "conflicting_task": other_id,
+                    }));
+                }
+            }
+        }
+
+        // (3) The main workspace must be clean in the touched paths, else the
+        // merge would clobber concurrent edits. Non-git / unverifiable → no
+        // fabricated conflict (Ok(None)).
+        let workspace_conflicts = if touched.is_empty() {
+            Vec::new()
+        } else {
+            crate::infrastructure::workspace::dirty_paths_in_scope(&self.project_root, &touched)?
+                .unwrap_or_default()
+        };
+
+        // High-risk changes are informational (apply still gates them).
+        let requires_approval: Vec<String> =
+            crate::infrastructure::workspace::detect_high_risk(&diff_files)
+                .iter()
+                .map(|(risk, path)| format!("{}: {}", risk, path))
+                .collect();
+
+        let mut blocking_reasons = Vec::new();
+        if !out_of_scope.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) outside write scope",
+                out_of_scope.len()
+            ));
+        }
+        if !cross_task_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} cross-task scope conflict(s)",
+                cross_task_conflicts.len()
+            ));
+        }
+        if !workspace_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) dirty in the main workspace",
+                workspace_conflicts.len()
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "task_id": task_id,
+            "mergeable": blocking_reasons.is_empty(),
+            "touched_files": touched,
+            "out_of_scope": out_of_scope,
+            "cross_task_conflicts": cross_task_conflicts,
+            "workspace_conflicts": workspace_conflicts,
+            "requires_approval": requires_approval,
+            "blocking_reasons": blocking_reasons,
+        }))
     }
 
     // ── M4: Approval commands ──
@@ -1749,6 +2253,84 @@ fn new_validator_if_available() -> Option<SchemaValidator> {
     }
 }
 
+// ── M5: drift signal derivation (pure over already-loaded data) ──
+
+/// Build the drift signals from a task's events, its reduced state, and its
+/// telemetry entries. Kept free-standing so both `collect_drift_signals` and
+/// the `control.json` board projection derive signals identically.
+fn drift_signals_from(
+    events: &[Event],
+    state: &TaskState,
+    telemetry: &[crate::domain::telemetry::TelemetryEntry],
+) -> crate::domain::drift::DriftSignals {
+    let boundary_violations = events
+        .iter()
+        .filter(|e| e.event_type == "boundary_violation_recorded")
+        .count() as u32;
+    let gate_failures = state
+        .gates
+        .iter()
+        .filter(|g| {
+            state
+                .gate_results
+                .get(g.as_str())
+                .map(|r| !r.passed)
+                .unwrap_or(false)
+        })
+        .count() as u32;
+    let unresolved_rejections = ControlApp::review_status_from_events(events) == "needs_work";
+
+    // Saturating sums: a pathological flood of large values can't overflow the
+    // accumulator (the rule checks only care about thresholds, not exact totals).
+    let (mut test_failures, mut lint_errors, mut retries, mut unexpected_writes) =
+        (0i64, 0i64, 0i64, 0i64);
+    let mut unknown_signal = false;
+    for entry in telemetry {
+        match entry.kind.as_str() {
+            "test_failures" => test_failures = test_failures.saturating_add(entry.value),
+            "lint_errors" => lint_errors = lint_errors.saturating_add(entry.value),
+            "retries" | "attempts" => retries = retries.saturating_add(entry.value),
+            "unexpected_writes" => {
+                unexpected_writes = unexpected_writes.saturating_add(entry.value)
+            }
+            _ => unknown_signal = true,
+        }
+    }
+
+    crate::domain::drift::DriftSignals {
+        boundary_violations,
+        gate_failures,
+        unresolved_rejections,
+        is_held: state.is_held,
+        test_failures,
+        lint_errors,
+        retries,
+        unexpected_writes,
+        unknown_signal,
+    }
+}
+
+/// Decide whether a worktree-relative `path` is writable under a task boundary:
+/// inside some `write_allow` scope and not shadowed by a `write_deny` scope,
+/// after normalization. Shared by `workspace_apply` (which errors on the first
+/// out-of-scope file) and `merge_candidate` (which collects them).
+fn file_in_write_scope(
+    normalizer: &crate::infrastructure::boundary::normalizer::PathNormalizer,
+    path: &str,
+    write_allow: &std::collections::BTreeSet<String>,
+    write_deny: &std::collections::BTreeSet<String>,
+) -> Result<bool> {
+    let normalized = normalizer
+        .normalize(path)
+        .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
+    let normalized_str = normalized.to_string_lossy().replace('\\', "/");
+    let matches = |scope: &String| {
+        let scope_norm = scope.replace('\\', "/");
+        normalized_str.starts_with(scope_norm.as_str()) || normalized_str == scope_norm
+    };
+    Ok(write_allow.iter().any(matches) && !write_deny.iter().any(matches))
+}
+
 // ── UUID generation (no external crate) ──
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1886,6 +2468,7 @@ mod tests {
                 write_deny: &write_deny,
                 risk_triggers: &risk_triggers,
                 gates: &gates,
+                depends_on: &[],
             },
         )
         .unwrap();
@@ -1896,6 +2479,568 @@ mod tests {
             .exists());
         assert!(dir.path().join(".ctl/tasks/ledger-task/task.json").exists());
         assert!(!dir.path().join(".control").join("events.jsonl").exists());
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    /// Drive a task to Review with a passing gate but NO completion audit.
+    fn drive_to_review_bare(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "interlock test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.submit_task(id).unwrap();
+        app.record_gate(id, "cargo_check", true, "ok").unwrap();
+    }
+
+    /// Record a passing completion audit as a non-implementer reviewer (M6):
+    /// the implementer (`task_started` actor) is the default "human", so the
+    /// reviewer acts under a distinct identity.
+    fn audit_pass(app: &ControlApp, id: &str, note: Option<&str>) {
+        ControlApp::open(&app.project_root, false)
+            .unwrap()
+            .with_actor("reviewer")
+            .record_completion_audit(id, true, note)
+            .unwrap();
+    }
+
+    fn drive_to_review(app: &ControlApp, id: &str) {
+        drive_to_review_bare(app, id);
+        // M-f: a fresh passing completion audit is now a finish prerequisite;
+        // M6: it must come from a non-implementer reviewer.
+        audit_pass(app, id, None);
+    }
+
+    #[test]
+    fn finish_blocked_without_completion_audit() {
+        // No git repo → M-g commit interlock is skipped, isolating the M-f gate.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "noaudit");
+        let err = app.finish_task("noaudit").unwrap_err().to_string();
+        assert!(
+            err.contains("no passing completion audit"),
+            "expected M-f review gate, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finish_allowed_with_fresh_completion_audit() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "audited");
+        audit_pass(&app, "audited", Some("looks good"));
+        let event = app.finish_task("audited").unwrap();
+        assert_eq!(event.event_type, "task_completed");
+    }
+
+    #[test]
+    fn finish_blocked_by_failing_completion_audit() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "failed");
+        app.record_completion_audit("failed", false, Some("missing tests"))
+            .unwrap();
+        let err = app.finish_task("failed").unwrap_err().to_string();
+        assert!(
+            err.contains("latest completion audit is a FAIL"),
+            "expected fail-verdict block, got: {err}"
+        );
+    }
+
+    #[test]
+    fn audit_before_resubmit_is_stale_and_does_not_count() {
+        // A pass from a PRIOR review round must not satisfy finish after rework
+        // (reopen → resubmit). Freshness is keyed on the last submit's seq.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "rework");
+        audit_pass(&app, "rework", None);
+        // Rework: back to in_progress, then re-submit. The earlier audit is now
+        // before the latest submit and no longer counts.
+        app.reopen_task("rework").unwrap();
+        app.submit_task("rework").unwrap();
+        app.record_gate("rework", "cargo_check", true, "ok")
+            .unwrap();
+        let err = app.finish_task("rework").unwrap_err().to_string();
+        assert!(
+            err.contains("no passing completion audit"),
+            "stale pre-rework audit must not satisfy finish, got: {err}"
+        );
+        // A fresh audit after the new submit unblocks it.
+        audit_pass(&app, "rework", None);
+        assert_eq!(
+            app.finish_task("rework").unwrap().event_type,
+            "task_completed"
+        );
+    }
+
+    #[test]
+    fn completion_audit_requires_review_phase() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            "early",
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("early").unwrap();
+        app.start_task("early").unwrap();
+        // Still in_progress (not submitted) → audit must be rejected.
+        let err = app
+            .record_completion_audit("early", true, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only be recorded in Review"),
+            "expected phase guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn implementer_cannot_self_approve_completion_audit() {
+        // M6: the actor who started/implemented the task may not record its own
+        // passing audit. `app` (default actor "human") started the task.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "selfapp");
+        let err = app
+            .record_completion_audit("selfapp", true, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Reviewer-lease binding") && err.contains("human"),
+            "implementer self-approval must be blocked, got: {err}"
+        );
+        // A distinct reviewer can accept it.
+        audit_pass(&app, "selfapp", None);
+        assert_eq!(
+            app.finish_task("selfapp").unwrap().event_type,
+            "task_completed"
+        );
+    }
+
+    #[test]
+    fn implementer_may_self_reject_completion_audit() {
+        // A FAIL from the implementer (self-flagging a problem) is allowed —
+        // only self-approval is the threat.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "selfrej");
+        let ev = app
+            .record_completion_audit("selfrej", false, Some("found a bug myself"))
+            .unwrap();
+        assert_eq!(ev.event_type, "evidence_rejected");
+    }
+
+    #[test]
+    fn event_actor_comes_from_with_actor_override() {
+        // M6 foundation: events are stamped with the instance actor, not a
+        // hardcoded "human".
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap().with_actor("agent-7");
+        let ev = app
+            .create_task(
+                "act",
+                CreateTaskInput {
+                    objective: "x",
+                    read_scope: &["src".to_string()],
+                    write_allow: &["src".to_string()],
+                    write_deny: &[],
+                    risk_triggers: &[],
+                    gates: &["cargo_check".to_string()],
+                    depends_on: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(ev.actor, "agent-7");
+    }
+
+    #[test]
+    fn finish_blocked_by_uncommitted_work_in_scope() {
+        let dir = TempDir::new();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review(&app, "ilk");
+
+        // Uncommitted file inside write scope (src/) → finish must fail closed.
+        std::fs::write(dir.path().join("src/work.rs"), "fn w() {}\n").unwrap();
+        let err = app.finish_task("ilk").unwrap_err().to_string();
+        assert!(
+            err.contains("uncommitted changes"),
+            "expected commit interlock, got: {err}"
+        );
+
+        // Commit the work → tree clean in scope → finish succeeds.
+        git(dir.path(), &["add", "src/work.rs"]);
+        git(dir.path(), &["commit", "-qm", "work"]);
+        let event = app.finish_task("ilk").unwrap();
+        assert_eq!(event.event_type, "task_completed");
+    }
+
+    // ── M6: merge-candidate ──
+
+    /// git repo + initial commit (tracked src/lib.rs and docs/readme.md), then
+    /// a started task with an isolated worktree. Returns (app, worktree_path).
+    fn setup_worktree(dir: &Path, id: &str, write_allow: &[&str]) -> (ControlApp, PathBuf) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("docs/readme.md"), "x\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-qm", "init"]);
+
+        let app = ControlApp::init(dir).unwrap();
+        let scope: Vec<String> = write_allow.iter().map(|s| s.to_string()).collect();
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "merge candidate",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.workspace_create(id).unwrap();
+        let wt = dir.join(".ctl/tasks").join(id).join("worktree");
+        (app, wt)
+    }
+
+    #[test]
+    fn merge_candidate_in_scope_is_mergeable() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        // Modify a tracked, in-scope file in the worktree.
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], true, "verdict: {v}");
+        assert!(v["blocking_reasons"].as_array().unwrap().is_empty());
+        assert!(v["touched_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_out_of_scope_blocks() {
+        let dir = TempDir::new();
+        // Task scope is only src/, but the worktree also edits docs/readme.md.
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("docs/readme.md"), "edited\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["out_of_scope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "docs/readme.md"));
+    }
+
+    #[test]
+    fn merge_candidate_cross_task_conflict_blocks() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+
+        // Another active task claims the same file → cross-task collision.
+        let other_scope = vec!["src/lib.rs".to_string()];
+        app.create_task(
+            "other",
+            CreateTaskInput {
+                objective: "rival",
+                read_scope: &other_scope,
+                write_allow: &other_scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("other").unwrap();
+        app.start_task("other").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        let conflicts = v["cross_task_conflicts"].as_array().unwrap();
+        assert!(conflicts
+            .iter()
+            .any(|c| c["conflicting_task"] == "other" && c["path"] == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_dirty_main_workspace_blocks() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+        // The main workspace has its own uncommitted edit to the same file.
+        std::fs::write(dir.path().join("src/lib.rs"), "fn a() { /* main */ }\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["workspace_conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_emits_no_events() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+        let before = app.store.read_for_task("mc").unwrap().len();
+        app.merge_candidate("mc").unwrap();
+        assert_eq!(
+            app.store.read_for_task("mc").unwrap().len(),
+            before,
+            "merge_candidate must be read-only"
+        );
+    }
+
+    fn create_planning(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "board test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn board_aggregates_tasks_by_phase_and_activity() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // "a" → in_progress (active); "b" → stays planning (not active).
+        create_planning(&app, "a");
+        app.mark_ready("a").unwrap();
+        app.start_task("a").unwrap();
+        create_planning(&app, "b");
+
+        let board = app.generate_board().unwrap();
+        assert_eq!(board["totals"]["tasks"], 2);
+        assert_eq!(board["totals"]["active"], 1);
+        assert_eq!(board["totals"]["held"], 0);
+        assert_eq!(board["totals"]["needs_work"], 0);
+
+        let tasks = board["tasks"].as_array().unwrap();
+        let a = tasks.iter().find(|t| t["task_id"] == "a").unwrap();
+        assert_eq!(a["phase"], "in_progress");
+        assert_eq!(a["active"], true);
+        assert_eq!(a["review"], "none");
+        let b = tasks.iter().find(|t| t["task_id"] == "b").unwrap();
+        assert_eq!(b["active"], false);
+    }
+
+    #[test]
+    fn reconcile_projects_deterministic_control_json() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_planning(&app, "a");
+        create_planning(&app, "b");
+
+        app.reconcile().unwrap();
+        let path = dir.path().join(".ctl/control.json");
+        assert!(path.exists(), "reconcile must project control.json");
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        app.reconcile().unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            first, second,
+            "control.json must be byte-identical on replay"
+        );
+    }
+
+    /// Create + ready + start a simple in-scope task (no review).
+    fn start_simple(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "m5 test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+    }
+
+    fn event_count(app: &ControlApp, id: &str) -> usize {
+        app.store.read_for_task(id).unwrap().len()
+    }
+
+    #[test]
+    fn telemetry_add_writes_index_and_feeds_drift() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+
+        // Clean task → no drift.
+        assert_eq!(app.compute_drift("t").unwrap().score, 0);
+
+        let before = event_count(&app, "t");
+        app.telemetry_add("t", "test_failures", 2, "human").unwrap();
+        app.telemetry_add("t", "retries", 4, "human").unwrap();
+        assert!(dir.path().join(".ctl/telemetry.jsonl").exists());
+
+        // Telemetry is evidence, NOT a canonical event — the ledger is unchanged.
+        assert_eq!(
+            event_count(&app, "t"),
+            before,
+            "telemetry must not append events"
+        );
+
+        // 15 (test_failures) + 15 (retries>=3) = 30 = medium.
+        let report = app.compute_drift("t").unwrap();
+        assert_eq!(report.score, 30);
+        assert_eq!(report.level.as_str(), "medium");
+        assert_eq!(report.fired_ids(), vec!["DRIFT-004", "DRIFT-006"]);
+    }
+
+    #[test]
+    fn telemetry_add_dry_run_writes_nothing() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        let dry = ControlApp::open(&app.project_root, true).unwrap();
+        dry.telemetry_add("t", "test_failures", 1, "human").unwrap();
+        assert!(!dir.path().join(".ctl/telemetry.jsonl").exists());
+    }
+
+    #[test]
+    fn unknown_signal_makes_next_action_ask_and_emits_no_events() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        app.telemetry_add("t", "mystery_signal", 1, "human")
+            .unwrap();
+        let before = event_count(&app, "t");
+        let proposal = app.next_action("t").unwrap();
+        assert_eq!(proposal.action.as_str(), "ask");
+        assert_eq!(
+            event_count(&app, "t"),
+            before,
+            "next_action must be read-only"
+        );
+    }
+
+    #[test]
+    fn next_action_replan_only_proposes() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        // Three telemetry signals → high drift, no out-of-scope signal → replan.
+        app.telemetry_add("t", "test_failures", 1, "human").unwrap(); // 15
+        app.telemetry_add("t", "retries", 3, "human").unwrap(); // 15
+                                                                // gate failing (20) pushes to 50 = high.
+        app.record_gate("t", "cargo_check", false, "boom").unwrap();
+        let before = event_count(&app, "t");
+        let proposal = app.next_action("t").unwrap();
+        assert_eq!(proposal.action.as_str(), "replan");
+        assert!(proposal.structured_proposal.is_some());
+        // The proposal is advisory: no scope change, no new events.
+        assert_eq!(event_count(&app, "t"), before);
+    }
+
+    #[test]
+    fn reconcile_with_telemetry_is_byte_identical() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        app.telemetry_add("t", "test_failures", 2, "human").unwrap();
+        app.telemetry_add("t", "unexpected_writes", 1, "human")
+            .unwrap();
+
+        app.reconcile().unwrap();
+        let path = dir.path().join(".ctl/control.json");
+        let first = std::fs::read_to_string(&path).unwrap();
+        // Drift fields are present in the projection.
+        assert!(first.contains("drift_level"));
+        assert!(first.contains("recommended_action"));
+
+        app.reconcile().unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            first, second,
+            "control.json with telemetry must be byte-identical on replay"
+        );
+    }
+
+    #[test]
+    fn finish_skips_interlock_outside_git_repo() {
+        // Non-git temp dir: tree is unverifiable, so the interlock is skipped
+        // and finish falls through to its other checks (here: succeeds).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review(&app, "nogit");
+        std::fs::write(dir.path().join("src/work.rs"), "fn w() {}\n").unwrap();
+        let event = app.finish_task("nogit").unwrap();
+        assert_eq!(event.event_type, "task_completed");
     }
 
     #[test]

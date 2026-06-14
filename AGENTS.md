@@ -36,12 +36,14 @@ adapters/manual → application DTO
 
 ```
 events.jsonl   = append-only canonical truth (per task, under .ctl/tasks/<id>/)
+telemetry.jsonl = append-only evidence index (cross-task, .ctl/; M5)
 task.json      = replay projection (delete and rebuild, never hand-edit)
-control.json   = reconcile projection (M5+)
+control.json   = reconcile projection — per-task board + M5 drift/next-action decision
 ```
 
 - External actors (agents, adapters, humans) CANNOT append canonical events directly.
-- Telemetry, agent output, and human backfill are **evidence**, not state.
+- Telemetry, agent output, and human backfill are **evidence**, not state. M5 drift
+  rules read telemetry as a signal; an unknown signal fails closed (never relaxes scope).
 
 ## Milestone Gate
 

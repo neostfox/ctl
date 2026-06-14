@@ -119,6 +119,51 @@ pub fn cleanup_worktree(project_root: &Path, worktree_path: &Path) -> Result<()>
     Ok(())
 }
 
+/// Scoped working-tree cleanliness check (M-g commit interlock).
+///
+/// Runs `git status --porcelain` limited to `scope` pathspecs and returns the
+/// dirty paths (tracked-modified, staged, or untracked) within that scope.
+/// `.ctl/` is gitignored, so runtime ledger churn is excluded automatically;
+/// scoping additionally narrows the check to the task's `write_allow`.
+///
+/// Returns `Ok(None)` when the project is not a git repository or `git` is
+/// unavailable — the caller decides whether an unverifiable tree is fatal.
+/// `Ok(Some(vec))` with an empty vec means the scope is clean.
+pub fn dirty_paths_in_scope(project_root: &Path, scope: &[String]) -> Result<Option<Vec<String>>> {
+    let mut args: Vec<String> = vec!["status".into(), "--porcelain".into()];
+    if !scope.is_empty() {
+        args.push("--".into());
+        args.extend(scope.iter().cloned());
+    }
+
+    let output = match std::process::Command::new("git")
+        .args(&args)
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(None), // git binary unavailable — unverifiable
+    };
+
+    if !output.status.success() {
+        // Typically exit 128 = not a git repository. Treat as unverifiable
+        // rather than fabricating a clean/dirty verdict.
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut dirty = Vec::new();
+    for line in stdout.lines() {
+        // Porcelain v1 lines are "XY <path>" (renames: "XY <old> -> <new>").
+        // Skip the two status chars + separating space to recover the path(s).
+        let path = line.get(3..).unwrap_or("").trim();
+        if !path.is_empty() {
+            dirty.push(path.to_string());
+        }
+    }
+    Ok(Some(dirty))
+}
+
 /// Detect high-risk changes from a diff.
 /// Returns a list of (risk_type, file_path) pairs.
 pub fn detect_high_risk(files: &[(String, String)]) -> Vec<(String, String)> {
@@ -149,4 +194,102 @@ pub fn detect_high_risk(files: &[(String, String)]) -> Vec<(String, String)> {
         }
     }
     risks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TmpDir {
+        path: PathBuf,
+    }
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            // Avoid Date/rand (banned in some contexts); a process+counter tag
+            // is unique enough for serial test runs.
+            let path =
+                std::env::temp_dir().join(format!("ctl-wt-test-{}-{}", std::process::id(), tag));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            Self { path }
+        }
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {:?} failed", args);
+    }
+
+    fn git_init(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+    }
+
+    #[test]
+    fn dirty_paths_none_outside_git_repo() {
+        let d = TmpDir::new("nogit");
+        let res = dirty_paths_in_scope(d.path(), &["src".to_string()]).unwrap();
+        assert!(res.is_none(), "non-git dir is unverifiable → None");
+    }
+
+    #[test]
+    fn dirty_paths_clean_committed_tree() {
+        let d = TmpDir::new("clean");
+        git_init(d.path());
+        std::fs::write(d.path.join("src/lib.rs").as_path(), "fn a() {}\n").unwrap();
+        git(d.path(), &["add", "-A"]);
+        git(d.path(), &["commit", "-qm", "init"]);
+        let res = dirty_paths_in_scope(d.path(), &["src".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(res.is_empty(), "committed tree is clean: {:?}", res);
+    }
+
+    #[test]
+    fn dirty_paths_detects_untracked_in_scope() {
+        let d = TmpDir::new("untracked");
+        git_init(d.path());
+        // Commit a file first so src/ is tracked; otherwise git collapses the
+        // whole untracked directory to "src/" in porcelain output.
+        std::fs::write(d.path.join("src/lib.rs").as_path(), "fn a() {}\n").unwrap();
+        git(d.path(), &["add", "-A"]);
+        git(d.path(), &["commit", "-qm", "init"]);
+        std::fs::write(d.path.join("src/new.rs").as_path(), "x\n").unwrap();
+        let res = dirty_paths_in_scope(d.path(), &["src".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(res, vec!["src/new.rs".to_string()]);
+    }
+
+    #[test]
+    fn dirty_paths_ignores_changes_outside_scope() {
+        let d = TmpDir::new("outscope");
+        git_init(d.path());
+        std::fs::create_dir_all(d.path.join("docs")).unwrap();
+        std::fs::write(d.path.join("docs/x.md").as_path(), "x\n").unwrap();
+        // Dirty file lives in docs/, but we only scope src/.
+        let res = dirty_paths_in_scope(d.path(), &["src".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(
+            res.is_empty(),
+            "out-of-scope dirt must not count: {:?}",
+            res
+        );
+    }
 }

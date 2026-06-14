@@ -186,6 +186,11 @@
                 "type": "array",
                 "items": { "type": "string" },
                 "minItems": 1
+              },
+              "depends_on": {
+                "description": "Task IDs that must complete before this task can run (declared dependency edges, M-d). Optional; absent means no dependencies.",
+                "type": "array",
+                "items": { "type": "string" }
               }
             },
             "additionalProperties": false
@@ -245,6 +250,11 @@
                 "type": "array",
                 "items": { "type": "string" },
                 "minItems": 1
+              },
+              "depends_on": {
+                "description": "Task IDs that must complete before this task can run (declared dependency edges, M-d). Optional; absent means no dependencies.",
+                "type": "array",
+                "items": { "type": "string" }
               }
             },
             "additionalProperties": false

@@ -1117,6 +1117,7 @@ mod tests {
     ];
     const BASELINE_FIXTURE_FILES: &[&str] = &[
         "invalid.json",
+        "m5_drift_golden.json",
         "reducer_boundary_violation.jsonl",
         "reducer_hold.jsonl",
         "reducer_lifecycle.jsonl",

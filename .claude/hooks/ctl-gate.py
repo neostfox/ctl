@@ -8,6 +8,7 @@ unavailable: an unenforceable boundary must never silently allow writes.
 Registered in .claude/settings.json for matcher "Write|Edit|MultiEdit|Bash".
 """
 import json
+import os
 import subprocess
 import sys
 
@@ -46,6 +47,13 @@ def main() -> None:
         args += ["--tool", "bash", "--command", ti.get("command", "")]
     else:
         allow()  # not a gated tool
+
+    # M-e: forward the dispatch binding so the gate governs this call by the
+    # task that dispatched it (resolves multi-active ambiguity). ctl also reads
+    # CTL_TASK_ID from its own env, so this is the explicit, audited seam.
+    task = os.environ.get("CTL_TASK_ID", "").strip()
+    if task:
+        args += ["--task", task]
 
     try:
         out = subprocess.run(

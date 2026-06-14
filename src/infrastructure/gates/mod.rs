@@ -123,6 +123,20 @@ pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
 /// env vars (LIB, INCLUDE, SystemRoot, APPDATA, PATHEXT, etc.) that are
 /// difficult to enumerate completely.
 fn build_allowed_env() -> HashMap<String, String> {
+    filter_allowed_env(std::env::vars())
+}
+
+/// Strip network/proxy/token vars (EXEC-002/003) from an environment iterator.
+///
+/// Pure over its input so it can be unit-tested with a synthetic environment —
+/// the test must NOT mutate the real process env (`std::env::set_var`), which is
+/// not thread-safe and data-races every parallel test reading `std::env::vars`
+/// (each gate-spawning test calls `build_allowed_env`), sporadically aborting
+/// the whole test binary.
+fn filter_allowed_env<I>(vars: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
     /// Network-related env var prefixes whose presence could bypass EXEC-003.
     const BLOCKED_PREFIXES: &[&str] = &[
         "HTTP_PROXY",
@@ -146,7 +160,7 @@ fn build_allowed_env() -> HashMap<String, String> {
         "SSH_AUTH_SOCK",
     ];
 
-    std::env::vars()
+    vars.into_iter()
         .filter(|(key, _)| {
             !BLOCKED_PREFIXES
                 .iter()
@@ -238,16 +252,35 @@ mod tests {
 
     #[test]
     fn test_build_allowed_env_blocks_proxy_vars() {
-        // Temporarily set a proxy var to verify it's blocked
-        let proxy_key = "HTTPS_PROXY";
-        let had_prev = std::env::var(proxy_key).ok();
-        std::env::set_var(proxy_key, "http://evil.proxy:1234");
-        let env = build_allowed_env();
-        assert!(!env.contains_key(proxy_key), "proxy vars must be blocked");
-        // Restore
-        match had_prev {
-            Some(v) => std::env::set_var(proxy_key, v),
-            None => std::env::remove_var(proxy_key),
-        }
+        // Filter a SYNTHETIC environment — never mutate the real process env
+        // (set_var is not thread-safe and would data-race parallel tests).
+        let synthetic = [
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://evil.proxy:1234".to_string(),
+            ),
+            ("GITHUB_TOKEN".to_string(), "ghp_secret".to_string()),
+            ("CARGO_REGISTRY_HTTP_TIMEOUT".to_string(), "5".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("CARGO_HOME".to_string(), "/home/u/.cargo".to_string()),
+        ];
+        let env = filter_allowed_env(synthetic);
+        assert!(
+            !env.contains_key("HTTPS_PROXY"),
+            "proxy vars must be blocked"
+        );
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "token vars must be blocked"
+        );
+        assert!(
+            !env.contains_key("CARGO_REGISTRY_HTTP_TIMEOUT"),
+            "CARGO_REGISTRY_HTTP_* must be blocked"
+        );
+        assert!(env.contains_key("PATH"), "benign vars must pass through");
+        assert!(
+            env.contains_key("CARGO_HOME"),
+            "CARGO_HOME must NOT be caught by the CARGO_REGISTRY_HTTP_ prefix"
+        );
     }
 }
