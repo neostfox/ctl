@@ -24,6 +24,21 @@ pub struct ControlApp {
     store: FileEventStore,
     validator: Option<SchemaValidator>,
     dry_run: bool,
+    /// Identity stamped on every event this instance appends (M6). Defaults to
+    /// `"human"`; set from the `CTL_ACTOR` env var so a reviewer sub-agent and
+    /// the implementer act under distinct identities. Read by the reviewer ≠
+    /// implementer interlock.
+    actor: String,
+}
+
+/// Resolve the acting identity from the environment (M6). Blank/unset → the
+/// unattributed default `"human"`.
+fn actor_from_env() -> String {
+    std::env::var("CTL_ACTOR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "human".to_string())
 }
 
 pub struct CreateTaskInput<'a> {
@@ -56,6 +71,7 @@ impl ControlApp {
             store,
             validator,
             dry_run: false,
+            actor: actor_from_env(),
         })
     }
 
@@ -67,7 +83,16 @@ impl ControlApp {
             store,
             validator,
             dry_run,
+            actor: actor_from_env(),
         })
+    }
+
+    /// Override the acting identity (M6). Used where the actor is known
+    /// explicitly rather than via `CTL_ACTOR` — e.g. tests separating an
+    /// implementer from a reviewer.
+    pub fn with_actor(mut self, actor: &str) -> Self {
+        self.actor = actor.to_string();
+        self
     }
 
     // ── Commands ──
@@ -380,16 +405,43 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// The actors who performed implementation work on a task (M6). The reviewer
+    /// who records a passing completion audit must not be one of them. Implementer
+    /// signals: who `task_started` the task, and who produced non-audit work
+    /// evidence (`evidence_accepted` with a `source` other than the completion
+    /// audit, i.e. adapter/manual output).
+    fn implementer_actors(events: &[Event]) -> HashSet<String> {
+        let mut actors = HashSet::new();
+        for e in events {
+            match e.event_type.as_str() {
+                "task_started" => {
+                    actors.insert(e.actor.clone());
+                }
+                "evidence_accepted" => {
+                    let source = e.payload.get("source").and_then(|v| v.as_str());
+                    if source != Some(COMPLETION_AUDIT_SOURCE) {
+                        actors.insert(e.actor.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        actors
+    }
+
     /// M-f: record a reviewer's completion-audit verdict on a submitted task.
     ///
     /// A PASS is the hard prerequisite the finish interlock requires; a FAIL
     /// blocks completion until the work is reworked and re-audited. Modeled on
     /// the existing evidence events with a distinguished `source`
     /// ([`COMPLETION_AUDIT_SOURCE`]) so it needs no canonical-schema change; the
-    /// reviewer identity is carried by the event `actor`. Recorded only in
-    /// Review — the post-submit audit window. Note: this enforces *that* a fresh
-    /// audit exists, not *who* ran it; binding the reviewer to a non-implementer
-    /// lease is a follow-up (aligns with M-e / capability leases).
+    /// reviewer identity is the event `actor` (M6 — set via `CTL_ACTOR`).
+    /// Recorded only in Review — the post-submit audit window.
+    ///
+    /// M6 reviewer-lease binding: a PASS may **not** be recorded by an
+    /// implementer of the task (no self-approval). A FAIL is always allowed —
+    /// an implementer self-flagging a problem is healthy; only self-certifying
+    /// completion is the threat.
     pub fn record_completion_audit(
         &self,
         task_id: &str,
@@ -401,6 +453,15 @@ impl ControlApp {
             return Err(anyhow!(
                 "Completion audit can only be recorded in Review (task is {:?}); submit the task first",
                 state.phase
+            ));
+        }
+        let events = self.store.read_for_task(task_id)?;
+        if pass && Self::implementer_actors(&events).contains(&self.actor) {
+            return Err(anyhow!(
+                "Reviewer-lease binding: actor '{}' implemented this task and cannot record its own \
+                 passing completion audit. A different reviewer must accept it (set CTL_ACTOR to the \
+                 reviewer's identity).",
+                self.actor
             ));
         }
         let evidence_id = generate_uuid();
@@ -1062,7 +1123,7 @@ impl ControlApp {
             task_id: task_id.to_string(),
             seq,
             occurred_at: now_iso8601(),
-            actor: "human".to_string(),
+            actor: self.actor.clone(),
             event_type: event_type.to_string(),
             payload,
         })
@@ -2204,10 +2265,22 @@ mod tests {
         app.record_gate(id, "cargo_check", true, "ok").unwrap();
     }
 
+    /// Record a passing completion audit as a non-implementer reviewer (M6):
+    /// the implementer (`task_started` actor) is the default "human", so the
+    /// reviewer acts under a distinct identity.
+    fn audit_pass(app: &ControlApp, id: &str, note: Option<&str>) {
+        ControlApp::open(&app.project_root, false)
+            .unwrap()
+            .with_actor("reviewer")
+            .record_completion_audit(id, true, note)
+            .unwrap();
+    }
+
     fn drive_to_review(app: &ControlApp, id: &str) {
         drive_to_review_bare(app, id);
-        // M-f: a fresh passing completion audit is now a finish prerequisite.
-        app.record_completion_audit(id, true, None).unwrap();
+        // M-f: a fresh passing completion audit is now a finish prerequisite;
+        // M6: it must come from a non-implementer reviewer.
+        audit_pass(app, id, None);
     }
 
     #[test]
@@ -2228,8 +2301,7 @@ mod tests {
         let dir = TempDir::new();
         let app = ControlApp::init(dir.path()).unwrap();
         drive_to_review_bare(&app, "audited");
-        app.record_completion_audit("audited", true, Some("looks good"))
-            .unwrap();
+        audit_pass(&app, "audited", Some("looks good"));
         let event = app.finish_task("audited").unwrap();
         assert_eq!(event.event_type, "task_completed");
     }
@@ -2255,7 +2327,7 @@ mod tests {
         let dir = TempDir::new();
         let app = ControlApp::init(dir.path()).unwrap();
         drive_to_review_bare(&app, "rework");
-        app.record_completion_audit("rework", true, None).unwrap();
+        audit_pass(&app, "rework", None);
         // Rework: back to in_progress, then re-submit. The earlier audit is now
         // before the latest submit and no longer counts.
         app.reopen_task("rework").unwrap();
@@ -2268,7 +2340,7 @@ mod tests {
             "stale pre-rework audit must not satisfy finish, got: {err}"
         );
         // A fresh audit after the new submit unblocks it.
-        app.record_completion_audit("rework", true, None).unwrap();
+        audit_pass(&app, "rework", None);
         assert_eq!(
             app.finish_task("rework").unwrap().event_type,
             "task_completed"
@@ -2305,6 +2377,65 @@ mod tests {
             err.contains("only be recorded in Review"),
             "expected phase guard, got: {err}"
         );
+    }
+
+    #[test]
+    fn implementer_cannot_self_approve_completion_audit() {
+        // M6: the actor who started/implemented the task may not record its own
+        // passing audit. `app` (default actor "human") started the task.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "selfapp");
+        let err = app
+            .record_completion_audit("selfapp", true, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Reviewer-lease binding") && err.contains("human"),
+            "implementer self-approval must be blocked, got: {err}"
+        );
+        // A distinct reviewer can accept it.
+        audit_pass(&app, "selfapp", None);
+        assert_eq!(
+            app.finish_task("selfapp").unwrap().event_type,
+            "task_completed"
+        );
+    }
+
+    #[test]
+    fn implementer_may_self_reject_completion_audit() {
+        // A FAIL from the implementer (self-flagging a problem) is allowed —
+        // only self-approval is the threat.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "selfrej");
+        let ev = app
+            .record_completion_audit("selfrej", false, Some("found a bug myself"))
+            .unwrap();
+        assert_eq!(ev.event_type, "evidence_rejected");
+    }
+
+    #[test]
+    fn event_actor_comes_from_with_actor_override() {
+        // M6 foundation: events are stamped with the instance actor, not a
+        // hardcoded "human".
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap().with_actor("agent-7");
+        let ev = app
+            .create_task(
+                "act",
+                CreateTaskInput {
+                    objective: "x",
+                    read_scope: &["src".to_string()],
+                    write_allow: &["src".to_string()],
+                    write_deny: &[],
+                    risk_triggers: &[],
+                    gates: &["cargo_check".to_string()],
+                    depends_on: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(ev.actor, "agent-7");
     }
 
     #[test]

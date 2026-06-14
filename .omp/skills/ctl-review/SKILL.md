@@ -62,9 +62,10 @@ control-guard spawns you as `explore` (read-only). The dispatch prompt injects t
 task path and behavioral constraints (closure discipline, no speculation, exhaust the diff
 before concluding). Honor them. Your final message **is** the verdict — return it in the
 `review-contract.md` format. You cannot write, so the dispatcher records your verdict on the
-ledger via `ctl review accept|reject` (mode B is a **hard** finish prerequisite — M-f). Make
-the verdict unambiguous: a clear `pass`/`fail` and a one-line summary the dispatcher can pass
-as `--note`.
+ledger via `ctl review accept|reject` **under a reviewer `CTL_ACTOR` distinct from the
+implementer** (mode B is a **hard** finish prerequisite, and M6 refuses an implementer's
+self-approval). Make the verdict unambiguous: a clear `pass`/`fail` and a one-line summary
+the dispatcher can pass as `--note`.
 
 ## Anti-patterns
 
