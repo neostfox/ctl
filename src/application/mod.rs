@@ -9,9 +9,12 @@ use crate::adapters::omp::OmpAdapter;
 use crate::adapters::ExecutorAdapter;
 use crate::domain::event::Event;
 use crate::domain::lease::LeaseStatus;
+use crate::domain::run::{apply_run, AgentRunState, RunPhase};
 use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
+use crate::infrastructure::store::run_store::RunEventStore;
 use crate::infrastructure::store::FileEventStore;
+use std::collections::BTreeSet;
 
 /// Evidence `source` that marks a reviewer's dedicated completion audit (M-f),
 /// distinct from implementer/adapter output evidence. The finish interlock
@@ -1952,6 +1955,262 @@ impl ControlApp {
         Ok(())
     }
 
+    // ── M6: AgentRun aggregate concurrency (slice 1) ──
+    //
+    // The M4 `run_start` path above is the single-executor flow (one
+    // task-embedded `active_run`). These methods activate the independent
+    // `AgentRun` aggregate under `.ctl/runs/<run_id>/` so that multiple
+    // non-overlapping tasks can have concurrent runs, with a per-run scoped
+    // lease whose write scope must be disjoint from every other active run.
+    // No executor is ever spawned here — OMP drives execution off the prepared
+    // manifest and results are ingested through the existing path.
+
+    /// Lazily open the run-aggregate event store (`.ctl/runs/`). `init` only
+    /// ensures the directory exists, so this is cheap and idempotent.
+    fn run_store(&self) -> Result<RunEventStore> {
+        RunEventStore::init(&self.project_root)
+    }
+
+    /// Replay a single AgentRun aggregate from `.ctl/runs/<run_id>/`.
+    pub fn replay_run(&self, run_id: &str) -> Result<AgentRunState> {
+        let store = self.run_store()?;
+        let events = store.read_for_run(run_id)?;
+        if events.is_empty() {
+            return Err(anyhow!("Run '{}' not found", run_id));
+        }
+        let mut state = AgentRunState::new(run_id);
+        for event in &events {
+            apply_run(&mut state, event)
+                .map_err(|e| anyhow!("Run reducer error at seq {}: {}", event.seq, e))?;
+        }
+        Ok(state)
+    }
+
+    /// Every run aggregate currently in the `Running` phase — the live
+    /// concurrency set used for cross-run scoped-lease overlap rejection.
+    pub fn active_runs(&self) -> Result<Vec<AgentRunState>> {
+        let store = self.run_store()?;
+        let mut active = Vec::new();
+        for run_id in store.run_ids()? {
+            let state = self.replay_run(&run_id)?;
+            if state.phase == RunPhase::Running {
+                active.push(state);
+            }
+        }
+        Ok(active)
+    }
+
+    /// Build a run-scoped event. The run store keys directories on the event's
+    /// `task_id` field, so it carries the run_id (mirroring `RunEventStore`).
+    fn build_run_event(
+        &self,
+        run_id: &str,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<Event> {
+        let seq = self.run_store()?.next_seq_for_run(run_id)?;
+        Ok(Event {
+            schema: "control.event-envelope.v1".to_string(),
+            event_id: generate_uuid(),
+            command_id: generate_uuid(),
+            task_id: run_id.to_string(),
+            seq,
+            occurred_at: now_iso8601(),
+            actor: self.actor.clone(),
+            event_type: event_type.to_string(),
+            payload,
+        })
+    }
+
+    /// Dry-run the run reducer over the existing stream + new event, then
+    /// persist it and re-project `run.json`. The dry-run replay rejects illegal
+    /// transitions before any bytes are written.
+    ///
+    /// Run-aggregate events are governed by the `apply_run` reducer plus the
+    /// structural envelope check (`Event::is_valid`, enforced on read), NOT by
+    /// the task-oriented per-type payload conditionals in the envelope JSON
+    /// schema: there, `run_started` describes the M4 task-store run pointer
+    /// (`run_id`+`adapter`+`lease_id`), which deliberately differs from the M6
+    /// run-aggregate shape (`worktree_path`+`lease_id`). Validating run events
+    /// against the task conditionals would be a category error.
+    fn append_run_event(&self, run_id: &str, event: &Event) -> Result<()> {
+        let store = self.run_store()?;
+        let mut state = AgentRunState::new(run_id);
+        for prior in store.read_for_run(run_id)? {
+            apply_run(&mut state, &prior)
+                .map_err(|e| anyhow!("Run reducer error at seq {}: {}", prior.seq, e))?;
+        }
+        apply_run(&mut state, event).map_err(|e| anyhow!("Run reducer rejected: {}", e))?;
+        if self.dry_run {
+            return Ok(());
+        }
+        store.append(event)?;
+        store.write_run_view(run_id, &state)?;
+        Ok(())
+    }
+
+    /// Create a queued AgentRun for an InProgress task, returning the run_id.
+    /// The run inherits the task's write scope, deny list, and gates; the
+    /// adapter drives execution (only `omp` is supported in this slice).
+    pub fn create_run(&self, task_id: &str, adapter_name: &str) -> Result<String> {
+        let task = self.replay_task(task_id)?;
+        if task.phase != Phase::InProgress {
+            return Err(anyhow!(
+                "Can only create a run for an InProgress task '{}', current: {:?}",
+                task_id,
+                task.phase
+            ));
+        }
+        if task.write_allow.is_empty() {
+            return Err(anyhow!(
+                "Task '{}' has an empty write scope; concurrent runs are for write tasks",
+                task_id
+            ));
+        }
+        if adapter_name != "omp" {
+            return Err(anyhow!("Unknown adapter: {}", adapter_name));
+        }
+        let run_id = generate_uuid();
+        let payload = serde_json::json!({
+            "task_id": task_id,
+            "adapter": adapter_name,
+            "write_allow": task.write_allow.iter().collect::<Vec<_>>(),
+            "write_deny": task.write_deny.iter().collect::<Vec<_>>(),
+            "gates": task.gates.iter().collect::<Vec<_>>(),
+        });
+        let event = self.build_run_event(&run_id, "run_created", payload)?;
+        self.append_run_event(&run_id, &event)?;
+        Ok(run_id)
+    }
+
+    /// M6 core invariant: a starting run's write scope must be disjoint from
+    /// every *other* currently-Running run. Returns `Err` naming the first
+    /// conflicting run and the overlapping paths. Fails closed.
+    fn check_run_scope_overlap(&self, run_id: &str, write_allow: &BTreeSet<String>) -> Result<()> {
+        for other in self.active_runs()? {
+            if other.run_id == run_id {
+                continue;
+            }
+            let overlap = crate::application::schedule::detect_write_scope_overlap(
+                write_allow,
+                &other.write_allow,
+            );
+            if !overlap.is_empty() {
+                return Err(anyhow!(
+                    "Run scope conflict: run '{}' (task '{}') is already running with overlapping write scope {:?}. Concurrent runs must have disjoint write scopes.",
+                    other.run_id,
+                    other.task_id,
+                    overlap
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Start a queued run: enforce the disjoint-scope invariant, create a
+    /// per-run isolated worktree, prepare the OMP manifest (no spawn), and
+    /// record `run_started`. The overlap check runs *before* any side effect,
+    /// so a rejected start leaves no worktree or events behind.
+    pub fn start_run(&self, run_id: &str) -> Result<Event> {
+        let run = self.replay_run(run_id)?;
+        if run.phase != RunPhase::Queued {
+            return Err(anyhow!(
+                "Can only start a run from Queued, current: {:?}",
+                run.phase
+            ));
+        }
+        self.check_run_scope_overlap(run_id, &run.write_allow)?;
+
+        let adapter: Box<dyn ExecutorAdapter> = match run.adapter.as_str() {
+            "omp" => Box::new(OmpAdapter),
+            other => return Err(anyhow!("Unknown adapter: {}", other)),
+        };
+        let lease_id = generate_uuid();
+        let worktree_path =
+            crate::infrastructure::workspace::run_worktree_path(&self.project_root, run_id);
+        let write_allow: Vec<String> = run.write_allow.iter().cloned().collect();
+        let write_deny: Vec<String> = run.write_deny.iter().cloned().collect();
+        let gates: Vec<String> = run.gates.iter().cloned().collect();
+
+        if !self.dry_run {
+            // Worktree-per-agent: create only after the overlap check passes.
+            crate::infrastructure::workspace::create_run_worktree(&self.project_root, run_id)?;
+            let manifest = adapter.prepare_run(
+                &run.task_id,
+                run_id,
+                &lease_id,
+                &worktree_path,
+                &write_allow,
+                &write_deny,
+                &gates,
+            )?;
+            let run_dir = self.run_store()?.run_dir(run_id);
+            std::fs::create_dir_all(&run_dir)?;
+            let manifest_path = run_dir.join("run-manifest.json");
+            let temp_path = run_dir.join("run-manifest.json.tmp");
+            std::fs::write(&temp_path, serde_json::to_string_pretty(&manifest)?)?;
+            std::fs::rename(&temp_path, &manifest_path)?;
+        }
+
+        let payload = serde_json::json!({
+            "worktree_path": worktree_path.to_string_lossy(),
+            "lease_id": lease_id,
+        });
+        let event = self.build_run_event(run_id, "run_started", payload)?;
+        self.append_run_event(run_id, &event)?;
+        Ok(event)
+    }
+
+    /// Finish a Running run (→ Completed), freeing its write scope so an
+    /// overlapping run may then start. Best-effort worktree cleanup.
+    pub fn finish_run(&self, run_id: &str) -> Result<Event> {
+        self.terminate_run(run_id, "run_finished", serde_json::json!({}))
+    }
+
+    /// Mark a run failed (→ Failed) with a reason. Frees its write scope.
+    pub fn fail_run(&self, run_id: &str, reason: &str) -> Result<Event> {
+        self.terminate_run(
+            run_id,
+            "run_failed",
+            serde_json::json!({ "reason": reason }),
+        )
+    }
+
+    /// Abort a non-terminal run (→ Aborted) with a reason. Frees its scope.
+    pub fn abort_run(&self, run_id: &str, reason: &str) -> Result<Event> {
+        self.terminate_run(
+            run_id,
+            "run_aborted",
+            serde_json::json!({ "reason": reason }),
+        )
+    }
+
+    /// Shared terminal transition: clean up the run's worktree (best-effort)
+    /// then record the terminal event. The run reducer enforces which source
+    /// phases each terminal type is legal from.
+    fn terminate_run(
+        &self,
+        run_id: &str,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<Event> {
+        let run = self.replay_run(run_id)?;
+        if !self.dry_run {
+            if let Some(ref wt) = run.worktree_path {
+                let wt_path = Path::new(wt);
+                if wt_path.exists() {
+                    let _ = crate::infrastructure::workspace::cleanup_worktree(
+                        &self.project_root,
+                        wt_path,
+                    );
+                }
+            }
+        }
+        let event = self.build_run_event(run_id, event_type, payload)?;
+        self.append_run_event(run_id, &event)?;
+        Ok(event)
+    }
+
     // ── M4: Helpers ──
 
     fn get_worktree_path(&self, task_id: &str) -> Result<PathBuf> {
@@ -3249,5 +3508,222 @@ mod tests {
         assert!(app.unmet_dependencies("solo").unwrap().is_empty());
         let event = app.start_task("solo").unwrap();
         assert_eq!(event.event_type, "task_started");
+    }
+
+    // ── M6: AgentRun aggregate concurrency (slice 1) ────────────────────────
+
+    /// Create + ready + start a write task so runs can be created against it.
+    fn inprogress_task(app: &ControlApp, id: &str, write_allow: &[&str]) {
+        let scope: Vec<String> = write_allow.iter().map(|s| s.to_string()).collect();
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "m6 concurrent run test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+    }
+
+    /// Seed a Running run aggregate directly via events (no git worktree), so
+    /// the overlap invariant can be exercised without a real repo. Returns the
+    /// run_id.
+    fn seed_running_run(app: &ControlApp, task_id: &str, write_allow: &[&str]) -> String {
+        let run_id = generate_uuid();
+        let wa: Vec<String> = write_allow.iter().map(|s| s.to_string()).collect();
+        let created = app
+            .build_run_event(
+                &run_id,
+                "run_created",
+                serde_json::json!({
+                    "task_id": task_id,
+                    "adapter": "omp",
+                    "write_allow": wa,
+                    "write_deny": [],
+                    "gates": ["cargo_check"],
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, &created).unwrap();
+        let started = app
+            .build_run_event(
+                &run_id,
+                "run_started",
+                serde_json::json!({
+                    "worktree_path": format!(".ctl/runs/{}/worktree", run_id),
+                    "lease_id": "lease-seed",
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, &started).unwrap();
+        run_id
+    }
+
+    #[test]
+    fn create_run_requires_in_progress_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            "planned",
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        // Still in Planning → no run may be created.
+        let err = app.create_run("planned", "omp").unwrap_err().to_string();
+        assert!(err.contains("InProgress"), "got: {err}");
+    }
+
+    #[test]
+    fn create_run_persists_queued_aggregate() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "t1", &["src"]);
+        let run_id = app.create_run("t1", "omp").unwrap();
+        assert!(dir
+            .path()
+            .join(".ctl/runs")
+            .join(&run_id)
+            .join("events.jsonl")
+            .exists());
+        let run = app.replay_run(&run_id).unwrap();
+        assert_eq!(run.phase, RunPhase::Queued);
+        assert_eq!(run.task_id, "t1");
+        assert!(run.write_allow.contains("src"));
+        // Queued is not yet part of the active concurrency set.
+        assert!(app.active_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn overlapping_run_start_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // A already Running on src (seeded, no git needed).
+        let a = seed_running_run(&app, "task-a", &["src"]);
+        assert_eq!(app.active_runs().unwrap().len(), 1);
+        // B is InProgress with an overlapping scope; its run start is refused
+        // BEFORE any worktree is created.
+        inprogress_task(&app, "task-b", &["src"]);
+        let b = app.create_run("task-b", "omp").unwrap();
+        let err = app.start_run(&b).unwrap_err().to_string();
+        assert!(err.contains("scope conflict"), "got: {err}");
+        assert!(err.contains(&a), "should name the conflicting run: {err}");
+        assert!(!dir
+            .path()
+            .join(".ctl/runs")
+            .join(&b)
+            .join("worktree")
+            .exists());
+        assert_eq!(app.replay_run(&b).unwrap().phase, RunPhase::Queued);
+    }
+
+    #[test]
+    fn finishing_run_frees_scope() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let a = seed_running_run(&app, "task-a", &["src"]);
+        let scope: BTreeSet<String> = ["src".to_string()].into_iter().collect();
+        // While A runs, an overlapping scope is blocked.
+        assert!(app.check_run_scope_overlap("other", &scope).is_err());
+        // Finish A (seeded worktree path doesn't exist → cleanup skipped, no git).
+        app.finish_run(&a).unwrap();
+        assert_eq!(app.replay_run(&a).unwrap().phase, RunPhase::Completed);
+        assert!(app.active_runs().unwrap().is_empty());
+        // Scope is free again.
+        assert!(app.check_run_scope_overlap("other", &scope).is_ok());
+    }
+
+    #[test]
+    fn disjoint_runs_run_concurrently() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_running_run(&app, "task-a", &["src"]);
+        seed_running_run(&app, "task-b", &["docs"]);
+        assert_eq!(app.active_runs().unwrap().len(), 2);
+        // A further disjoint scope is allowed; an overlapping one is not.
+        let disjoint: BTreeSet<String> = ["tests".to_string()].into_iter().collect();
+        assert!(app.check_run_scope_overlap("c", &disjoint).is_ok());
+        let overlap: BTreeSet<String> = ["src".to_string()].into_iter().collect();
+        assert!(app.check_run_scope_overlap("c", &overlap).is_err());
+    }
+
+    #[test]
+    fn run_replay_is_deterministic() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let a = seed_running_run(&app, "task-a", &["src"]);
+        let s1 = app.replay_run(&a).unwrap();
+        let s2 = app.replay_run(&a).unwrap();
+        assert_eq!(s1.phase, s2.phase);
+        assert_eq!(s1.write_allow, s2.write_allow);
+        assert_eq!(s1.last_seq, s2.last_seq);
+    }
+
+    #[test]
+    fn concurrent_runs_via_start_run_with_real_worktrees() {
+        let dir = TempDir::new();
+        // git repo + initial commit so `git worktree add HEAD` succeeds.
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("docs/readme.md"), "x\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-qm", "init"]);
+
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "task-src", &["src"]);
+        inprogress_task(&app, "task-docs", &["docs"]);
+
+        // Two disjoint runs both reach Running with real, distinct worktrees.
+        let r_src = app.create_run("task-src", "omp").unwrap();
+        app.start_run(&r_src).unwrap();
+        let r_docs = app.create_run("task-docs", "omp").unwrap();
+        app.start_run(&r_docs).unwrap();
+        assert_eq!(app.active_runs().unwrap().len(), 2);
+        assert!(dir
+            .path()
+            .join(".ctl/runs")
+            .join(&r_src)
+            .join("worktree")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".ctl/runs")
+            .join(&r_docs)
+            .join("run-manifest.json")
+            .exists());
+
+        // A third run overlapping task-src's scope is rejected.
+        inprogress_task(&app, "task-src2", &["src"]);
+        let r_src2 = app.create_run("task-src2", "omp").unwrap();
+        assert!(app
+            .start_run(&r_src2)
+            .unwrap_err()
+            .to_string()
+            .contains("scope conflict"));
+
+        // Finishing the src run frees the scope; the blocked run can then start.
+        app.finish_run(&r_src).unwrap();
+        app.start_run(&r_src2).unwrap();
+        assert_eq!(app.replay_run(&r_src2).unwrap().phase, RunPhase::Running);
     }
 }

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
 // Git worktree workspace management for isolated execution.
-/// Create a git worktree for a task.
+/// Create a git worktree for a task (M4 single-executor path).
 /// Returns the worktree path.
 pub fn create_worktree(project_root: &Path, task_id: &str) -> Result<PathBuf> {
     let worktree_path = project_root
@@ -10,7 +10,37 @@ pub fn create_worktree(project_root: &Path, task_id: &str) -> Result<PathBuf> {
         .join("tasks")
         .join(task_id)
         .join("worktree");
+    create_worktree_at(
+        project_root,
+        &worktree_path,
+        &format!("omp-run-{}", task_id),
+    )?;
+    Ok(worktree_path)
+}
 
+/// Path where a run's isolated worktree lives: `.ctl/runs/<run_id>/worktree`.
+/// (M6 worktree-per-agent — keyed by run_id so concurrent runs never collide.)
+pub fn run_worktree_path(project_root: &Path, run_id: &str) -> PathBuf {
+    project_root
+        .join(".ctl")
+        .join("runs")
+        .join(run_id)
+        .join("worktree")
+}
+
+/// Create a git worktree for an agent run (M6 worktree-per-agent). Each
+/// concurrent run gets its own worktree + branch, so writers never share a
+/// working tree even when running in parallel.
+pub fn create_run_worktree(project_root: &Path, run_id: &str) -> Result<PathBuf> {
+    let worktree_path = run_worktree_path(project_root, run_id);
+    create_worktree_at(project_root, &worktree_path, &format!("omp-run-{}", run_id))?;
+    Ok(worktree_path)
+}
+
+/// Shared worktree creation: make `worktree_path` a fresh `git worktree` on a
+/// new `branch_name` off HEAD. Cleans up the directory if `git worktree add`
+/// fails so a partial attempt never blocks a retry.
+fn create_worktree_at(project_root: &Path, worktree_path: &Path, branch_name: &str) -> Result<()> {
     if worktree_path.exists() {
         return Err(anyhow!(
             "Worktree already exists at {}",
@@ -19,17 +49,16 @@ pub fn create_worktree(project_root: &Path, task_id: &str) -> Result<PathBuf> {
     }
 
     // Create worktree directory
-    std::fs::create_dir_all(&worktree_path)?;
+    std::fs::create_dir_all(worktree_path)?;
 
     // Initialize as a git worktree via `git worktree add`
-    let branch_name = format!("omp-run-{}", task_id);
     let output = std::process::Command::new("git")
         .args([
             "worktree",
             "add",
             &worktree_path.to_string_lossy(),
             "-b",
-            &branch_name,
+            branch_name,
             "HEAD",
         ])
         .current_dir(project_root)
@@ -37,14 +66,14 @@ pub fn create_worktree(project_root: &Path, task_id: &str) -> Result<PathBuf> {
 
     if !output.status.success() {
         // Cleanup on failure
-        let _ = std::fs::remove_dir_all(&worktree_path);
+        let _ = std::fs::remove_dir_all(worktree_path);
         return Err(anyhow!(
             "git worktree add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
 
-    Ok(worktree_path)
+    Ok(())
 }
 
 /// Compute the diff between the worktree and HEAD.

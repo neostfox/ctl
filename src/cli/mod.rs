@@ -2596,15 +2596,15 @@ fn cmd_schedule_run(
     plan_id: &str,
     _poll_interval: u64,
     _timeout: u64,
-    _dry_run: bool,
+    dry_run: bool,
 ) -> Result<()> {
-    // M-c completes this stub up to the safety boundary: a plan is re-validated
-    // against live task state before anything runs, and an invalid plan is
-    // refused. Live concurrent supervision (worktree-per-agent, capability
-    // leases, file locking, crash recovery) is deferred to M6 by design — this
-    // command never spawns executors. It resolves and prints the safe execution
-    // order so groups can be run manually in the meantime.
-    let app = app_open(false)?;
+    // M6 slice 1: a validated plan's first parallel-safe group is activated as
+    // concurrent AgentRun aggregates — each task gets an isolated worktree, a
+    // scoped lease, and a prepared OMP manifest. This NEVER spawns an executor:
+    // OMP drives each run off its manifest and results are ingested separately.
+    // Later groups wait until the current group's runs complete (re-run this
+    // command). Crash recovery and merge-conflict recovery remain follow-ups.
+    let app = app_open(dry_run)?;
     let (plan, states) = load_plan_and_states(&app, plan_id)?;
 
     if let Err(errors) = crate::application::schedule::validate_plan(&plan, &states) {
@@ -2619,18 +2619,51 @@ fn cmd_schedule_run(
     }
 
     println!(
-        "Plan '{}' validated: {} group(s), max_concurrent={}. Execution order:",
+        "Plan '{}' validated: {} group(s), max_concurrent={}.",
         plan_id,
         plan.groups.len(),
         plan.max_concurrent
     );
-    for (i, group) in plan.groups.iter().enumerate() {
-        println!("  group {} (parallel-safe): {:?}", i, group.task_ids);
+
+    let Some(group) = plan.groups.first() else {
+        println!("Plan has no groups; nothing to run.");
+        return Ok(());
+    };
+
+    // Activating a group creates run aggregates + worktrees, which a dry-run
+    // must not do. Report the intended activation and stop before any writes.
+    if dry_run {
+        println!(
+            "[dry-run] Would activate group 0 (parallel-safe): {:?} — one OMP run + isolated worktree each, no executor spawned.",
+            group.task_ids
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Activating group 0 (parallel-safe, non-overlapping write scopes): {:?}",
+        group.task_ids
+    );
+    for task_id in &group.task_ids {
+        let run_id = app.create_run(task_id, "omp")?;
+        app.start_run(&run_id)
+            .map_err(|e| anyhow::anyhow!("schedule run aborted at task '{}': {}", task_id, e))?;
+        println!(
+            "  started run {} for task '{}' (worktree .ctl/runs/{}/worktree, manifest .ctl/runs/{}/run-manifest.json)",
+            run_id, task_id, run_id, run_id
+        );
+    }
+
+    if plan.groups.len() > 1 {
+        println!(
+            "\n{} later group(s) pending — re-run `ctl schedule run {}` once the current runs finish.",
+            plan.groups.len() - 1,
+            plan_id
+        );
     }
     println!(
-        "\nLive concurrent execution is deferred to M6 (worktree-per-agent, capability leases, \
-         file locking, crash recovery). Run the groups above sequentially for now; tasks within a \
-         group have non-overlapping write scopes."
+        "\nNo executor was spawned. Drive each run with OMP off its manifest, ingest the result, \
+         then `finish` the run to free its write scope."
     );
     Ok(())
 }
