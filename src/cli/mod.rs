@@ -110,6 +110,23 @@ enum Commands {
         #[command(subcommand)]
         command: ReviewCommands,
     },
+    /// Request a reviewed out-of-scope edit exception (M-f). Files a path-scoped
+    /// approval; once granted (after a ctl-review mode-A pass) the gate allows
+    /// writes to that one path outside the task's write_allow.
+    Apply {
+        /// Task identifier (the active in_progress task)
+        #[arg(long)]
+        id: String,
+        /// The out-of-scope path to request edit access to
+        #[arg(long)]
+        path: String,
+        /// Why the out-of-scope edit is needed
+        #[arg(long)]
+        reason: String,
+        /// TTL in seconds (default 86400)
+        #[arg(long, default_value_t = 86400)]
+        ttl: u64,
+    },
     /// Adapter capability queries (M4)
     Adapter {
         #[command(subcommand)]
@@ -573,6 +590,12 @@ pub fn run() -> Result<()> {
         Commands::Workspace { command } => cmd_workspace(command, dry_run),
         Commands::Approval { command } => cmd_approval(command, dry_run),
         Commands::Review { command } => cmd_review(command, dry_run),
+        Commands::Apply {
+            id,
+            path,
+            reason,
+            ttl,
+        } => cmd_apply(id, path, reason, *ttl, dry_run),
         Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
         Commands::Schedule { command } => cmd_schedule(command, dry_run),
@@ -1009,6 +1032,27 @@ fn cmd_workspace(command: &WorkspaceCommands, dry_run: bool) -> Result<()> {
             println!("Cleaned workspace for task '{}' at seq {}.", id, event.seq);
         }
     }
+    Ok(())
+}
+
+fn cmd_apply(id: &str, path: &str, reason: &str, ttl: u64, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
+    // Model the out-of-scope edit request as a path-scoped approval, so it rides
+    // the existing approval ledger/grant flow (schema-free). The grant — issued
+    // after a ctl-review mode-A pass — is the recorded reviewer verdict that
+    // opens this one path at the gate.
+    let scope = serde_json::json!({ "action": "apply", "path": path });
+    let event = app.approval_request(id, reason, scope, ttl)?;
+    let request_id = event
+        .payload
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    println!(
+        "Filed out-of-scope edit request for '{}' on task '{}' at seq {} (request {}).\n\
+         After a ctl-review (mode A) pass, grant it: ctl approval grant --id {} --request {}",
+        path, id, event.seq, request_id, id, request_id
+    );
     Ok(())
 }
 
@@ -1697,6 +1741,7 @@ fn check_milestone_scope() -> Result<()> {
         [
             "adapter",
             "agent-report",
+            "apply",
             "approval",
             "architecture",
             "assignment",
@@ -2574,6 +2619,11 @@ enum GovState {
         /// Actions authorized by granted approvals on this task (e.g. `deps`),
         /// read by the step-up gate. Derived from `pending_approvals`.
         approved_actions: Vec<String>,
+        /// M-f `ctl apply`: out-of-scope paths a reviewer has granted for this
+        /// task (granted approvals with `scope.action == "apply"`). A write
+        /// landing under one of these is allowed as a reviewed exception even
+        /// though it sits outside `write_allow`.
+        approved_apply_paths: Vec<String>,
     },
     /// A task is in review. The commit window opens here (M-g): `git commit`
     /// and `git push` are allowed in Review as well as Completed.
@@ -2600,6 +2650,8 @@ struct ActiveTask {
     write_allow: Vec<String>,
     is_held: bool,
     approved_actions: Vec<String>,
+    /// M-f `ctl apply`: granted out-of-scope edit paths for this task.
+    approved_apply_paths: Vec<String>,
 }
 
 /// Resolve the set of active `in_progress` tasks into a single governing state
@@ -2626,6 +2678,7 @@ fn resolve_active_governance(active: &[ActiveTask], bound_task: Option<&str>) ->
         write_allow: t.write_allow.clone(),
         is_held: t.is_held,
         approved_actions: t.approved_actions.clone(),
+        approved_apply_paths: t.approved_apply_paths.clone(),
     };
 
     // M-e: explicit dispatch binding to a specific active task wins outright.
@@ -2709,11 +2762,27 @@ fn compute_gov_state(project_root: &Path, bound_task: Option<&str>) -> Result<Go
                     .map(String::from)
             })
             .collect();
+        // M-f `ctl apply`: out-of-scope paths granted via approvals with
+        // scope.action == "apply".
+        let approved_apply_paths: Vec<String> = state
+            .pending_approvals
+            .values()
+            .filter(|a| a.is_granted())
+            .filter(|a| a.scope.get("action").and_then(|v| v.as_str()) == Some("apply"))
+            .filter_map(|a| {
+                a.scope
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            })
+            .collect();
         active.push(ActiveTask {
             task_id,
             write_allow: state.write_allow.iter().cloned().collect(),
             is_held,
             approved_actions,
+            approved_apply_paths,
         });
     }
 
@@ -2979,13 +3048,20 @@ fn cmd_hook_gate(
                 GovState::InProgress {
                     task_id,
                     write_allow,
+                    approved_apply_paths,
                     ..
                 } => {
                     let in_scope = path_in_scope(&project_root, target, write_allow);
-                    // M-c: even within our own write_allow, a write must not land
-                    // inside another *active* task's claimed scope. Checked only
-                    // when in_scope (an out-of-scope write is already denied).
-                    let conflict = if in_scope {
+                    // M-f `ctl apply`: a write outside write_allow is allowed when a
+                    // reviewer has granted this exact out-of-scope path (an audited
+                    // exception). M-c overlap still applies below.
+                    let applied =
+                        !in_scope && path_in_scope(&project_root, target, approved_apply_paths);
+                    let allowed_by_scope = in_scope || applied;
+                    // M-c: even within our own scope (or a granted apply), a write
+                    // must not land inside another *active* task's claimed scope.
+                    // Only checked when otherwise allowed (a denied write is moot).
+                    let conflict = if allowed_by_scope {
                         first_overlapping_active_task(&project_root, target, task_id)?
                     } else {
                         None
@@ -3001,11 +3077,19 @@ fn cmd_hook_gate(
                         })
                     } else {
                         serde_json::json!({
-                            "allowed": in_scope,
+                            "allowed": allowed_by_scope,
                             "state": "in_progress",
                             "task_id": task_id,
-                            "reason": if in_scope { "within write_allow" } else { "outside write_allow" },
-                            "remedy": if in_scope { "" } else { "widen scope via ctl task revise" }
+                            "reason": if in_scope {
+                                "within write_allow"
+                            } else if applied {
+                                "reviewed out-of-scope exception (ctl apply)"
+                            } else {
+                                "outside write_allow"
+                            },
+                            "remedy": if allowed_by_scope { "" } else {
+                                "request a reviewed exception: ctl apply --path <p> --reason <why>, then ctl approval grant; or widen scope via ctl task revise"
+                            }
                         })
                     };
                     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -3356,6 +3440,7 @@ mod tests {
             write_allow: paths.iter().map(|s| s.to_string()).collect(),
             is_held: held,
             approved_actions: Vec::new(),
+            approved_apply_paths: Vec::new(),
         }
     }
 
@@ -3456,6 +3541,21 @@ mod tests {
                 assert!(write_allow.is_empty());
             }
             other => panic!("expected InProgress(r), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approved_apply_paths_propagate_through_binding() {
+        // M-f ctl apply: the granted out-of-scope paths must survive the
+        // collect→resolve→bind step so the gate can honor the exception.
+        let mut t = at("a", &["src"], false);
+        t.approved_apply_paths = vec!["docs/x.md".to_string()];
+        match resolve_active_governance(&[t], None) {
+            Some(GovState::InProgress {
+                approved_apply_paths,
+                ..
+            }) => assert_eq!(approved_apply_paths, vec!["docs/x.md".to_string()]),
+            other => panic!("expected InProgress with apply paths, got {other:?}"),
         }
     }
 
