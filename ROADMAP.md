@@ -517,10 +517,26 @@ verdict→evidence 事件。
   分组并行安全的执行顺序。真正的并发监督(worktree-per-agent、capability lease、文件锁、崩溃恢复)
   按设计留给 M6,本命令永不 spawn 执行器。
 
-### M-d：跨任务依赖边
+### M-d：跨任务依赖边 ✅ 已实现
 
 **方向**：在调度现有的互斥分组之上增加「A 先于 B」的依赖关系（恢复 Trellis parent/child 的能力），
 依赖写入任务声明而非靠树位置隐含。
+
+**已落地**：
+- 任务声明、持久化——`task_created`/`task_revised` payload 新增**可选** `depends_on`(task ID 列表),
+  随 canonical 事件持久化;空依赖时不写该键,保持无依赖事件字节不变。**此 schema 改动属受保护
+  边界变更**(`schemas/` 被边界 normalizer 拒入 `write_allow`),由人类显式授权后施加,而非 agent 经
+  任务自助修改——符合"禁止 agent 改 canonical event"原则。reducer(`src/domain/task.rs`)用
+  `optional_string_set` 解析(缺省即空)。
+- 调度拓扑——`plan_schedule`(`src/application/schedule.rs`)在 M-c 写隔离分组之上叠加依赖:`B`
+  依赖 `A`(均在计划内)则 `B` 必落入比 `A` 更晚的组;按(依赖层级, id)贪心 earliest-fit 分配;无
+  依赖时退化为原互斥分组行为(既有测试不变)。计划外的依赖边视为已满足(忽略)。
+- 环检测——Kahn 算法,`plan_schedule` 对存在依赖环的计划返回 `Err` 并列出涉及任务;`ctl schedule
+  plan` 据此拒绝并非零退出。
+- 校验——`validate_plan` 增加依赖序检查:每个计划内前置必须在更早的组,否则 INVALID。
+- CLI/可观测——`ctl task create/quick/revise --depends-on` 声明;`ctl task status`(人类+`--json`)、
+  `ctl board --json` 与 `control.json` 均展示 `depends_on`(持久化的 `task.json` 投影受 task-view
+  schema 冻结,暂不改,故不含该字段)。
 
 ### M-e：子代理↔任务绑定
 

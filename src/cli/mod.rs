@@ -149,6 +149,9 @@ enum TaskCommands {
         /// Required gate template IDs; repeat for multiple entries
         #[arg(long = "gates", required = true)]
         gates: Vec<String>,
+        /// Task IDs that must complete before this one (M-d); repeat for multiple
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
     },
     /// Fuse create + ready + start into one command with sensible defaults.
     /// Keeps the write boundary explicit (`--write-allow` required) but removes
@@ -169,6 +172,9 @@ enum TaskCommands {
         /// Required gates (default: cargo_check, cargo_test); repeat for multiple
         #[arg(long = "gates")]
         gates: Vec<String>,
+        /// Task IDs that must complete before this one (M-d); repeat for multiple
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
     },
     /// Revise a Planning task boundary; omitted fields keep current values
     Revise {
@@ -193,6 +199,9 @@ enum TaskCommands {
         /// Replacement gate template IDs; repeat for multiple entries
         #[arg(long = "gates")]
         gates: Vec<String>,
+        /// Replacement dependency task IDs (M-d); repeat for multiple entries
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
     },
     /// Mark a Planning task ready
     Ready {
@@ -613,6 +622,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             write_deny,
             risk_triggers,
             gates,
+            depends_on,
         } => {
             let event = app.create_task(
                 id,
@@ -623,6 +633,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     write_deny,
                     risk_triggers,
                     gates,
+                    depends_on,
                 },
             )?;
             println!("Created task '{}' at seq {}.", id, event.seq);
@@ -633,6 +644,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             id,
             read_scope,
             gates,
+            depends_on,
         } => {
             let task_id = match id {
                 Some(i) => i.clone(),
@@ -664,6 +676,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     write_deny: &empty,
                     risk_triggers: &empty,
                     gates: &gate_list,
+                    depends_on,
                 },
             )?;
             app.mark_ready(&task_id)?;
@@ -684,6 +697,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             write_deny,
             risk_triggers,
             gates,
+            depends_on,
         } => {
             let event = app.revise_task(
                 id,
@@ -694,6 +708,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     write_deny: optional_slice(write_deny),
                     risk_triggers: optional_slice(risk_triggers),
                     gates: optional_slice(gates),
+                    depends_on: optional_slice(depends_on),
                 },
             )?;
             println!("Revised task '{}' at seq {}.", id, event.seq);
@@ -1035,6 +1050,7 @@ fn print_task_state(state: &TaskState) -> Result<()> {
         "write_deny": state.write_deny,
         "risk_triggers": state.risk_triggers,
         "gates": state.gates,
+        "depends_on": state.depends_on,
         "gate_results": gate_results,
         "active_run": state.active_run,
         "leases_active": active_leases,
@@ -1067,6 +1083,18 @@ fn print_task_human(state: &TaskState) -> Result<()> {
             };
             println!("  {}: {}", gate, status);
         }
+    }
+    // M-d: declared dependencies
+    if !state.depends_on.is_empty() {
+        println!(
+            "Depends on: {}",
+            state
+                .depends_on
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     // M4: Active run
     if let Some(ref run) = state.active_run {
@@ -2037,8 +2065,11 @@ fn cmd_schedule_plan(max_concurrent: usize, tasks: &[String], dry_run: bool) -> 
         ));
     }
 
-    // Collect task states
+    // Collect task states + declared dependency edges (M-d).
     let mut task_data = Vec::new();
+    let mut deps: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    let task_set: std::collections::BTreeSet<&str> = tasks.iter().map(|s| s.as_str()).collect();
     for task_id in tasks {
         let state = app.replay_task(task_id)?;
         if state.phase != Phase::Ready && state.phase != Phase::InProgress {
@@ -2051,10 +2082,21 @@ fn cmd_schedule_plan(max_concurrent: usize, tasks: &[String], dry_run: bool) -> 
         if state.is_held {
             return Err(anyhow::anyhow!("Task '{}' is held", task_id));
         }
+        // Warn about deps on tasks outside this plan (they're assumed satisfied).
+        for dep in &state.depends_on {
+            if !task_set.contains(dep.as_str()) {
+                eprintln!(
+                    "Note: task '{}' depends on '{}' which is not in this plan — assumed already satisfied.",
+                    task_id, dep
+                );
+            }
+        }
+        deps.insert(task_id.clone(), state.depends_on.clone());
         task_data.push((task_id.clone(), state.write_allow.clone()));
     }
 
-    let plan = crate::application::schedule::plan_schedule(&task_data, max_concurrent);
+    let plan = crate::application::schedule::plan_schedule(&task_data, &deps, max_concurrent)
+        .map_err(|errs| anyhow::anyhow!("Cannot plan schedule: {}", errs.join("; ")))?;
 
     // Output plan as JSON
     let json = serde_json::to_string_pretty(&plan)?;
@@ -2117,6 +2159,7 @@ fn load_plan_and_states(
                 phase: state.phase.as_str().to_string(),
                 is_held: state.is_held,
                 write_allow: state.write_allow.iter().cloned().collect(),
+                depends_on: state.depends_on.iter().cloned().collect(),
             });
         }
     }

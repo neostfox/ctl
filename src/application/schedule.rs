@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,8 @@ pub struct TaskCurrentState {
     pub phase: String,
     pub is_held: bool,
     pub write_allow: BTreeSet<String>,
+    /// M-d: declared prerequisite task IDs.
+    pub depends_on: BTreeSet<String>,
 }
 
 // ── Overlap detection ──
@@ -77,26 +79,135 @@ pub fn detect_write_scope_overlap(
 
 // ── Schedule planning ──
 
-/// Plan concurrent execution of ready tasks.
+/// Detect a dependency cycle among the in-plan edges (M-d).
 ///
-/// Tasks with overlapping `write_allow` are placed in different groups (sequential).
-/// Tasks with disjoint `write_allow` can run in the same group (parallel).
-/// Read-only tasks (empty `write_allow`) can join any group.
-pub fn plan_schedule(tasks: &[(String, BTreeSet<String>)], max_concurrent: usize) -> SchedulePlan {
-    let n = tasks.len();
+/// `prereqs[t]` is the set of in-plan task IDs that `t` depends on. Returns the
+/// task IDs that take part in (or are blocked behind) a cycle, sorted — empty
+/// when the dependency subgraph is acyclic. Uses Kahn's algorithm: any node
+/// never reaching in-degree zero is on or downstream of a cycle.
+fn dependency_cycle(
+    ids: &BTreeSet<String>,
+    prereqs: &HashMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let mut indeg: HashMap<&str, usize> = ids.iter().map(|id| (id.as_str(), 0usize)).collect();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for id in ids {
+        for p in &prereqs[id] {
+            *indeg.get_mut(id.as_str()).unwrap() += 1;
+            dependents.entry(p.as_str()).or_default().push(id.as_str());
+        }
+    }
+    let mut queue: VecDeque<&str> = indeg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&n, _)| n)
+        .collect();
+    let mut settled = 0usize;
+    while let Some(n) = queue.pop_front() {
+        settled += 1;
+        if let Some(ds) = dependents.get(n) {
+            for &d in ds {
+                let e = indeg.get_mut(d).unwrap();
+                *e -= 1;
+                if *e == 0 {
+                    queue.push_back(d);
+                }
+            }
+        }
+    }
+    if settled == ids.len() {
+        return Vec::new();
+    }
+    let mut stuck: Vec<String> = indeg
+        .iter()
+        .filter(|(_, &d)| d > 0)
+        .map(|(&n, _)| n.to_string())
+        .collect();
+    stuck.sort();
+    stuck
+}
+
+/// Plan concurrent execution of tasks under two constraints (M-c overlap + M-d
+/// dependencies):
+///
+/// - **Write isolation**: tasks with overlapping `write_allow` never share a
+///   group; disjoint (and read-only, empty-scope) tasks may run in parallel.
+/// - **Dependencies**: if `B` depends on `A` (both in the plan), `B` is placed
+///   in a strictly later group than `A`.
+///
+/// `deps` maps a task ID to its declared prerequisites; edges to tasks outside
+/// this plan are ignored (assumed already satisfied). Returns `Err` listing the
+/// tasks involved if the in-plan dependency graph contains a cycle. With no
+/// dependencies this degrades to greedy earliest-fit write-isolation grouping.
+pub fn plan_schedule(
+    tasks: &[(String, BTreeSet<String>)],
+    deps: &HashMap<String, BTreeSet<String>>,
+    max_concurrent: usize,
+) -> Result<SchedulePlan, Vec<String>> {
     let max_concurrent = max_concurrent.max(1);
+    let ids: BTreeSet<String> = tasks.iter().map(|(id, _)| id.clone()).collect();
+    let scope_of: HashMap<&str, &BTreeSet<String>> =
+        tasks.iter().map(|(id, wa)| (id.as_str(), wa)).collect();
 
-    // Build conflict adjacency list.
-    // Two tasks conflict if they have overlapping write_allow sets.
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // In-plan prerequisite edges only (external deps assumed satisfied).
+    let prereqs: HashMap<String, BTreeSet<String>> = ids
+        .iter()
+        .map(|id| {
+            let p = deps
+                .get(id)
+                .map(|d| d.iter().filter(|x| ids.contains(*x)).cloned().collect())
+                .unwrap_or_default();
+            (id.clone(), p)
+        })
+        .collect();
+
+    let cycle = dependency_cycle(&ids, &prereqs);
+    if !cycle.is_empty() {
+        return Err(vec![format!(
+            "dependency cycle among tasks: {}",
+            cycle.join(", ")
+        )]);
+    }
+
+    // Dependency levels (longest path) order tasks so prereqs are placed first.
+    let mut level: HashMap<&str, usize> = ids.iter().map(|id| (id.as_str(), 0usize)).collect();
+    {
+        let mut indeg: HashMap<&str, usize> = ids.iter().map(|id| (id.as_str(), 0usize)).collect();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for id in &ids {
+            for p in &prereqs[id] {
+                *indeg.get_mut(id.as_str()).unwrap() += 1;
+                dependents.entry(p.as_str()).or_default().push(id.as_str());
+            }
+        }
+        let mut queue: VecDeque<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&n, _)| n)
+            .collect();
+        while let Some(n) = queue.pop_front() {
+            let ln = level[n];
+            if let Some(ds) = dependents.get(n) {
+                for &d in ds {
+                    if ln + 1 > level[d] {
+                        *level.get_mut(d).unwrap() = ln + 1;
+                    }
+                    let e = indeg.get_mut(d).unwrap();
+                    *e -= 1;
+                    if *e == 0 {
+                        queue.push_back(d);
+                    }
+                }
+            }
+        }
+    }
+
+    // Report all write-overlap pairs (informational, like the previous planner).
     let mut conflicts: Vec<ScheduleConflict> = Vec::new();
-
-    for i in 0..n {
-        for j in (i + 1)..n {
+    for i in 0..tasks.len() {
+        for j in (i + 1)..tasks.len() {
             let overlap = detect_write_scope_overlap(&tasks[i].1, &tasks[j].1);
             if !overlap.is_empty() {
-                adj[i].push(j);
-                adj[j].push(i);
                 conflicts.push(ScheduleConflict {
                     task_a: tasks[i].0.clone(),
                     task_b: tasks[j].0.clone(),
@@ -106,98 +217,56 @@ pub fn plan_schedule(tasks: &[(String, BTreeSet<String>)], max_concurrent: usize
         }
     }
 
-    // Greedy graph coloring.
-    // color[i] = group index assigned to task i.
-    let mut color: Vec<Option<usize>> = vec![None; n];
+    // Greedy earliest-fit assignment in (level, id) order. A task goes into the
+    // earliest group that is (a) after all its prerequisites' groups, (b) free of
+    // write-overlap with current members, and (c) below the concurrency cap.
+    let mut order: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    order.sort_by(|a, b| level[a].cmp(&level[b]).then_with(|| a.cmp(b)));
 
-    for i in 0..n {
-        // Tasks with no write_allow (read-only) never conflict — they join any group.
-        let is_read_only = tasks[i].1.is_empty();
-
-        if is_read_only {
-            // Will be assigned below after we figure out which group has room.
-        } else {
-            // Collect group indices used by conflicting neighbors.
-            let neighbor_colors: BTreeSet<usize> =
-                adj[i].iter().filter_map(|&nb| color[nb]).collect();
-
-            // Find the first group color not used by any neighbor.
-            let mut chosen: Option<usize> = None;
-            for c in 0.. {
-                if !neighbor_colors.contains(&c) {
-                    chosen = Some(c);
-                    break;
-                }
+    let mut groups: Vec<Vec<&str>> = Vec::new();
+    let mut group_of: HashMap<&str, usize> = HashMap::new();
+    for &t in &order {
+        let min_g = prereqs[t]
+            .iter()
+            .map(|p| group_of[p.as_str()] + 1)
+            .max()
+            .unwrap_or(0);
+        let scope_t = scope_of[t];
+        let mut g = min_g;
+        loop {
+            if g >= groups.len() {
+                groups.push(Vec::new());
             }
-            color[i] = chosen;
-        }
-    }
-
-    // Assign read-only tasks: find the first existing group with room,
-    // or create a new one.
-    // First, count per-group occupancy (from non-read-only tasks).
-    let mut group_sizes: Vec<usize> = Vec::new();
-    for g in color.iter().flatten() {
-        while group_sizes.len() <= *g {
-            group_sizes.push(0);
-        }
-        group_sizes[*g] += 1;
-    }
-
-    for (i, task) in tasks.iter().enumerate() {
-        if task.1.is_empty() {
-            // Read-only: find first group with room.
-            let mut assigned = false;
-            for (g, size) in group_sizes.iter_mut().enumerate() {
-                if *size < max_concurrent {
-                    color[i] = Some(g);
-                    *size += 1;
-                    assigned = true;
-                    break;
-                }
+            let full = groups[g].len() >= max_concurrent;
+            let overlaps = groups[g]
+                .iter()
+                .any(|&m| !detect_write_scope_overlap(scope_t, scope_of[m]).is_empty());
+            if !full && !overlaps {
+                groups[g].push(t);
+                group_of.insert(t, g);
+                break;
             }
-            if !assigned {
-                let new_g = group_sizes.len();
-                color[i] = Some(new_g);
-                group_sizes.push(1);
-            }
+            g += 1;
         }
     }
 
-    // Now enforce max_concurrent cap: split overfull groups into multiple groups.
-    // Reconstruct groups from color assignments, then split any that exceed the cap.
-    let max_color = color.iter().filter_map(|c| *c).max().map_or(0, |c| c + 1);
-    let mut raw_groups: Vec<Vec<usize>> = vec![Vec::new(); max_color];
-    for (i, c) in color.iter().enumerate().take(n) {
-        if let Some(g) = c {
-            raw_groups[*g].push(i);
-        }
-    }
+    let final_groups: Vec<ScheduleGroup> = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !m.is_empty())
+        .map(|(i, members)| ScheduleGroup {
+            group_id: format!("g{}", i),
+            task_ids: members.iter().map(|&s| s.to_string()).collect(),
+        })
+        .collect();
 
-    let mut final_groups: Vec<ScheduleGroup> = Vec::new();
-    let mut group_counter: usize = 0;
-
-    for members in &raw_groups {
-        if members.is_empty() {
-            continue;
-        }
-        // Split into chunks of max_concurrent.
-        for chunk in members.chunks(max_concurrent) {
-            final_groups.push(ScheduleGroup {
-                group_id: format!("g{}", group_counter),
-                task_ids: chunk.iter().map(|&i| tasks[i].0.clone()).collect(),
-            });
-            group_counter += 1;
-        }
-    }
-
-    SchedulePlan {
+    Ok(SchedulePlan {
         plan_id: generate_uuid(),
         groups: final_groups,
         conflicts,
         max_concurrent,
         created_at: now_iso8601(),
-    }
+    })
 }
 
 // ── Plan validation ──
@@ -264,6 +333,32 @@ pub fn validate_plan(
         }
     }
 
+    // M-d: dependency order — every in-plan prerequisite must sit in an EARLIER
+    // group than the task that depends on it. Deps to tasks outside the plan are
+    // skipped (assumed already satisfied), matching plan_schedule.
+    let group_of: std::collections::HashMap<&str, usize> = plan
+        .groups
+        .iter()
+        .enumerate()
+        .flat_map(|(gi, g)| g.task_ids.iter().map(move |t| (t.as_str(), gi)))
+        .collect();
+    for (gi, group) in plan.groups.iter().enumerate() {
+        for task_id in &group.task_ids {
+            if let Some(state) = state_map.get(task_id.as_str()) {
+                for dep in &state.depends_on {
+                    if let Some(&dg) = group_of.get(dep.as_str()) {
+                        if dg >= gi {
+                            errors.push(format!(
+                                "task {} depends on {} but is not scheduled after it (group {} vs {})",
+                                task_id, dep, gi, dg
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -287,7 +382,7 @@ mod tests {
             ("t1".into(), wa(&["src/a/"])),
             ("t2".into(), wa(&["src/b/"])),
         ];
-        let plan = plan_schedule(&tasks, 10);
+        let plan = plan_schedule(&tasks, &HashMap::new(), 10).unwrap();
 
         // Both tasks should be in the same group since write_allow is disjoint.
         assert_eq!(plan.groups.len(), 1);
@@ -300,7 +395,7 @@ mod tests {
             ("t1".into(), wa(&["src/foo/"])),
             ("t2".into(), wa(&["src/foo/bar.rs"])),
         ];
-        let plan = plan_schedule(&tasks, 10);
+        let plan = plan_schedule(&tasks, &HashMap::new(), 10).unwrap();
 
         // Overlapping write_allow → different groups.
         assert_eq!(plan.groups.len(), 2);
@@ -313,7 +408,7 @@ mod tests {
             ("writer".into(), wa(&["src/a/"])),
             ("reader".into(), BTreeSet::new()),
         ];
-        let plan = plan_schedule(&tasks, 10);
+        let plan = plan_schedule(&tasks, &HashMap::new(), 10).unwrap();
 
         // Read-only task joins writer's group.
         assert_eq!(plan.groups.len(), 1);
@@ -329,7 +424,7 @@ mod tests {
             ("t4".into(), wa(&["src/d/"])),
         ];
         // All disjoint → same group, but max_concurrent = 2 → split into 2 groups.
-        let plan = plan_schedule(&tasks, 2);
+        let plan = plan_schedule(&tasks, &HashMap::new(), 2).unwrap();
 
         assert_eq!(plan.groups.len(), 2);
         for g in &plan.groups {
@@ -343,6 +438,7 @@ mod tests {
             phase: phase.to_string(),
             is_held: held,
             write_allow: wa(paths),
+            depends_on: BTreeSet::new(),
         }
     }
 
@@ -352,7 +448,7 @@ mod tests {
             ("t1".into(), wa(&["src/a/"])),
             ("t2".into(), wa(&["src/b/"])),
         ];
-        let plan = plan_schedule(&tasks, 10);
+        let plan = plan_schedule(&tasks, &HashMap::new(), 10).unwrap();
 
         // in_progress + ready → valid (canonical as_str phase forms).
         let ok = vec![
@@ -376,6 +472,83 @@ mod tests {
         ];
         let errs = validate_plan(&plan, &held).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("held")));
+    }
+
+    #[test]
+    fn deps_place_dependent_in_later_group() {
+        // Disjoint scopes would share group 0, but B depends on A → B goes later.
+        let tasks: Vec<(String, BTreeSet<String>)> =
+            vec![("a".into(), wa(&["src/a/"])), ("b".into(), wa(&["src/b/"]))];
+        let mut deps = HashMap::new();
+        deps.insert("b".to_string(), wa(&["a"]));
+        let plan = plan_schedule(&tasks, &deps, 10).unwrap();
+        let group_of = |t: &str| {
+            plan.groups
+                .iter()
+                .position(|g| g.task_ids.iter().any(|x| x == t))
+                .unwrap()
+        };
+        assert!(
+            group_of("b") > group_of("a"),
+            "dependent 'b' must be scheduled in a later group than 'a'"
+        );
+    }
+
+    #[test]
+    fn dependency_cycle_is_rejected() {
+        let tasks: Vec<(String, BTreeSet<String>)> =
+            vec![("a".into(), wa(&["src/a/"])), ("b".into(), wa(&["src/b/"]))];
+        let mut deps = HashMap::new();
+        deps.insert("a".to_string(), wa(&["b"]));
+        deps.insert("b".to_string(), wa(&["a"]));
+        let err = plan_schedule(&tasks, &deps, 10).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("cycle")), "got: {:?}", err);
+    }
+
+    #[test]
+    fn external_dependency_is_ignored_in_planning() {
+        // 'b' depends on 'ext' which is not in the plan → no ordering / no cycle.
+        let tasks: Vec<(String, BTreeSet<String>)> =
+            vec![("a".into(), wa(&["src/a/"])), ("b".into(), wa(&["src/b/"]))];
+        let mut deps = HashMap::new();
+        deps.insert("b".to_string(), wa(&["ext"]));
+        let plan = plan_schedule(&tasks, &deps, 10).unwrap();
+        assert_eq!(
+            plan.groups.len(),
+            1,
+            "disjoint + no in-plan deps → one group"
+        );
+    }
+
+    #[test]
+    fn validate_plan_flags_dependency_order_violation() {
+        // Plan puts a and b in the SAME group, but b depends on a.
+        let plan = SchedulePlan {
+            plan_id: "p".into(),
+            groups: vec![ScheduleGroup {
+                group_id: "g0".into(),
+                task_ids: vec!["a".into(), "b".into()],
+            }],
+            conflicts: vec![],
+            max_concurrent: 10,
+            created_at: "t".into(),
+        };
+        let states = vec![
+            tcs("a", "ready", false, &["src/a/"]),
+            TaskCurrentState {
+                task_id: "b".into(),
+                phase: "ready".into(),
+                is_held: false,
+                write_allow: wa(&["src/b/"]),
+                depends_on: wa(&["a"]),
+            },
+        ];
+        let errs = validate_plan(&plan, &states).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("depends on a")),
+            "got: {:?}",
+            errs
+        );
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct CreateTaskInput<'a> {
     pub write_deny: &'a [String],
     pub risk_triggers: &'a [String],
     pub gates: &'a [String],
+    /// M-d: task IDs that must complete before this one runs.
+    pub depends_on: &'a [String],
 }
 
 pub struct ReviseTaskInput<'a> {
@@ -36,6 +38,7 @@ pub struct ReviseTaskInput<'a> {
     pub write_deny: Option<&'a [String]>,
     pub risk_triggers: Option<&'a [String]>,
     pub gates: Option<&'a [String]>,
+    pub depends_on: Option<&'a [String]>,
 }
 
 impl ControlApp {
@@ -75,7 +78,7 @@ impl ControlApp {
         let gates = validate_gate_templates(input.gates)?;
         validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "objective": input.objective,
             "read_scope": read_scope,
             "write_allow": write_allow,
@@ -83,6 +86,11 @@ impl ControlApp {
             "risk_triggers": input.risk_triggers,
             "gates": gates,
         });
+        // M-d: only emit depends_on when non-empty, keeping payloads minimal and
+        // dependency-free events byte-identical to pre-M-d output.
+        if !input.depends_on.is_empty() {
+            payload["depends_on"] = serde_json::json!(input.depends_on);
+        }
         let event = self.build_event(id, "task_created", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -125,9 +133,13 @@ impl ControlApp {
             Some(gates) => validate_gate_templates(gates)?,
             None => state.gates.iter().cloned().collect(),
         };
+        let depends_on: Vec<String> = match input.depends_on {
+            Some(deps) => deps.to_vec(),
+            None => state.depends_on.iter().cloned().collect(),
+        };
         validate_task_definition(&objective, &read_scope, &write_allow, &gates)?;
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "objective": objective,
             "read_scope": read_scope,
             "write_allow": write_allow,
@@ -135,6 +147,9 @@ impl ControlApp {
             "risk_triggers": risk_triggers,
             "gates": gates,
         });
+        if !depends_on.is_empty() {
+            payload["depends_on"] = serde_json::json!(depends_on);
+        }
         let event = self.build_event(task_id, "task_revised", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -667,6 +682,7 @@ impl ControlApp {
                 "gates_total": gates_total,
                 "review": review,
                 "write_scope": state.write_allow.iter().collect::<Vec<_>>(),
+                "depends_on": state.depends_on.iter().collect::<Vec<_>>(),
             }));
         }
 
@@ -2039,6 +2055,7 @@ mod tests {
                 write_deny: &write_deny,
                 risk_triggers: &risk_triggers,
                 gates: &gates,
+                depends_on: &[],
             },
         )
         .unwrap();
@@ -2074,6 +2091,7 @@ mod tests {
                 write_deny: &[],
                 risk_triggers: &[],
                 gates: &gates,
+                depends_on: &[],
             },
         )
         .unwrap();
@@ -2120,6 +2138,7 @@ mod tests {
                 write_deny: &[],
                 risk_triggers: &[],
                 gates: &gates,
+                depends_on: &[],
             },
         )
         .unwrap();
