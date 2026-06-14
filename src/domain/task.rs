@@ -66,6 +66,10 @@ pub struct GateResult {
     /// unbound results cannot satisfy the finish-time artifact interlock.
     #[serde(default)]
     pub tree_hash: Option<String>,
+    /// Canonical policy hash in force when this gate ran (policy binding).
+    /// `None` for legacy events; unbound results cannot satisfy a new finish.
+    #[serde(default)]
+    pub policy_hash: Option<String>,
 }
 
 impl fmt::Display for GateResult {
@@ -451,6 +455,11 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .get("tree_hash")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let policy_hash = event
+                .payload
+                .get("policy_hash")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             state.gate_results.insert(
                 gate_id.to_string(),
                 GateResult {
@@ -459,6 +468,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                     evidence: evidence.to_string(),
                     checked_at: checked_at.to_string(),
                     tree_hash,
+                    policy_hash,
                 },
             );
         }

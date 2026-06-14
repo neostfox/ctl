@@ -132,6 +132,11 @@
                 "description": "Git tree hash (HEAD^{tree}) this gate result was validated against (artifact binding). Optional for legacy events recorded before binding existed.",
                 "type": "string",
                 "minLength": 1
+              },
+              "policy_hash": {
+                "description": "Canonical policy hash in force when this gate ran (policy binding). Optional for legacy events recorded before binding existed.",
+                "type": "string",
+                "minLength": 1
               }
             },
             "additionalProperties": false
@@ -485,6 +490,11 @@
               },
               "tree_hash": {
                 "description": "Git tree hash (HEAD^{tree}) this completion audit validated against (artifact binding). Optional for legacy events recorded before binding existed.",
+                "type": "string",
+                "minLength": 1
+              },
+              "policy_hash": {
+                "description": "Canonical policy hash this completion audit validated against (policy binding). Optional for legacy events recorded before binding existed.",
                 "type": "string",
                 "minLength": 1
               }

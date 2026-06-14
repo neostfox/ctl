@@ -337,19 +337,26 @@ impl ControlApp {
         // mirroring the M-g commit interlock. `None` here disables the binding
         // checks below so non-git flows behave exactly as before.
         let current_tree = crate::infrastructure::workspace::head_tree_hash(&self.project_root)?;
+        // Policy binding: the rules in force now must match the rules the evidence
+        // was produced under. Always computable (independent of git).
+        let current_policy = self.current_policy_hash(&state);
 
-        // Gate interlock: all required gates must have a latest PASSING result, and
-        // (in a git repo) that result must be bound to the current committed tree.
+        // Gate interlock: all required gates must have a latest PASSING result,
+        // bound to the current committed tree (git repo only) AND the current
+        // policy (always). Unbound (legacy `None`) counts as stale.
         let mut failing_gates = Vec::new();
-        let mut stale_gates = Vec::new();
+        let mut tree_stale = Vec::new();
+        let mut policy_stale = Vec::new();
         for gate_id in &state.gates {
             match state.gate_results.get(gate_id) {
                 Some(result) if result.passed => {
                     if let Some(ref current) = current_tree {
-                        // Unbound (None, legacy) or bound to a different tree → stale.
                         if result.tree_hash.as_deref() != Some(current.as_str()) {
-                            stale_gates.push(gate_id.as_str());
+                            tree_stale.push(gate_id.as_str());
                         }
+                    }
+                    if result.policy_hash.as_deref() != Some(current_policy.as_str()) {
+                        policy_stale.push(gate_id.as_str());
                     }
                 }
                 _ => {
@@ -363,13 +370,15 @@ impl ControlApp {
                 failing_gates
             ));
         }
-        if !stale_gates.is_empty() {
-            let current = current_tree.as_deref().unwrap_or("?");
+        if !tree_stale.is_empty() || !policy_stale.is_empty() {
+            let tcur = current_tree.as_deref().unwrap_or("n/a (non-git)");
             return Err(anyhow!(
-                "Completion interlock: artifact evidence is stale.\n\
-                 current tree:    {current}\n\
-                 stale gate(s):   {stale_gates:?} validated on a different (or no) tree\n\
-                 rerun gates against the current committed tree before finishing"
+                "Completion interlock: completion evidence is stale.\n\
+                 current tree:        {tcur}\n\
+                 current policy:      {current_policy}\n\
+                 tree-stale gate(s):  {tree_stale:?}\n\
+                 policy-stale gate(s): {policy_stale:?}\n\
+                 rerun required gates (and re-audit) under the current code and policy"
             ));
         }
 
@@ -455,18 +464,26 @@ impl ControlApp {
             .max_by_key(|e| e.seq);
         match latest_audit {
             Some(e) if e.event_type == "evidence_accepted" => {
-                // Artifact binding: the passing audit must be bound to the current
-                // committed tree (git repo only; skipped when unverifiable).
+                // Artifact + policy binding: the passing audit must be bound to the
+                // current committed tree (git repo only) AND the current policy.
+                let mut stale = Vec::new();
                 if let Some(ref current) = current_tree {
-                    let bound = e.payload.get("tree_hash").and_then(|v| v.as_str());
-                    if bound != Some(current.as_str()) {
-                        return Err(anyhow!(
-                            "Completion interlock: artifact evidence is stale.\n\
-                             current tree:    {current}\n\
-                             completion audit validated on a different (or no) tree\n\
-                             re-audit against the current committed tree before finishing"
-                        ));
+                    if e.payload.get("tree_hash").and_then(|v| v.as_str()) != Some(current.as_str())
+                    {
+                        stale.push("tree");
                     }
+                }
+                if e.payload.get("policy_hash").and_then(|v| v.as_str())
+                    != Some(current_policy.as_str())
+                {
+                    stale.push("policy");
+                }
+                if !stale.is_empty() {
+                    return Err(anyhow!(
+                        "Completion interlock: completion audit is stale ({}); \
+                         re-audit under the current code and policy before finishing",
+                        stale.join(" + ")
+                    ));
                 }
             }
             Some(_) => {
@@ -577,6 +594,8 @@ impl ControlApp {
             {
                 payload["tree_hash"] = serde_json::json!(tree);
             }
+            // Policy binding: stamp the policy in force when this audit was accepted.
+            payload["policy_hash"] = serde_json::json!(self.current_policy_hash(&state));
             self.build_event(task_id, "evidence_accepted", payload)?
         } else {
             let payload = serde_json::json!({
@@ -597,6 +616,41 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// Canonical hash of the task's CURRENT policy (scope + risk triggers +
+    /// required-gate *definitions*). Resolves each required gate id to its
+    /// template's actual command + args, so a template change (not just a rename)
+    /// invalidates prior evidence. Independent of git — always computable.
+    fn current_policy_hash(&self, state: &crate::domain::task::TaskState) -> String {
+        use crate::domain::policy::{compute_policy_hash, CanonicalGateDefinition};
+        let read_scope: Vec<String> = state.read_scope.iter().cloned().collect();
+        let write_allow: Vec<String> = state.write_allow.iter().cloned().collect();
+        let write_deny: Vec<String> = state.write_deny.iter().cloned().collect();
+        let risk_triggers: Vec<String> = state.risk_triggers.iter().cloned().collect();
+        let gates: Vec<CanonicalGateDefinition> = state
+            .gates
+            .iter()
+            .map(|g| match crate::infrastructure::gates::find_template(g) {
+                Some(t) => CanonicalGateDefinition {
+                    gate_id: g.clone(),
+                    command: t.command.to_string(),
+                    args: t.args.iter().map(|s| s.to_string()).collect(),
+                },
+                None => CanonicalGateDefinition {
+                    gate_id: g.clone(),
+                    command: String::new(),
+                    args: Vec::new(),
+                },
+            })
+            .collect();
+        compute_policy_hash(
+            &read_scope,
+            &write_allow,
+            &write_deny,
+            &risk_triggers,
+            &gates,
+        )
+    }
+
     pub fn record_gate(
         &self,
         task_id: &str,
@@ -604,6 +658,7 @@ impl ControlApp {
         passed: bool,
         evidence: &str,
     ) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
         let mut payload = serde_json::json!({
             "gate_id": gate_id,
             "passed": passed,
@@ -616,6 +671,9 @@ impl ControlApp {
         if let Some(tree) = crate::infrastructure::workspace::head_tree_hash(&self.project_root)? {
             payload["tree_hash"] = serde_json::json!(tree);
         }
+        // Policy binding: stamp the policy in force when this gate ran (always
+        // computable; independent of git).
+        payload["policy_hash"] = serde_json::json!(self.current_policy_hash(&state));
         let event = self.build_event(task_id, "gate_checked", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -3263,7 +3321,7 @@ mod tests {
         git(dir.path(), &["commit", "-qm", "work"]);
         let stale = app.finish_task("ilk").unwrap_err().to_string();
         assert!(
-            stale.contains("artifact evidence is stale"),
+            stale.contains("completion evidence is stale"),
             "expected artifact binding to block stale evidence, got: {stale}"
         );
 
@@ -3338,7 +3396,7 @@ mod tests {
         commit_src(dir.path(), "b.rs", "fn b() {}\n");
         audit_pass(&app, "t", None);
         let err = app.finish_task("t").unwrap_err().to_string();
-        assert!(err.contains("artifact evidence is stale"), "{err}");
+        assert!(err.contains("completion evidence is stale"), "{err}");
     }
 
     // Case 3: audit recorded, then a new commit → evidence is stale → finish fails.
@@ -3352,7 +3410,7 @@ mod tests {
         audit_pass(&app, "t", None);
         commit_src(dir.path(), "b.rs", "fn b() {}\n");
         let err = app.finish_task("t").unwrap_err().to_string();
-        assert!(err.contains("artifact evidence is stale"), "{err}");
+        assert!(err.contains("completion evidence is stale"), "{err}");
     }
 
     // Case 4: gate re-run on the new tree but audit NOT re-run → audit stale → fail.
@@ -3368,7 +3426,7 @@ mod tests {
         app.record_gate("t", "cargo_check", true, "ok").unwrap(); // gate now fresh
         let err = app.finish_task("t").unwrap_err().to_string();
         assert!(
-            err.contains("artifact evidence is stale") && err.contains("audit"),
+            err.contains("completion audit is stale"),
             "expected audit-stale, got: {err}"
         );
     }
@@ -3386,7 +3444,7 @@ mod tests {
         audit_pass(&app, "t", None); // audit now fresh, gate still old
         let err = app.finish_task("t").unwrap_err().to_string();
         assert!(
-            err.contains("artifact evidence is stale") && err.contains("gate"),
+            err.contains("completion evidence is stale") && err.contains("tree-stale"),
             "expected gate-stale, got: {err}"
         );
     }
@@ -3414,7 +3472,7 @@ mod tests {
         app.validate_and_append(&ev).unwrap(); // proves replay tolerates missing tree_hash
         audit_pass(&app, "t", None);
         let err = app.finish_task("t").unwrap_err().to_string();
-        assert!(err.contains("artifact evidence is stale"), "{err}");
+        assert!(err.contains("completion evidence is stale"), "{err}");
     }
 
     // Case 7: a FAILED gate on the current tree still cannot finish (passing check first).
@@ -3448,9 +3506,98 @@ mod tests {
         audit_pass(&app, "t", None);
         let err = app.finish_task("t").unwrap_err().to_string();
         assert!(
-            err.contains("artifact evidence is stale") && err.contains("cargo_fmt_check"),
+            err.contains("completion evidence is stale") && err.contains("cargo_fmt_check"),
             "expected cargo_fmt_check stale, got: {err}"
         );
+    }
+
+    // ── policy_hash interlock ──
+    //
+    // Hash *sensitivity* (widen/narrow scope, gate-arg change, gate-set change,
+    // canonicalization) is covered by unit tests in `domain::policy`. These tests
+    // cover the finish-time *interlock*: a policy-mismatched (or unbound) gate or
+    // audit must block completion. Policy cannot change mid-task via the public
+    // API, so staleness is simulated by recording evidence under a different
+    // policy hash — exactly what a gate-catalog change across ctl versions yields.
+
+    /// Overwrite cargo_check's latest result with an explicit/missing policy_hash.
+    fn append_gate_policy(app: &ControlApp, id: &str, policy_hash: Option<&str>) {
+        let mut p = serde_json::json!({
+            "gate_id": "cargo_check", "passed": true,
+            "evidence": "ok", "checked_at": "2026-01-01T00:00:00Z"
+        });
+        if let Some(ph) = policy_hash {
+            p["policy_hash"] = serde_json::json!(ph);
+        }
+        let ev = app.build_event(id, "gate_checked", p).unwrap();
+        app.validate_and_append(&ev).unwrap();
+    }
+
+    /// Append a completion audit with an explicit policy_hash, as a non-implementer.
+    fn append_audit_policy(app: &ControlApp, id: &str, policy_hash: Option<&str>) {
+        let reviewer = ControlApp::open(&app.project_root, false)
+            .unwrap()
+            .with_actor("reviewer");
+        let mut p = serde_json::json!({
+            "evidence_id": "aud-x", "source": COMPLETION_AUDIT_SOURCE,
+            "touched_files": [], "result_file": "", "accepted_at": "2026-01-01T00:00:00Z"
+        });
+        if let Some(ph) = policy_hash {
+            p["policy_hash"] = serde_json::json!(ph);
+        }
+        let ev = reviewer.build_event(id, "evidence_accepted", p).unwrap();
+        reviewer.validate_and_append(&ev).unwrap();
+    }
+
+    // Same policy (non-git) → finish succeeds.
+    #[test]
+    fn policy_binding_same_policy_finishes() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "p");
+        audit_pass(&app, "p", None);
+        assert_eq!(app.finish_task("p").unwrap().event_type, "task_completed");
+    }
+
+    // A gate produced under a different policy → finish fails (policy-stale).
+    #[test]
+    fn policy_binding_stale_gate_policy_fails() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "p");
+        append_gate_policy(&app, "p", Some("stale-policy-hash"));
+        audit_pass(&app, "p", None);
+        let err = app.finish_task("p").unwrap_err().to_string();
+        assert!(
+            err.contains("completion evidence is stale") && err.contains("policy-stale"),
+            "{err}"
+        );
+    }
+
+    // An audit accepted under a different policy → finish fails.
+    #[test]
+    fn policy_binding_stale_audit_policy_fails() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "p");
+        append_audit_policy(&app, "p", Some("stale-policy-hash"));
+        let err = app.finish_task("p").unwrap_err().to_string();
+        assert!(
+            err.contains("completion audit is stale") && err.contains("policy"),
+            "{err}"
+        );
+    }
+
+    // A legacy gate without policy_hash replays but cannot satisfy a new finish.
+    #[test]
+    fn policy_binding_legacy_unbound_gate_blocks_finish() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "p");
+        append_gate_policy(&app, "p", None); // replay tolerates missing policy_hash
+        audit_pass(&app, "p", None);
+        let err = app.finish_task("p").unwrap_err().to_string();
+        assert!(err.contains("completion evidence is stale"), "{err}");
     }
 
     // ── M6: merge-candidate ──
