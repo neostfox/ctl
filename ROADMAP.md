@@ -558,16 +558,38 @@ verdict→evidence 事件。
   `in_progress` 放行本作用域、拒他作用域；过期令牌→回退 `multiple_active`。
 - 这关闭了 M-a 遗留的「M-e 子代理绑定仍留后续」，并解除 M-f 的前置依赖（M-a + M-e 均就绪）。
 
-### M-f：硬版审核门
+### M-f：硬版审核门 ✅ 核心已实现（`ctl apply` 留后续）
 
 **命令**
 
 ```text
-ctl apply --path <p>      # 越界编辑申请，记录 reviewer 裁决为事件
-ctl task finish           # 联锁：要求存在通过的完成审计裁决事件
+ctl apply --path <p>      # 越界编辑申请，记录 reviewer 裁决为事件（留后续）
+ctl review accept|reject  # 记录完成审计裁决（pass/fail）
+ctl task finish           # 联锁：要求存在通过的完成审计裁决事件 ✅
 ```
 
-**依赖**：M-a（多活动任务治理）+ M-e（子代理绑定）——**两者均已就绪**，M-f 前置依赖已解除，可上硬版审核门。
+**依赖**：M-a（多活动任务治理）+ M-e（子代理绑定）——两者均已就绪，前置依赖已解除。
+
+**已落地（完成审计联锁）**：把审核从「软层约定」（control-guard 派只读 ctl-review 子代理）升级为
+**网关联锁**——`finish`（Review→Completed）现要求存在一条**新鲜的通过完成审计**裁决。
+- 裁决事件——`ctl review accept|reject --id <task> [--note]`，应用层 `record_completion_audit`。
+  复用现有 `evidence_accepted`/`evidence_rejected`，以区分性 `source="completion_audit"` 标记
+  （`schemas/control.event-envelope.v1.schema.json` 的 `source` 为自由串，**无需改冻结 schema**）；
+  审计人身份由事件顶层 `actor` 携带。只能在 Review 录入（提交后的审计窗口）。
+- 新鲜度——裁决只在「晚于最后一次 `task_submitted_for_review` 的 seq」时才计入；返工
+  （reopen→resubmit）会让上一轮的 pass 失效。最新一条 `completion_audit` 裁决必须是 pass；
+  fail 或全无审计 → 拒绝 finish。与 M-g 干净树联锁并列检查。
+- 流程：implement → submit(→Review) → `ctl review accept`（完成审计）→ commit/push（M-g 窗口）→
+  finish（M-f+M-g 双联锁）→ archive。
+- 5 条应用层单测 + 真实 ledger e2e：无审计→拒；reject→拒（FAIL）；accept→放行；返工后旧 pass 作废。
+
+**留后续**：
+- `ctl apply <path>`：越界编辑的**结构化申请 + reviewer 裁决事件**（M-f 的第二条命令；与 M-c 跨任务
+  重叠拒绝互补——前者拒，后者经审核有条件放行）。
+- **审计人 ≠ 实现者**：当前只强制「存在新鲜通过审计」，不强制由非实现者录入；把 reviewer 绑定到
+  非实现 lease 需与 M-e / capability lease 对接（属 M6）。
+- **分发**：control-guard / governance 技能改为调用 `ctl review accept|reject`（关闭 review-contract
+  分发缺口），让软层约定与硬层联锁对齐。
 
 ### M-g：提交联锁（未提交不得完成）✅ 已实现
 

@@ -13,6 +13,12 @@ use crate::domain::task::{apply, Phase, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::FileEventStore;
 
+/// Evidence `source` that marks a reviewer's dedicated completion audit (M-f),
+/// distinct from implementer/adapter output evidence. The finish interlock
+/// requires a fresh PASS with this source; using a distinguished source keeps
+/// the canonical event schema unchanged.
+pub const COMPLETION_AUDIT_SOURCE: &str = "completion_audit";
+
 pub struct ControlApp {
     pub project_root: PathBuf,
     store: FileEventStore,
@@ -314,6 +320,49 @@ impl ControlApp {
             }
         }
 
+        // Hard review gate (M-f): completion requires a FRESH passing completion
+        // audit. A verdict counts only if recorded after the last submit — rework
+        // re-submits and invalidates a prior round's audit. The latest such
+        // verdict must be a PASS; a FAIL (or no audit at all) blocks finish. This
+        // upgrades review from convention (soft-layer ctl-review subagents) to a
+        // gateway interlock. `events` is already loaded above.
+        let last_submit_seq = events
+            .iter()
+            .filter(|e| e.event_type == "task_submitted_for_review")
+            .map(|e| e.seq)
+            .max();
+        let latest_audit = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.event_type.as_str(),
+                    "evidence_accepted" | "evidence_rejected"
+                )
+            })
+            .filter(|e| {
+                e.payload.get("source").and_then(|v| v.as_str())
+                    == Some(crate::application::COMPLETION_AUDIT_SOURCE)
+            })
+            .filter(|e| last_submit_seq.is_none_or(|s| e.seq > s))
+            .max_by_key(|e| e.seq);
+        match latest_audit {
+            Some(e) if e.event_type == "evidence_accepted" => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "Completion interlock: the latest completion audit is a FAIL. \
+                     Rework, then record a passing audit (ctl review accept --id {}) before finishing.",
+                    task_id
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "Completion interlock: no passing completion audit since submit. \
+                     A reviewer must record one: ctl review accept --id {}",
+                    task_id
+                ));
+            }
+        }
+
         let event = self.build_event(task_id, "task_completed", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -324,6 +373,59 @@ impl ControlApp {
 
     pub fn archive_task(&self, task_id: &str) -> Result<Event> {
         let event = self.build_event(task_id, "task_archived", serde_json::json!({}))?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// M-f: record a reviewer's completion-audit verdict on a submitted task.
+    ///
+    /// A PASS is the hard prerequisite the finish interlock requires; a FAIL
+    /// blocks completion until the work is reworked and re-audited. Modeled on
+    /// the existing evidence events with a distinguished `source`
+    /// ([`COMPLETION_AUDIT_SOURCE`]) so it needs no canonical-schema change; the
+    /// reviewer identity is carried by the event `actor`. Recorded only in
+    /// Review — the post-submit audit window. Note: this enforces *that* a fresh
+    /// audit exists, not *who* ran it; binding the reviewer to a non-implementer
+    /// lease is a follow-up (aligns with M-e / capability leases).
+    pub fn record_completion_audit(
+        &self,
+        task_id: &str,
+        pass: bool,
+        note: Option<&str>,
+    ) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::Review {
+            return Err(anyhow!(
+                "Completion audit can only be recorded in Review (task is {:?}); submit the task first",
+                state.phase
+            ));
+        }
+        let evidence_id = generate_uuid();
+        let event = if pass {
+            let touched: Vec<String> = state.write_allow.iter().cloned().collect();
+            let payload = serde_json::json!({
+                "evidence_id": evidence_id,
+                "source": COMPLETION_AUDIT_SOURCE,
+                "touched_files": touched,
+                "result_file": note.unwrap_or(""),
+                "accepted_at": now_iso8601(),
+            });
+            self.build_event(task_id, "evidence_accepted", payload)?
+        } else {
+            let payload = serde_json::json!({
+                "evidence_id": evidence_id,
+                "source": COMPLETION_AUDIT_SOURCE,
+                "rejection_reason": note.unwrap_or("completion audit failed"),
+                // Empty: the generic rejected-evidence interlock keys on a
+                // per-file rejection; the completion-audit verdict is task-level
+                // and enforced by the dedicated M-f interlock instead.
+                "touched_file": "",
+            });
+            self.build_event(task_id, "evidence_rejected", payload)?
+        };
         self.validate_and_append(&event)?;
         if !self.dry_run {
             self.rebuild_task_view(task_id)?;
@@ -2079,7 +2181,8 @@ mod tests {
         assert!(ok, "git {:?} failed", args);
     }
 
-    fn drive_to_review(app: &ControlApp, id: &str) {
+    /// Drive a task to Review with a passing gate but NO completion audit.
+    fn drive_to_review_bare(app: &ControlApp, id: &str) {
         let scope = vec!["src".to_string()];
         let gates = vec!["cargo_check".to_string()];
         app.create_task(
@@ -2099,6 +2202,109 @@ mod tests {
         app.start_task(id).unwrap();
         app.submit_task(id).unwrap();
         app.record_gate(id, "cargo_check", true, "ok").unwrap();
+    }
+
+    fn drive_to_review(app: &ControlApp, id: &str) {
+        drive_to_review_bare(app, id);
+        // M-f: a fresh passing completion audit is now a finish prerequisite.
+        app.record_completion_audit(id, true, None).unwrap();
+    }
+
+    #[test]
+    fn finish_blocked_without_completion_audit() {
+        // No git repo → M-g commit interlock is skipped, isolating the M-f gate.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "noaudit");
+        let err = app.finish_task("noaudit").unwrap_err().to_string();
+        assert!(
+            err.contains("no passing completion audit"),
+            "expected M-f review gate, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finish_allowed_with_fresh_completion_audit() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "audited");
+        app.record_completion_audit("audited", true, Some("looks good"))
+            .unwrap();
+        let event = app.finish_task("audited").unwrap();
+        assert_eq!(event.event_type, "task_completed");
+    }
+
+    #[test]
+    fn finish_blocked_by_failing_completion_audit() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "failed");
+        app.record_completion_audit("failed", false, Some("missing tests"))
+            .unwrap();
+        let err = app.finish_task("failed").unwrap_err().to_string();
+        assert!(
+            err.contains("latest completion audit is a FAIL"),
+            "expected fail-verdict block, got: {err}"
+        );
+    }
+
+    #[test]
+    fn audit_before_resubmit_is_stale_and_does_not_count() {
+        // A pass from a PRIOR review round must not satisfy finish after rework
+        // (reopen → resubmit). Freshness is keyed on the last submit's seq.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "rework");
+        app.record_completion_audit("rework", true, None).unwrap();
+        // Rework: back to in_progress, then re-submit. The earlier audit is now
+        // before the latest submit and no longer counts.
+        app.reopen_task("rework").unwrap();
+        app.submit_task("rework").unwrap();
+        app.record_gate("rework", "cargo_check", true, "ok")
+            .unwrap();
+        let err = app.finish_task("rework").unwrap_err().to_string();
+        assert!(
+            err.contains("no passing completion audit"),
+            "stale pre-rework audit must not satisfy finish, got: {err}"
+        );
+        // A fresh audit after the new submit unblocks it.
+        app.record_completion_audit("rework", true, None).unwrap();
+        assert_eq!(
+            app.finish_task("rework").unwrap().event_type,
+            "task_completed"
+        );
+    }
+
+    #[test]
+    fn completion_audit_requires_review_phase() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            "early",
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("early").unwrap();
+        app.start_task("early").unwrap();
+        // Still in_progress (not submitted) → audit must be rejected.
+        let err = app
+            .record_completion_audit("early", true, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only be recorded in Review"),
+            "expected phase guard, got: {err}"
+        );
     }
 
     #[test]

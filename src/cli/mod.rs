@@ -105,6 +105,11 @@ enum Commands {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
+    /// Completion-audit review verdicts (M-f hard review gate)
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommands,
+    },
     /// Adapter capability queries (M4)
     Adapter {
         #[command(subcommand)]
@@ -440,6 +445,30 @@ enum ApprovalCommands {
 }
 
 #[derive(Subcommand)]
+enum ReviewCommands {
+    /// Record a PASSING completion audit (M-f). A fresh pass (after the last
+    /// submit) is required before `ctl task finish`.
+    Accept {
+        /// Task identifier (must be in Review)
+        #[arg(long)]
+        id: String,
+        /// Optional reviewer note / audit summary
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Record a FAILING completion audit (M-f) — blocks finish until the work is
+    /// reworked and a passing audit is recorded.
+    Reject {
+        /// Task identifier (must be in Review)
+        #[arg(long)]
+        id: String,
+        /// Reason the audit failed
+        #[arg(long)]
+        note: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AdapterCommands {
     /// Report adapter capabilities (M4)
     Capabilities {
@@ -543,6 +572,7 @@ pub fn run() -> Result<()> {
         Commands::Run { command } => cmd_run(command, dry_run),
         Commands::Workspace { command } => cmd_workspace(command, dry_run),
         Commands::Approval { command } => cmd_approval(command, dry_run),
+        Commands::Review { command } => cmd_review(command, dry_run),
         Commands::Adapter { command } => cmd_adapter(command),
         Commands::Architecture { command } => cmd_architecture(command),
         Commands::Schedule { command } => cmd_schedule(command, dry_run),
@@ -977,6 +1007,27 @@ fn cmd_workspace(command: &WorkspaceCommands, dry_run: bool) -> Result<()> {
         WorkspaceCommands::Cleanup { id } => {
             let event = app.workspace_cleanup(id)?;
             println!("Cleaned workspace for task '{}' at seq {}.", id, event.seq);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_review(command: &ReviewCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
+    match command {
+        ReviewCommands::Accept { id, note } => {
+            let event = app.record_completion_audit(id, true, note.as_deref())?;
+            println!(
+                "Recorded passing completion audit for task '{}' at seq {}.",
+                id, event.seq
+            );
+        }
+        ReviewCommands::Reject { id, note } => {
+            let event = app.record_completion_audit(id, false, Some(note))?;
+            println!(
+                "Recorded FAILING completion audit for task '{}' at seq {}. Finish is blocked until reworked and re-audited.",
+                id, event.seq
+            );
         }
     }
     Ok(())
@@ -1660,6 +1711,7 @@ fn check_milestone_scope() -> Result<()> {
             "reconcile",
             "replay",
             "report",
+            "review",
             "run",
             "schedule",
             "schema",
