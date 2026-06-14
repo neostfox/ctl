@@ -331,11 +331,27 @@ impl ControlApp {
             return Err(anyhow!("Cannot finish: task is held"));
         }
 
-        // Gate interlock: all required gates must have latest passing result
+        // Artifact binding (tree_hash): the code being completed must be the code
+        // the latest required gate and the accepted completion audit validated.
+        // Bound to the committed tree (HEAD^{tree}); skipped outside a git repo,
+        // mirroring the M-g commit interlock. `None` here disables the binding
+        // checks below so non-git flows behave exactly as before.
+        let current_tree = crate::infrastructure::workspace::head_tree_hash(&self.project_root)?;
+
+        // Gate interlock: all required gates must have a latest PASSING result, and
+        // (in a git repo) that result must be bound to the current committed tree.
         let mut failing_gates = Vec::new();
+        let mut stale_gates = Vec::new();
         for gate_id in &state.gates {
             match state.gate_results.get(gate_id) {
-                Some(result) if result.passed => {}
+                Some(result) if result.passed => {
+                    if let Some(ref current) = current_tree {
+                        // Unbound (None, legacy) or bound to a different tree → stale.
+                        if result.tree_hash.as_deref() != Some(current.as_str()) {
+                            stale_gates.push(gate_id.as_str());
+                        }
+                    }
+                }
                 _ => {
                     failing_gates.push(gate_id.as_str());
                 }
@@ -345,6 +361,15 @@ impl ControlApp {
             return Err(anyhow!(
                 "Completion interlock: gates not passing: {:?}",
                 failing_gates
+            ));
+        }
+        if !stale_gates.is_empty() {
+            let current = current_tree.as_deref().unwrap_or("?");
+            return Err(anyhow!(
+                "Completion interlock: artifact evidence is stale.\n\
+                 current tree:    {current}\n\
+                 stale gate(s):   {stale_gates:?} validated on a different (or no) tree\n\
+                 rerun gates against the current committed tree before finishing"
             ));
         }
 
@@ -429,7 +454,21 @@ impl ControlApp {
             .filter(|e| last_submit_seq.is_none_or(|s| e.seq > s))
             .max_by_key(|e| e.seq);
         match latest_audit {
-            Some(e) if e.event_type == "evidence_accepted" => {}
+            Some(e) if e.event_type == "evidence_accepted" => {
+                // Artifact binding: the passing audit must be bound to the current
+                // committed tree (git repo only; skipped when unverifiable).
+                if let Some(ref current) = current_tree {
+                    let bound = e.payload.get("tree_hash").and_then(|v| v.as_str());
+                    if bound != Some(current.as_str()) {
+                        return Err(anyhow!(
+                            "Completion interlock: artifact evidence is stale.\n\
+                             current tree:    {current}\n\
+                             completion audit validated on a different (or no) tree\n\
+                             re-audit against the current committed tree before finishing"
+                        ));
+                    }
+                }
+            }
             Some(_) => {
                 return Err(anyhow!(
                     "Completion interlock: the latest completion audit is a FAIL. \
@@ -525,13 +564,19 @@ impl ControlApp {
         let evidence_id = generate_uuid();
         let event = if pass {
             let touched: Vec<String> = state.write_allow.iter().cloned().collect();
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "evidence_id": evidence_id,
                 "source": COMPLETION_AUDIT_SOURCE,
                 "touched_files": touched,
                 "result_file": note.unwrap_or(""),
                 "accepted_at": now_iso8601(),
             });
+            // Artifact binding: stamp the committed tree this audit validated.
+            if let Some(tree) =
+                crate::infrastructure::workspace::head_tree_hash(&self.project_root)?
+            {
+                payload["tree_hash"] = serde_json::json!(tree);
+            }
             self.build_event(task_id, "evidence_accepted", payload)?
         } else {
             let payload = serde_json::json!({
@@ -559,12 +604,18 @@ impl ControlApp {
         passed: bool,
         evidence: &str,
     ) -> Result<Event> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "gate_id": gate_id,
             "passed": passed,
             "evidence": evidence,
             "checked_at": now_iso8601(),
         });
+        // Artifact binding: stamp the committed tree this gate result was validated
+        // against. Omitted (not null) outside a git repo so the schema stays valid;
+        // unbound results cannot satisfy the finish-time interlock in a git repo.
+        if let Some(tree) = crate::infrastructure::workspace::head_tree_hash(&self.project_root)? {
+            payload["tree_hash"] = serde_json::json!(tree);
+        }
         let event = self.build_event(task_id, "gate_checked", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -3205,11 +3256,201 @@ mod tests {
             "expected commit interlock, got: {err}"
         );
 
-        // Commit the work → tree clean in scope → finish succeeds.
+        // Commit the work → tree clean in scope. The gate/audit recorded earlier
+        // are now bound to a different (or no) tree, so finish stays closed until
+        // they are re-validated against the current committed tree (artifact binding).
         git(dir.path(), &["add", "src/work.rs"]);
         git(dir.path(), &["commit", "-qm", "work"]);
+        let stale = app.finish_task("ilk").unwrap_err().to_string();
+        assert!(
+            stale.contains("artifact evidence is stale"),
+            "expected artifact binding to block stale evidence, got: {stale}"
+        );
+
+        // Re-gate + re-audit on the current tree → finish succeeds.
+        app.record_gate("ilk", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "ilk", None);
         let event = app.finish_task("ilk").unwrap();
         assert_eq!(event.event_type, "task_completed");
+    }
+
+    // ── Artifact binding (tree_hash) interlock ──
+
+    /// git repo with one initial commit, so `HEAD^{tree}` exists.
+    fn git_init_committed(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-qm", "init"]);
+    }
+
+    /// Commit a new src/ file so the committed tree advances.
+    fn commit_src(dir: &Path, name: &str, body: &str) {
+        std::fs::write(dir.join("src").join(name), body).unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-qm", "change"]);
+    }
+
+    /// create + ready + start + submit a git task scoped to src/ with `gates`.
+    fn git_task_to_review(app: &ControlApp, id: &str, gates: &[String]) {
+        let scope = vec!["src".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "tree binding test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.submit_task(id).unwrap();
+    }
+
+    // Case 1: gate + audit on the same committed tree → finish succeeds.
+    #[test]
+    fn artifact_binding_same_tree_finishes() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "t", None);
+        assert_eq!(app.finish_task("t").unwrap().event_type, "task_completed");
+    }
+
+    // Case 2: gate recorded, then a new commit → gate is stale → finish fails.
+    #[test]
+    fn artifact_binding_gate_then_commit_is_stale() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        commit_src(dir.path(), "b.rs", "fn b() {}\n");
+        audit_pass(&app, "t", None);
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(err.contains("artifact evidence is stale"), "{err}");
+    }
+
+    // Case 3: audit recorded, then a new commit → evidence is stale → finish fails.
+    #[test]
+    fn artifact_binding_audit_then_commit_is_stale() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "t", None);
+        commit_src(dir.path(), "b.rs", "fn b() {}\n");
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(err.contains("artifact evidence is stale"), "{err}");
+    }
+
+    // Case 4: gate re-run on the new tree but audit NOT re-run → audit stale → fail.
+    #[test]
+    fn artifact_binding_regate_without_reaudit_is_stale() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "t", None);
+        commit_src(dir.path(), "b.rs", "fn b() {}\n");
+        app.record_gate("t", "cargo_check", true, "ok").unwrap(); // gate now fresh
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(
+            err.contains("artifact evidence is stale") && err.contains("audit"),
+            "expected audit-stale, got: {err}"
+        );
+    }
+
+    // Case 5: audit re-run on the new tree but a required gate still on old tree → fail.
+    #[test]
+    fn artifact_binding_reaudit_with_stale_gate_fails() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "t", None);
+        commit_src(dir.path(), "b.rs", "fn b() {}\n");
+        audit_pass(&app, "t", None); // audit now fresh, gate still old
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(
+            err.contains("artifact evidence is stale") && err.contains("gate"),
+            "expected gate-stale, got: {err}"
+        );
+    }
+
+    // Case 6: a legacy gate_checked without tree_hash replays fine but cannot finish.
+    #[test]
+    fn artifact_binding_legacy_unbound_gate_replays_but_blocks_finish() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        // Pre-binding event: no tree_hash. Schema + reducer must accept it (replay ok).
+        let ev = app
+            .build_event(
+                "t",
+                "gate_checked",
+                serde_json::json!({
+                    "gate_id": "cargo_check",
+                    "passed": true,
+                    "evidence": "ok",
+                    "checked_at": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        app.validate_and_append(&ev).unwrap(); // proves replay tolerates missing tree_hash
+        audit_pass(&app, "t", None);
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(err.contains("artifact evidence is stale"), "{err}");
+    }
+
+    // Case 7: a FAILED gate on the current tree still cannot finish (passing check first).
+    #[test]
+    fn artifact_binding_failed_gate_same_tree_not_passing() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(&app, "t", &["cargo_check".to_string()]);
+        app.record_gate("t", "cargo_check", false, "boom").unwrap();
+        audit_pass(&app, "t", None);
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(err.contains("gates not passing"), "{err}");
+    }
+
+    // Case 8: with multiple required gates, one stale gate blocks finish.
+    #[test]
+    fn artifact_binding_one_of_many_gates_stale() {
+        let dir = TempDir::new();
+        git_init_committed(dir.path());
+        let app = ControlApp::init(dir.path()).unwrap();
+        git_task_to_review(
+            &app,
+            "t",
+            &["cargo_check".to_string(), "cargo_fmt_check".to_string()],
+        );
+        app.record_gate("t", "cargo_check", true, "ok").unwrap();
+        app.record_gate("t", "cargo_fmt_check", true, "ok").unwrap();
+        commit_src(dir.path(), "b.rs", "fn b() {}\n");
+        app.record_gate("t", "cargo_check", true, "ok").unwrap(); // only this one refreshed
+        audit_pass(&app, "t", None);
+        let err = app.finish_task("t").unwrap_err().to_string();
+        assert!(
+            err.contains("artifact evidence is stale") && err.contains("cargo_fmt_check"),
+            "expected cargo_fmt_check stale, got: {err}"
+        );
     }
 
     // ── M6: merge-candidate ──

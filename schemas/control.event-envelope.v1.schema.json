@@ -127,6 +127,11 @@
                 "description": "ISO 8601 timestamp of when the gate was checked.",
                 "type": "string",
                 "format": "date-time"
+              },
+              "tree_hash": {
+                "description": "Git tree hash (HEAD^{tree}) this gate result was validated against (artifact binding). Optional for legacy events recorded before binding existed.",
+                "type": "string",
+                "minLength": 1
               }
             },
             "additionalProperties": false
@@ -477,6 +482,11 @@
               "accepted_at": {
                 "description": "ISO 8601 timestamp of acceptance.",
                 "type": "string"
+              },
+              "tree_hash": {
+                "description": "Git tree hash (HEAD^{tree}) this completion audit validated against (artifact binding). Optional for legacy events recorded before binding existed.",
+                "type": "string",
+                "minLength": 1
               }
             },
             "additionalProperties": false

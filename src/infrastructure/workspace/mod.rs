@@ -193,6 +193,37 @@ pub fn dirty_paths_in_scope(project_root: &Path, scope: &[String]) -> Result<Opt
     Ok(Some(dirty))
 }
 
+/// Git tree hash of the current committed `HEAD` (`HEAD^{tree}`).
+///
+/// This is the canonical artifact identity used to bind gate and completion-audit
+/// evidence to a specific code state (artifact binding). Only the committed tree
+/// is bound — not the index or working tree — matching the M-g commit interlock,
+/// so the binding is stable across the gate→audit→finish window once work is
+/// committed.
+///
+/// Returns `Ok(None)` when the project is not a git repository, `git` is
+/// unavailable, or `HEAD` has no commit yet — the caller decides whether an
+/// unverifiable tree is fatal (finish skips the binding interlock, mirroring M-g).
+pub fn head_tree_hash(project_root: &Path) -> Result<Option<String>> {
+    let output = match std::process::Command::new("git")
+        .args(["rev-parse", "HEAD^{tree}"])
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(None), // git binary unavailable — unverifiable
+    };
+    if !output.status.success() {
+        // Not a git repo (exit 128) or no commit yet — unverifiable, not fatal here.
+        return Ok(None);
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(hash))
+}
+
 /// Detect high-risk changes from a diff.
 /// Returns a list of (risk_type, file_path) pairs.
 pub fn detect_high_risk(files: &[(String, String)]) -> Vec<(String, String)> {
