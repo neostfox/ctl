@@ -688,6 +688,34 @@ M-f 的"完成审计裁决事件"联锁并列检查。注意 `.ctl/` 被 gitigno
   与非 git 仓库跳过。
 - 流程：implement → submit(→Review) → 完成审计 → commit/push → finish(→Completed) → archive。
 
+### M6：依赖门控的串行启动 ✅ 已实现（决策：串行优先于并发）
+
+**决策**：M6「受限多智能体」正文设想的 capability-lease 并行（A/B/C 在不重叠写范围内同时跑、
+worktree-per-agent、scoped lease、崩溃恢复）**暂不实现**，按「禁止过早进入自动路径」原则
+（no premature automation）改以**依赖驱动的串行执行**交付 M6 的可用价值。理由：真正的并发监督
+（共享 `.git` 防护、文件锁、崩溃幂等、合并恢复）是重资产，而当前 dogfood 负载是单写者串行；
+先用依赖边把「A 先于 B」这一最常见的编排需求做硬，再在有真实并发压力时引入 lease 主体。
+**留后续（未实现）**：`AgentRun` aggregate 激活、worktree-per-agent、scoped write lease、并发执行器
+spawn、自动 merge——M6 正文与 M-f 收尾条目的「留后续」继续有效。
+
+**问题**：M-d 已让任务声明 `depends_on` 并在调度/board 投影里用它排序，但**任务 `start` 不查依赖**——
+B 可以在 A 完成前就 `ctl task start`。M-a 只拦「≥2 个活动写任务」，并不理解「B 必须等 A 完成」。
+
+**已落地**：
+- `unmet_dependencies(task_id)`（`src/application/mod.rs`，**应用层跨任务读，reducer 仍纯**）——回放
+  本任务取 `depends_on`，逐个回放依赖：仅当依赖**存在且 phase=Completed** 才算满足（archive 保留
+  Completed，故已归档完成的前置仍满足）；缺失任务或任何非完成态（planning/ready/in_progress/review/
+  cancelled）一律视为未满足，**失败关闭**。返回排序后的阻塞 ID 列表。
+- `start_task` 门控——start 前先查 `unmet_dependencies`，非空则拒绝并列出阻塞依赖 ID + 解法
+  （先完成/归档前置，或 `ctl task revise --depends-on` 改边）。依赖链 A→B→C 因此严格串行：B 在 A 完成
+  前拒启，C 在 B 完成前拒启。与 M-a 互补——M-a 拦并发写歧义，本条拦「次序未到就启动」。
+- 可观测——`ctl task status`（人类「Blocked by (unfinished dependencies): …」行）与 `--json`
+  （新增派生 `blocked_by` 数组）暴露阻塞依赖。**冻结的 task-view schema / 持久化 `task.json` 投影不动**：
+  `blocked_by` 是 CLI 显示层的派生字段（该 JSON 本就是冻结投影的超集，含 `depends_on`/`gate_results`
+  等非 schema 字段），既不写盘也不入 schema。
+- 测试——6 条应用层单测：依赖未完成→拒启（错误含阻塞 ID）；依赖完成/归档→放行；链 A→B→C 严格串行；
+  未知依赖→拒启（失败关闭）；无依赖→不受影响照常启动。
+
 ### 分发缺口：评审规则文件
 
 `ctl-review` 依赖 `.ctl/spec/guides/review-contract.md`，`ctl-diagnose` 依赖

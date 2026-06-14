@@ -854,10 +854,14 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
         }
         TaskCommands::Status { id, json } => {
             let state = app.get_status(id)?;
+            // M6: derived, cross-task view of which declared dependencies are
+            // still unfinished. Computed here (not persisted) so the frozen
+            // task-view schema / task.json projection is untouched.
+            let blocked_by = app.unmet_dependencies(id)?;
             if *json {
-                print_task_state(&state)?;
+                print_task_state(&state, &blocked_by)?;
             } else {
-                print_task_human(&state)?;
+                print_task_human(&state, &blocked_by)?;
             }
         }
         TaskCommands::Start { id } => {
@@ -1403,7 +1407,7 @@ fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
     Ok(())
 }
 
-fn print_task_state(state: &TaskState) -> Result<()> {
+fn print_task_state(state: &TaskState, blocked_by: &[String]) -> Result<()> {
     let gate_results: BTreeMap<_, _> = state.gate_results.iter().collect();
     let active_leases: usize = state
         .leases
@@ -1424,6 +1428,10 @@ fn print_task_state(state: &TaskState) -> Result<()> {
         "risk_triggers": state.risk_triggers,
         "gates": state.gates,
         "depends_on": state.depends_on,
+        // M6: derived dependency-gating view — declared deps not yet Completed.
+        // Display-only (this richer CLI JSON is already a superset of the frozen
+        // persisted task-view); empty array means nothing blocks a start.
+        "blocked_by": blocked_by,
         "gate_results": gate_results,
         "active_run": state.active_run,
         "leases_active": active_leases,
@@ -1434,7 +1442,7 @@ fn print_task_state(state: &TaskState) -> Result<()> {
     Ok(())
 }
 
-fn print_task_human(state: &TaskState) -> Result<()> {
+fn print_task_human(state: &TaskState, blocked_by: &[String]) -> Result<()> {
     println!("Task: {}", state.id);
     println!("Phase: {:?}", state.phase);
     if state.is_held {
@@ -1467,6 +1475,14 @@ fn print_task_human(state: &TaskState) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+    }
+    // M6: dependency-gated start — which declared deps are not yet Completed.
+    // Present only when something blocks; a startable task prints nothing here.
+    if !blocked_by.is_empty() {
+        println!(
+            "Blocked by (unfinished dependencies): {}",
+            blocked_by.join(", ")
         );
     }
     // M4: Active run

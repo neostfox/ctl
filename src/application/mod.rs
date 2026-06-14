@@ -198,7 +198,49 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// M6 dependency-gated start: the declared `depends_on` task IDs of
+    /// `task_id` that are NOT yet satisfied. A dependency counts as satisfied
+    /// only when the task exists and has reached `Completed` (archiving keeps
+    /// the phase, so an archived-completed prerequisite still satisfies).
+    /// Every other case — a missing/unknown task, or a phase of
+    /// planning/ready/in_progress/review/cancelled — is unmet. This fails
+    /// closed: a dependent never starts ahead of, or alongside, an unfinished
+    /// prerequisite. The result is sorted for stable diagnostics.
+    ///
+    /// This is a cross-task read, so it lives in the app layer (the reducer
+    /// stays pure and can only see one task's own log), mirroring the M-a
+    /// multiple-active-writer interlock.
+    pub fn unmet_dependencies(&self, task_id: &str) -> Result<Vec<String>> {
+        let state = self.replay_task(task_id)?;
+        let mut unmet: Vec<String> = state
+            .depends_on
+            .iter()
+            .filter(|dep| {
+                !matches!(
+                    self.replay_task(dep),
+                    Ok(dep_state) if dep_state.phase == Phase::Completed
+                )
+            })
+            .cloned()
+            .collect();
+        unmet.sort();
+        Ok(unmet)
+    }
+
     pub fn start_task(&self, task_id: &str) -> Result<Event> {
+        // M6 dependency-gated start: refuse while any declared dependency is
+        // unfinished, so a dependency chain runs strictly serially.
+        let blocked_by = self.unmet_dependencies(task_id)?;
+        if !blocked_by.is_empty() {
+            return Err(anyhow!(
+                "Cannot start '{}': blocked by unfinished dependencies [{}]. \
+                 Complete (and archive) each prerequisite first, or drop the edge \
+                 with `ctl task revise --id {} --depends-on <remaining ids>`.",
+                task_id,
+                blocked_by.join(", "),
+                task_id
+            ));
+        }
         let event = self.build_event(task_id, "task_started", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
@@ -3083,5 +3125,129 @@ mod tests {
         assert_eq!(h, 0);
         assert_eq!(mi, 0);
         assert_eq!(s, 0);
+    }
+
+    // ── M6: dependency-gated start (serial orchestration) ───────────────────
+
+    /// Create + ready a task with the given dependency edges, leaving it Ready
+    /// (not started) so the start-time dependency gate can be exercised.
+    fn create_with_deps(app: &ControlApp, id: &str, deps: &[&str]) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        let deps: Vec<String> = deps.iter().map(|s| s.to_string()).collect();
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "dependency-gated start test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &deps,
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+    }
+
+    /// Drive an already-created, Ready task (dependencies satisfied) all the way
+    /// to Completed. No git repo → the M-g commit interlock is skipped; M-f's
+    /// audit is supplied by a non-implementer reviewer.
+    fn finish_ready(app: &ControlApp, id: &str) {
+        app.start_task(id).unwrap();
+        app.submit_task(id).unwrap();
+        app.record_gate(id, "cargo_check", true, "ok").unwrap();
+        audit_pass(app, id, None);
+        app.finish_task(id).unwrap();
+        assert_eq!(app.replay_task(id).unwrap().phase, Phase::Completed);
+    }
+
+    #[test]
+    fn start_blocked_while_dependency_incomplete() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "dep", &[]); // left in Ready, never Completed
+        create_with_deps(&app, "dependent", &["dep"]);
+        assert_eq!(
+            app.unmet_dependencies("dependent").unwrap(),
+            vec!["dep".to_string()]
+        );
+        let err = app.start_task("dependent").unwrap_err().to_string();
+        assert!(err.contains("blocked by"), "got: {err}");
+        assert!(err.contains("dep"), "error should name the blocker: {err}");
+    }
+
+    #[test]
+    fn start_allowed_once_dependency_completed() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "dep", &[]);
+        finish_ready(&app, "dep");
+        create_with_deps(&app, "dependent", &["dep"]);
+        assert!(app.unmet_dependencies("dependent").unwrap().is_empty());
+        let event = app.start_task("dependent").unwrap();
+        assert_eq!(event.event_type, "task_started");
+    }
+
+    #[test]
+    fn start_allowed_when_dependency_archived() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "dep", &[]);
+        finish_ready(&app, "dep");
+        app.archive_task("dep").unwrap();
+        // Archiving keeps the phase at Completed, so it still satisfies.
+        assert_eq!(app.replay_task("dep").unwrap().phase, Phase::Completed);
+        create_with_deps(&app, "dependent", &["dep"]);
+        assert!(app.unmet_dependencies("dependent").unwrap().is_empty());
+        app.start_task("dependent").unwrap();
+    }
+
+    #[test]
+    fn start_rejected_for_unknown_dependency() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "dependent", &["ghost"]);
+        // Missing prerequisite → unmet (fail closed).
+        assert_eq!(
+            app.unmet_dependencies("dependent").unwrap(),
+            vec!["ghost".to_string()]
+        );
+        let err = app.start_task("dependent").unwrap_err().to_string();
+        assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn dependency_chain_runs_strictly_serial() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "a", &[]);
+        create_with_deps(&app, "b", &["a"]);
+        create_with_deps(&app, "c", &["b"]);
+        // While A is unfinished, both B and C are blocked.
+        assert!(app.start_task("b").is_err());
+        assert!(app.start_task("c").is_err());
+        // A complete → B may start; C still blocked on the in-progress B.
+        finish_ready(&app, "a");
+        app.start_task("b").unwrap();
+        assert!(app.start_task("c").is_err());
+        // Drive B (already InProgress) to Completed → C may finally start.
+        app.submit_task("b").unwrap();
+        app.record_gate("b", "cargo_check", true, "ok").unwrap();
+        audit_pass(&app, "b", None);
+        app.finish_task("b").unwrap();
+        let event = app.start_task("c").unwrap();
+        assert_eq!(event.event_type, "task_started");
+    }
+
+    #[test]
+    fn start_unaffected_without_dependencies() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        create_with_deps(&app, "solo", &[]);
+        assert!(app.unmet_dependencies("solo").unwrap().is_empty());
+        let event = app.start_task("solo").unwrap();
+        assert_eq!(event.event_type, "task_started");
     }
 }
