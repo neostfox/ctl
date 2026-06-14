@@ -11,32 +11,40 @@ use crate::domain::telemetry::TelemetryEntry;
 
 /// Max time to wait to acquire a per-task write lock before giving up.
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
-/// A lock file older than this is treated as abandoned by a crashed writer and
-/// reclaimed. The locked critical section (read-seq → validate → append) is a
-/// few milliseconds, so no legitimate holder is ever this old.
-const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 
-/// RAII guard for an exclusive per-task write lock. Dropping it releases the lock
-/// (removes the lock file).
+/// Monotonic counter for lock ownership nonces (unique per process).
+static LOCK_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn new_lock_nonce() -> String {
+    let n = LOCK_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{}", std::process::id(), n)
+}
+
+/// RAII guard for an exclusive per-task write lock.
+///
+/// Mutual exclusion is unconditional: the lock is acquired by atomically creating
+/// the lock file (`create_new`), and nothing ever removes a lock it does not own.
+/// In particular there is NO time-based "stale reclaim" — a slow-but-live holder
+/// can never have its lock stolen (which would let two writers proceed at once),
+/// and a crashed holder's lock is recovered explicitly, not by a heuristic. (A
+/// race-free automatic reclaim is not achievable with plain lock files; it needs
+/// OS advisory locks — flock/LockFileEx — which would add a platform dependency.)
 pub struct TaskLock {
     path: PathBuf,
+    /// Ownership token written into the lock file at creation. Drop removes the
+    /// file ONLY if it still carries this nonce, so a guard can never delete a
+    /// lock now held by someone else.
+    nonce: String,
 }
 
 impl Drop for TaskLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Whether a lock file is old enough to be considered abandoned.
-fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
-    match fs::metadata(path).and_then(|m| m.modified()) {
-        // `elapsed` errors if mtime is in the future (clock skew) — treat as fresh.
-        Ok(mtime) => mtime
-            .elapsed()
-            .map(|age| age >= stale_after)
-            .unwrap_or(false),
-        Err(_) => false,
+        // Remove only if we still own it (first line == our nonce).
+        if let Ok(content) = fs::read_to_string(&self.path) {
+            if content.lines().next() == Some(self.nonce.as_str()) {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
     }
 }
 
@@ -83,40 +91,40 @@ impl FileEventStore {
     /// Held across the read-seq → validate → append critical section so two
     /// concurrent `ctl` processes cannot read the same max sequence and append
     /// conflicting events. Implemented as an atomic create-new lock file (no
-    /// external deps); a lock left behind by a crashed writer is reclaimed after
-    /// `LOCK_STALE_AFTER`.
+    /// external deps). Mutual exclusion is unconditional: a live holder's lock is
+    /// never stolen. A lock left by a crashed writer must be removed explicitly
+    /// (the acquire-timeout error reports its path and the holder pid).
     pub fn lock_task(&self, task_id: &str) -> Result<TaskLock> {
-        self.lock_task_with(task_id, LOCK_ACQUIRE_TIMEOUT, LOCK_STALE_AFTER)
+        self.lock_task_with(task_id, LOCK_ACQUIRE_TIMEOUT)
     }
 
-    /// `lock_task` with explicit timing — for tests.
-    fn lock_task_with(
-        &self,
-        task_id: &str,
-        acquire_timeout: Duration,
-        stale_after: Duration,
-    ) -> Result<TaskLock> {
+    /// `lock_task` with an explicit acquire timeout — for tests.
+    fn lock_task_with(&self, task_id: &str, acquire_timeout: Duration) -> Result<TaskLock> {
         let task_dir = self.task_dir(task_id)?;
         fs::create_dir_all(&task_dir)?;
         let path = task_dir.join(".lock");
+        let nonce = new_lock_nonce();
         let start = Instant::now();
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
+                    // Line 1: ownership nonce (checked on Drop). Line 2: holder pid
+                    // (diagnostic only — never used to steal a live lock).
+                    let _ = writeln!(f, "{}", nonce);
                     let _ = writeln!(f, "pid={}", std::process::id());
-                    return Ok(TaskLock { path });
+                    return Ok(TaskLock { path, nonce });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if lock_is_stale(&path, stale_after) {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
                     if start.elapsed() >= acquire_timeout {
+                        let holder = fs::read_to_string(&path).unwrap_or_default();
+                        let holder_pid = holder.lines().nth(1).unwrap_or("pid=unknown");
                         return Err(anyhow!(
-                            "could not acquire write lock for task '{}' within {:?}; \
-                             another writer holds {}",
+                            "could not acquire write lock for task '{}' within {:?} (held by {}). \
+                             If no ctl process is running, the holder crashed — remove the stale \
+                             lock file to recover: {}",
                             task_id,
                             acquire_timeout,
+                            holder_pid,
                             path.display()
                         ));
                     }
@@ -517,7 +525,7 @@ mod tests {
         let store = FileEventStore::init(dir.path()).unwrap();
         let _held = store.lock_task("t").unwrap();
         // A second acquisition cannot succeed while the first is held.
-        let r = store.lock_task_with("t", Duration::from_millis(150), Duration::from_secs(30));
+        let r = store.lock_task_with("t", Duration::from_millis(150));
         assert!(r.is_err(), "second lock must not acquire while held");
     }
 
@@ -530,7 +538,7 @@ mod tests {
         let store2 = FileEventStore::init(dir.path()).unwrap();
         let waiter = std::thread::spawn(move || {
             let start = Instant::now();
-            let g = store2.lock_task_with("t", Duration::from_secs(5), Duration::from_secs(30));
+            let g = store2.lock_task_with("t", Duration::from_secs(5));
             (g.is_ok(), start.elapsed())
         });
 
@@ -544,16 +552,49 @@ mod tests {
         );
     }
 
+    // Safety: a LIVE holder's lock is never stolen (no time-based reclaim), so two
+    // writers can never proceed at once. (Regression for the broken stale-reclaim.)
     #[test]
-    fn lock_reclaims_stale_lock() {
+    fn live_lock_is_never_stolen() {
         let dir = TempDir::new();
         let store = FileEventStore::init(dir.path()).unwrap();
-        // Simulate a lock left by a crashed writer.
+        let _held = store.lock_task("t").unwrap(); // LIVE holder (this process)
+        let stolen = store
+            .lock_task_with("t", Duration::from_millis(200))
+            .is_ok();
+        assert!(!stolen, "live lock was stolen — mutual exclusion broken");
+    }
+
+    // Safety: Drop removes the lock ONLY if it still owns it. If the file has been
+    // replaced by another holder, Drop must leave it intact.
+    #[test]
+    fn drop_does_not_delete_foreign_lock() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        let path = store.task_dir("t").unwrap().join(".lock");
+        let a = store.lock_task("t").unwrap();
+        std::fs::write(&path, "someone-else\npid=999").unwrap(); // now another holder's
+        drop(a);
+        assert!(path.exists(), "Drop deleted a lock it no longer owns");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A crashed holder's lock can be recovered by removing the file; a fresh
+    // acquire then succeeds (the supported explicit recovery path).
+    #[test]
+    fn explicit_recovery_after_stale_lock() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
         let task_dir = store.task_dir("t").unwrap();
         std::fs::create_dir_all(&task_dir).unwrap();
-        std::fs::write(task_dir.join(".lock"), "pid=999999").unwrap();
-        // stale_after = 0 → any existing lock is reclaimable immediately.
-        let g = store.lock_task_with("t", Duration::from_secs(1), Duration::ZERO);
-        assert!(g.is_ok(), "stale lock must be reclaimed");
+        let lock_path = task_dir.join(".lock");
+        std::fs::write(&lock_path, "dead-holder\npid=999999").unwrap();
+        // Not reclaimed automatically:
+        assert!(store
+            .lock_task_with("t", Duration::from_millis(100))
+            .is_err());
+        // Explicit recovery:
+        std::fs::remove_file(&lock_path).unwrap();
+        assert!(store.lock_task("t").is_ok());
     }
 }
