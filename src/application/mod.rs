@@ -65,6 +65,19 @@ pub struct ReviseTaskInput<'a> {
     pub depends_on: Option<&'a [String]>,
 }
 
+/// M6 crash-recovery snapshot of one `Running` run (see [`ControlApp::recover_report`]).
+/// `worktree_exists == false` marks an inconsistent run whose isolation
+/// workspace is gone — a recovery-abort candidate.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunRecoveryStatus {
+    pub run_id: String,
+    pub task_id: String,
+    pub write_allow: Vec<String>,
+    pub worktree_path: Option<String>,
+    pub worktree_exists: bool,
+    pub manifest_exists: bool,
+}
+
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
@@ -2211,6 +2224,59 @@ impl ControlApp {
         Ok(event)
     }
 
+    // ── M6: crash recovery (slice 2) — read-only detection + explicit abort ──
+
+    /// Crash-recovery snapshot of every `Running` run: whether its isolated
+    /// worktree and prepared manifest are still on disk. A Running run whose
+    /// `worktree_exists` is false is inconsistent — the orchestrator likely died
+    /// mid-run — and recovery is to `abort_run` it (freeing its write scope)
+    /// once a human confirms. Read-only: replays aggregates and stats the
+    /// filesystem, never appends.
+    pub fn recover_report(&self) -> Result<Vec<RunRecoveryStatus>> {
+        let store = self.run_store()?;
+        let mut out = Vec::new();
+        for run in self.active_runs()? {
+            let manifest_exists = store
+                .run_dir(&run.run_id)
+                .join("run-manifest.json")
+                .exists();
+            let worktree_exists = run
+                .worktree_path
+                .as_ref()
+                .map(|wt| Path::new(wt).exists())
+                .unwrap_or(false);
+            out.push(RunRecoveryStatus {
+                run_id: run.run_id.clone(),
+                task_id: run.task_id.clone(),
+                write_allow: run.write_allow.iter().cloned().collect(),
+                worktree_path: run.worktree_path.clone(),
+                worktree_exists,
+                manifest_exists,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Worktree directories under `.ctl/runs/` whose run is terminal or absent —
+    /// leftover isolation dirs safe to prune. Returns their paths (read-only).
+    pub fn orphaned_run_worktrees(&self) -> Result<Vec<String>> {
+        let store = self.run_store()?;
+        let mut orphans = Vec::new();
+        for run_id in store.run_ids()? {
+            let wt =
+                crate::infrastructure::workspace::run_worktree_path(&self.project_root, &run_id);
+            if !wt.exists() {
+                continue;
+            }
+            // Worktree on disk but the run is no longer Running → leftover.
+            let running = matches!(self.replay_run(&run_id), Ok(s) if s.phase == RunPhase::Running);
+            if !running {
+                orphans.push(wt.to_string_lossy().to_string());
+            }
+        }
+        Ok(orphans)
+    }
+
     // ── M4: Helpers ──
 
     fn get_worktree_path(&self, task_id: &str) -> Result<PathBuf> {
@@ -3725,5 +3791,80 @@ mod tests {
         app.finish_run(&r_src).unwrap();
         app.start_run(&r_src2).unwrap();
         assert_eq!(app.replay_run(&r_src2).unwrap().phase, RunPhase::Running);
+    }
+
+    // ── M6: crash recovery (slice 2) ────────────────────────────────────────
+
+    #[test]
+    fn recover_report_lists_only_running() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let r = seed_running_run(&app, "t", &["src"]); // Running
+        inprogress_task(&app, "tq", &["docs"]);
+        app.create_run("tq", "omp").unwrap(); // Queued, never started
+        let report = app.recover_report().unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].run_id, r);
+        // The seeded run points at a worktree that was never created → flagged
+        // as inconsistent (a crash-recovery abort candidate).
+        assert!(!report[0].worktree_exists);
+    }
+
+    #[test]
+    fn recover_abort_frees_scope_and_drops_from_report() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let r = seed_running_run(&app, "t", &["src"]);
+        let scope: BTreeSet<String> = ["src".to_string()].into_iter().collect();
+        assert!(app.check_run_scope_overlap("x", &scope).is_err());
+        app.abort_run(&r, "crash recovery").unwrap();
+        assert_eq!(app.replay_run(&r).unwrap().phase, RunPhase::Aborted);
+        assert!(app.check_run_scope_overlap("x", &scope).is_ok());
+        assert!(app.recover_report().unwrap().is_empty());
+        // Aborting an already-terminal run is rejected (no duplicate side effect).
+        assert!(app.abort_run(&r, "again").is_err());
+    }
+
+    #[test]
+    fn orphaned_worktrees_lists_terminal_run_leftover() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let r = seed_running_run(&app, "t", &["src"]);
+        app.finish_run(&r).unwrap(); // terminal
+                                     // Nothing on disk yet (seeded worktree was never created).
+        assert!(app.orphaned_run_worktrees().unwrap().is_empty());
+        // Simulate a leftover worktree dir for the now-terminal run.
+        let wt = crate::infrastructure::workspace::run_worktree_path(dir.path(), &r);
+        std::fs::create_dir_all(&wt).unwrap();
+        let orphans = app.orphaned_run_worktrees().unwrap();
+        assert!(orphans.iter().any(|o| o.contains(&r)), "got: {orphans:?}");
+    }
+
+    #[test]
+    fn recover_abort_removes_real_worktree() {
+        let dir = TempDir::new();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-qm", "init"]);
+
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "task-src", &["src"]);
+        let r = app.create_run("task-src", "omp").unwrap();
+        app.start_run(&r).unwrap();
+        let wt = crate::infrastructure::workspace::run_worktree_path(dir.path(), &r);
+        assert!(wt.exists());
+        // A real, in-flight run is reported with a present worktree + manifest.
+        let rep = app.recover_report().unwrap();
+        assert!(rep
+            .iter()
+            .any(|s| s.run_id == r && s.worktree_exists && s.manifest_exists));
+        // Recovery abort tears it down and frees the scope.
+        app.abort_run(&r, "crash recovery").unwrap();
+        assert!(!wt.exists());
+        assert_eq!(app.replay_run(&r).unwrap().phase, RunPhase::Aborted);
+        assert!(app.recover_report().unwrap().is_empty());
     }
 }

@@ -455,6 +455,20 @@ enum RunCommands {
         #[arg(long)]
         reason: String,
     },
+    /// Crash recovery (M6): report Running run aggregates + orphaned worktrees;
+    /// with --abort, tear down one run (free its scope, remove its worktree).
+    Recover {
+        /// Abort this run_id: record run_aborted, clean up its worktree, and
+        /// free its write scope. Omit for a read-only recovery report.
+        #[arg(long)]
+        abort: Option<String>,
+        /// Reason recorded on the abort.
+        #[arg(long, default_value = "crash-recovery abort")]
+        reason: String,
+        /// Emit JSON instead of a human table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1214,6 +1228,73 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
         RunCommands::Abort { id, reason } => {
             app.run_abort(id, reason)?;
             println!("Aborted run for task '{}'.", id);
+        }
+        RunCommands::Recover {
+            abort,
+            reason,
+            json,
+        } => {
+            if let Some(run_id) = abort {
+                app.abort_run(run_id, reason)?;
+                println!(
+                    "Recovery: aborted run '{}' — write scope freed, worktree cleaned up.",
+                    run_id
+                );
+                return Ok(());
+            }
+            let report = app.recover_report()?;
+            let orphans = app.orphaned_run_worktrees()?;
+            if *json {
+                let out = serde_json::json!({
+                    "running": report,
+                    "orphaned_worktrees": orphans,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+            if report.is_empty() {
+                println!("No Running runs.");
+            } else {
+                println!(
+                    "{:<38} {:<16} {:<10} {:<10} WRITE_SCOPE",
+                    "RUN_ID", "TASK_ID", "WORKTREE", "MANIFEST"
+                );
+                for r in &report {
+                    println!(
+                        "{:<38} {:<16} {:<10} {:<10} {}",
+                        r.run_id,
+                        r.task_id,
+                        if r.worktree_exists {
+                            "present"
+                        } else {
+                            "MISSING"
+                        },
+                        if r.manifest_exists {
+                            "present"
+                        } else {
+                            "missing"
+                        },
+                        r.write_allow.join(",")
+                    );
+                }
+                let inconsistent: Vec<&str> = report
+                    .iter()
+                    .filter(|r| !r.worktree_exists)
+                    .map(|r| r.run_id.as_str())
+                    .collect();
+                if !inconsistent.is_empty() {
+                    println!(
+                        "\n{} run(s) have a MISSING worktree (likely a crash). Recover with `ctl run recover --abort <run_id>`.",
+                        inconsistent.len()
+                    );
+                }
+            }
+            if !orphans.is_empty() {
+                println!("\nOrphaned worktrees (run terminal/absent — safe to remove):");
+                for o in &orphans {
+                    println!("  {}", o);
+                }
+            }
         }
     }
     Ok(())
