@@ -834,6 +834,14 @@ impl ControlApp {
                 archived += 1;
             }
 
+            // M5: deterministic drift projection. Signals derive from events +
+            // the telemetry evidence index; the rule engine is pure, so this
+            // stays wall-clock-free and reconcile remains byte-identical.
+            let telemetry = self.store.read_telemetry_for_task(task_id)?;
+            let signals = drift_signals_from(&events, &state, &telemetry);
+            let report = crate::domain::drift::evaluate(task_id, &signals);
+            let action = crate::domain::drift::next_action(&report, state.phase.clone());
+
             rows.push(serde_json::json!({
                 "task_id": task_id,
                 "objective": state.objective,
@@ -846,6 +854,10 @@ impl ControlApp {
                 "review": review,
                 "write_scope": state.write_allow.iter().collect::<Vec<_>>(),
                 "depends_on": state.depends_on.iter().collect::<Vec<_>>(),
+                "drift_level": report.level.as_str(),
+                "drift_score": report.score,
+                "drift_rules": report.fired_ids(),
+                "recommended_action": action.action.as_str(),
             }));
         }
 
@@ -874,6 +886,77 @@ impl ControlApp {
         std::fs::write(&tmp, serde_json::to_string_pretty(&board)?)?;
         std::fs::rename(&tmp, &path)?;
         Ok(path)
+    }
+
+    // ── M5: telemetry + drift + next-action (explainable control loop) ──
+
+    /// Append one telemetry evidence record to the evidence index (M5). This is
+    /// the only M5 write op; drift/next-action are read-only projections. The
+    /// `recorded_at` provenance timestamp is stamped here (the domain stays
+    /// time-free). Unknown `kind`s are accepted as evidence but the drift engine
+    /// fails closed on them.
+    pub fn telemetry_add(
+        &self,
+        task_id: &str,
+        kind: &str,
+        value: i64,
+        source: &str,
+    ) -> Result<crate::domain::telemetry::TelemetryEntry> {
+        // The task must exist so telemetry is always attributable.
+        if self.store.read_for_task(task_id)?.is_empty() {
+            return Err(anyhow!("Task '{}' does not exist", task_id));
+        }
+        let entry = crate::domain::telemetry::TelemetryEntry::new(
+            task_id,
+            kind,
+            value,
+            &now_iso8601(),
+            source,
+        );
+        if self.dry_run {
+            println!(
+                "[dry-run] Would append telemetry: task={}, kind={}, value={}",
+                task_id, kind, value
+            );
+            return Ok(entry);
+        }
+        self.store.append_telemetry(&entry)?;
+        Ok(entry)
+    }
+
+    /// Derive the drift signals for a task from the event ledger and the
+    /// telemetry evidence index. Pure projection — emits no events.
+    fn collect_drift_signals(
+        &self,
+        task_id: &str,
+    ) -> Result<(crate::domain::drift::DriftSignals, Phase)> {
+        let events = self.store.read_for_task(task_id)?;
+        if events.is_empty() {
+            return Err(anyhow!("Task '{}' does not exist", task_id));
+        }
+        let mut state = TaskState::new(task_id);
+        for event in &events {
+            apply(&mut state, event)
+                .map_err(|e| anyhow!("Reducer error at seq {}: {}", event.seq, e))?;
+        }
+        let telemetry = self.store.read_telemetry_for_task(task_id)?;
+        let signals = drift_signals_from(&events, &state, &telemetry);
+        Ok((signals, state.phase))
+    }
+
+    /// Compute the drift report for a task (M5). Read-only.
+    pub fn compute_drift(&self, task_id: &str) -> Result<crate::domain::drift::DriftReport> {
+        let (signals, _phase) = self.collect_drift_signals(task_id)?;
+        Ok(crate::domain::drift::evaluate(task_id, &signals))
+    }
+
+    /// Recommend the next action for a task (M5). Read-only and advisory — it
+    /// emits no events and, for replan/rescope, only returns a structured
+    /// proposal for a human to act on.
+    pub fn next_action(&self, task_id: &str) -> Result<crate::domain::drift::NextActionProposal> {
+        let (signals, phase) = self.collect_drift_signals(task_id)?;
+        let report = crate::domain::drift::evaluate(task_id, &signals);
+        Ok(crate::domain::drift::next_action(&report, phase))
     }
 
     // ── Queries ──
@@ -2081,6 +2164,63 @@ fn new_validator_if_available() -> Option<SchemaValidator> {
     }
 }
 
+// ── M5: drift signal derivation (pure over already-loaded data) ──
+
+/// Build the drift signals from a task's events, its reduced state, and its
+/// telemetry entries. Kept free-standing so both `collect_drift_signals` and
+/// the `control.json` board projection derive signals identically.
+fn drift_signals_from(
+    events: &[Event],
+    state: &TaskState,
+    telemetry: &[crate::domain::telemetry::TelemetryEntry],
+) -> crate::domain::drift::DriftSignals {
+    let boundary_violations = events
+        .iter()
+        .filter(|e| e.event_type == "boundary_violation_recorded")
+        .count() as u32;
+    let gate_failures = state
+        .gates
+        .iter()
+        .filter(|g| {
+            state
+                .gate_results
+                .get(g.as_str())
+                .map(|r| !r.passed)
+                .unwrap_or(false)
+        })
+        .count() as u32;
+    let unresolved_rejections = ControlApp::review_status_from_events(events) == "needs_work";
+
+    // Saturating sums: a pathological flood of large values can't overflow the
+    // accumulator (the rule checks only care about thresholds, not exact totals).
+    let (mut test_failures, mut lint_errors, mut retries, mut unexpected_writes) =
+        (0i64, 0i64, 0i64, 0i64);
+    let mut unknown_signal = false;
+    for entry in telemetry {
+        match entry.kind.as_str() {
+            "test_failures" => test_failures = test_failures.saturating_add(entry.value),
+            "lint_errors" => lint_errors = lint_errors.saturating_add(entry.value),
+            "retries" | "attempts" => retries = retries.saturating_add(entry.value),
+            "unexpected_writes" => {
+                unexpected_writes = unexpected_writes.saturating_add(entry.value)
+            }
+            _ => unknown_signal = true,
+        }
+    }
+
+    crate::domain::drift::DriftSignals {
+        boundary_violations,
+        gate_failures,
+        unresolved_rejections,
+        is_held: state.is_held,
+        test_failures,
+        lint_errors,
+        retries,
+        unexpected_writes,
+        unknown_signal,
+    }
+}
+
 // ── UUID generation (no external crate) ──
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2523,6 +2663,128 @@ mod tests {
         assert_eq!(
             first, second,
             "control.json must be byte-identical on replay"
+        );
+    }
+
+    /// Create + ready + start a simple in-scope task (no review).
+    fn start_simple(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "m5 test",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+    }
+
+    fn event_count(app: &ControlApp, id: &str) -> usize {
+        app.store.read_for_task(id).unwrap().len()
+    }
+
+    #[test]
+    fn telemetry_add_writes_index_and_feeds_drift() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+
+        // Clean task → no drift.
+        assert_eq!(app.compute_drift("t").unwrap().score, 0);
+
+        let before = event_count(&app, "t");
+        app.telemetry_add("t", "test_failures", 2, "human").unwrap();
+        app.telemetry_add("t", "retries", 4, "human").unwrap();
+        assert!(dir.path().join(".ctl/telemetry.jsonl").exists());
+
+        // Telemetry is evidence, NOT a canonical event — the ledger is unchanged.
+        assert_eq!(
+            event_count(&app, "t"),
+            before,
+            "telemetry must not append events"
+        );
+
+        // 15 (test_failures) + 15 (retries>=3) = 30 = medium.
+        let report = app.compute_drift("t").unwrap();
+        assert_eq!(report.score, 30);
+        assert_eq!(report.level.as_str(), "medium");
+        assert_eq!(report.fired_ids(), vec!["DRIFT-004", "DRIFT-006"]);
+    }
+
+    #[test]
+    fn telemetry_add_dry_run_writes_nothing() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        let dry = ControlApp::open(&app.project_root, true).unwrap();
+        dry.telemetry_add("t", "test_failures", 1, "human").unwrap();
+        assert!(!dir.path().join(".ctl/telemetry.jsonl").exists());
+    }
+
+    #[test]
+    fn unknown_signal_makes_next_action_ask_and_emits_no_events() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        app.telemetry_add("t", "mystery_signal", 1, "human")
+            .unwrap();
+        let before = event_count(&app, "t");
+        let proposal = app.next_action("t").unwrap();
+        assert_eq!(proposal.action.as_str(), "ask");
+        assert_eq!(
+            event_count(&app, "t"),
+            before,
+            "next_action must be read-only"
+        );
+    }
+
+    #[test]
+    fn next_action_replan_only_proposes() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        // Three telemetry signals → high drift, no out-of-scope signal → replan.
+        app.telemetry_add("t", "test_failures", 1, "human").unwrap(); // 15
+        app.telemetry_add("t", "retries", 3, "human").unwrap(); // 15
+                                                                // gate failing (20) pushes to 50 = high.
+        app.record_gate("t", "cargo_check", false, "boom").unwrap();
+        let before = event_count(&app, "t");
+        let proposal = app.next_action("t").unwrap();
+        assert_eq!(proposal.action.as_str(), "replan");
+        assert!(proposal.structured_proposal.is_some());
+        // The proposal is advisory: no scope change, no new events.
+        assert_eq!(event_count(&app, "t"), before);
+    }
+
+    #[test]
+    fn reconcile_with_telemetry_is_byte_identical() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        start_simple(&app, "t");
+        app.telemetry_add("t", "test_failures", 2, "human").unwrap();
+        app.telemetry_add("t", "unexpected_writes", 1, "human")
+            .unwrap();
+
+        app.reconcile().unwrap();
+        let path = dir.path().join(".ctl/control.json");
+        let first = std::fs::read_to_string(&path).unwrap();
+        // Drift fields are present in the projection.
+        assert!(first.contains("drift_level"));
+        assert!(first.contains("recommended_action"));
+
+        app.reconcile().unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            first, second,
+            "control.json with telemetry must be byte-identical on replay"
         );
     }
 

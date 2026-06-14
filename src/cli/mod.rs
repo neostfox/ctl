@@ -144,6 +144,68 @@ enum Commands {
     },
     /// Agent run status report (M6)
     AgentReport,
+    /// Telemetry evidence index (M5): submit signals for drift analysis
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
+    /// Drift analysis (M5): transparent, deterministic rules over evidence
+    Drift {
+        #[command(subcommand)]
+        command: DriftCommands,
+    },
+    /// Recommend the next action (M5): pass / ask / stop / replan / rescope,
+    /// derived from drift. Read-only and advisory — emits no events.
+    NextAction {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryCommands {
+    /// Append one telemetry evidence record to the index (M5)
+    Add {
+        /// Task identifier the signal is about
+        #[arg(long)]
+        id: String,
+        /// Signal kind (e.g. test_failures, lint_errors, retries,
+        /// unexpected_writes). Unknown kinds are accepted but fail closed.
+        #[arg(long)]
+        kind: String,
+        /// Numeric magnitude of the signal
+        #[arg(long, default_value_t = 1)]
+        value: i64,
+        /// Provenance of the evidence (default: the CTL_ACTOR identity)
+        #[arg(long)]
+        source: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DriftCommands {
+    /// Compute the drift level/score for a task (M5)
+    Compute {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Explain a drift decision: signals, rule IDs, and evidence (M5)
+    Explain {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -601,6 +663,9 @@ pub fn run() -> Result<()> {
         Commands::Schedule { command } => cmd_schedule(command, dry_run),
         Commands::Hook { command } => cmd_hook(command),
         Commands::AgentReport => cmd_agent_report(),
+        Commands::Telemetry { command } => cmd_telemetry(command, dry_run),
+        Commands::Drift { command } => cmd_drift(command),
+        Commands::NextAction { id, json } => cmd_next_action(id, *json),
     }
 }
 
@@ -970,6 +1035,132 @@ fn cmd_board(json: bool) -> Result<()> {
         g("completed"),
         g("archived"),
     );
+    Ok(())
+}
+
+fn cmd_telemetry(command: &TelemetryCommands, dry_run: bool) -> Result<()> {
+    let app = app_open(dry_run)?;
+    match command {
+        TelemetryCommands::Add {
+            id,
+            kind,
+            value,
+            source,
+        } => {
+            let source = source.clone().unwrap_or_else(|| {
+                std::env::var("CTL_ACTOR")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "human".to_string())
+            });
+            app.telemetry_add(id, kind, *value, &source)?;
+            if !dry_run {
+                let known = crate::domain::telemetry::is_known_kind(kind);
+                println!(
+                    "Recorded telemetry for '{}': {}={}{}",
+                    id,
+                    kind,
+                    value,
+                    if known {
+                        ""
+                    } else {
+                        " (unknown kind — drift will fail closed)"
+                    }
+                );
+                println!("Next: ctl drift compute --id {}", id);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_drift(command: &DriftCommands) -> Result<()> {
+    let app = app_open(false)?;
+    match command {
+        DriftCommands::Compute { id, json } => {
+            let report = app.compute_drift(id)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Task '{}': drift {} (score {})",
+                    report.task_id,
+                    report.level.as_str(),
+                    report.score
+                );
+                if report.fired_rules.is_empty() {
+                    println!("  no rules fired");
+                } else {
+                    println!("  rules: {}", report.fired_ids().join(", "));
+                }
+                println!("Next: ctl drift explain --id {}", id);
+            }
+        }
+        DriftCommands::Explain { id, json } => {
+            let report = app.compute_drift(id)?;
+            let action = app.next_action(id)?;
+            if *json {
+                let out = serde_json::json!({
+                    "drift": report,
+                    "next_action": action,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "Drift explanation for '{}': {} (score {})",
+                    report.task_id,
+                    report.level.as_str(),
+                    report.score
+                );
+                if report.fired_rules.is_empty() {
+                    println!("  no rules fired — no drift signals present");
+                } else {
+                    println!("  signals (rule ID · points · evidence):");
+                    for r in &report.fired_rules {
+                        println!("    {} · +{} · {}", r.id, r.points, r.evidence);
+                    }
+                }
+                println!(
+                    "  recommended action: {} — {}",
+                    action.action.as_str().to_uppercase(),
+                    action.rationale
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_next_action(id: &str, json: bool) -> Result<()> {
+    let app = app_open(false)?;
+    let proposal = app.next_action(id)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&proposal)?);
+        return Ok(());
+    }
+    println!(
+        "Task '{}': {} (drift {}, score {})",
+        proposal.task_id,
+        proposal.action.as_str().to_uppercase(),
+        proposal.level.as_str(),
+        proposal.score
+    );
+    println!("  rationale: {}", proposal.rationale);
+    if !proposal.fired_rules.is_empty() {
+        println!("  rules: {}", proposal.fired_rules.join(", "));
+    }
+    if let Some(p) = &proposal.structured_proposal {
+        println!(
+            "  structured proposal ({}): {}",
+            p.proposed_action, p.rationale
+        );
+        for e in &p.evidence {
+            println!("    - {}", e);
+        }
+        println!("  (advisory only — generates no events, changes no scope, starts no task)");
+    }
+    println!("  suggested: {}", proposal.suggested_command);
     Ok(())
 }
 
@@ -1613,6 +1804,7 @@ fn check_baseline_manifest() -> Result<()> {
 
     let expected_fixtures = [
         "invalid.json",
+        "m5_drift_golden.json",
         "reducer_boundary_violation.jsonl",
         "reducer_hold.jsonl",
         "reducer_lifecycle.jsonl",
@@ -1750,9 +1942,11 @@ fn check_milestone_scope() -> Result<()> {
             "boundary",
             "context",
             "doctor",
+            "drift",
             "gate",
             "hook",
             "init",
+            "next-action",
             "reconcile",
             "replay",
             "report",
@@ -1761,6 +1955,7 @@ fn check_milestone_scope() -> Result<()> {
             "schedule",
             "schema",
             "task",
+            "telemetry",
             "validate",
             "workspace",
         ],
@@ -1779,18 +1974,28 @@ fn check_milestone_scope() -> Result<()> {
         ],
     )?;
 
-    // Post-M4 commands that must not appear yet (M5 items)
-    let forbidden = ["telemetry", "drift", "next-action", "nextaction"];
-    let mut names = Vec::new();
-    collect_subcommand_names(&command, &mut names);
-    for forbidden_cmd in &forbidden {
-        if names.iter().any(|name| name == forbidden_cmd) {
-            return Err(anyhow::anyhow!(
-                "Milestone scope violation: CLI exposes post-M4 command '{}'",
-                forbidden_cmd
-            ));
-        }
-    }
+    // M5 nested command surfaces (lock their shape like `task`).
+    let telemetry_command = command
+        .get_subcommands()
+        .find(|cmd| cmd.get_name() == "telemetry")
+        .ok_or_else(|| anyhow::anyhow!("Missing telemetry command"))?;
+    assert_exact_subcommands(
+        "telemetry CLI",
+        telemetry_command
+            .get_subcommands()
+            .map(|cmd| cmd.get_name()),
+        ["add"],
+    )?;
+
+    let drift_command = command
+        .get_subcommands()
+        .find(|cmd| cmd.get_name() == "drift")
+        .ok_or_else(|| anyhow::anyhow!("Missing drift command"))?;
+    assert_exact_subcommands(
+        "drift CLI",
+        drift_command.get_subcommands().map(|cmd| cmd.get_name()),
+        ["compute", "explain"],
+    )?;
 
     Ok(())
 }
@@ -1813,13 +2018,6 @@ fn assert_exact_subcommands<'a>(
         ));
     }
     Ok(())
-}
-
-fn collect_subcommand_names(command: &clap::Command, names: &mut Vec<String>) {
-    for subcommand in command.get_subcommands() {
-        names.push(subcommand.get_name().to_string());
-        collect_subcommand_names(subcommand, names);
-    }
 }
 
 fn check_canonical_task_ledger_contract() -> Result<()> {

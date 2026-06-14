@@ -6,29 +6,35 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::domain::event::Event;
+use crate::domain::telemetry::TelemetryEntry;
 
 pub struct FileEventStore {
     pub tasks_dir: PathBuf,
+    /// The `.ctl/` root (parent of `tasks_dir`). Holds cross-task artifacts like
+    /// the telemetry evidence index (M5).
+    pub ctl_dir: PathBuf,
 }
 
 impl FileEventStore {
     /// Create the `.ctl/tasks/` root used by M1 task ledgers.
     pub fn init(project_root: &Path) -> Result<Self> {
-        let tasks_dir = project_root.join(".ctl").join("tasks");
+        let ctl_dir = project_root.join(".ctl");
+        let tasks_dir = ctl_dir.join("tasks");
         fs::create_dir_all(&tasks_dir)?;
-        Ok(Self { tasks_dir })
+        Ok(Self { tasks_dir, ctl_dir })
     }
 
     /// Open an existing `.ctl/tasks/` task ledger root.
     pub fn open(project_root: &Path) -> Result<Self> {
-        let tasks_dir = project_root.join(".ctl").join("tasks");
+        let ctl_dir = project_root.join(".ctl");
+        let tasks_dir = ctl_dir.join("tasks");
         if !tasks_dir.exists() {
             return Err(anyhow!(".ctl/tasks/ not found. Run 'control init' first."));
         }
         if !tasks_dir.is_dir() {
             return Err(anyhow!(".ctl/tasks exists but is not a directory."));
         }
-        Ok(Self { tasks_dir })
+        Ok(Self { tasks_dir, ctl_dir })
     }
 
     pub fn task_dir(&self, task_id: &str) -> Result<PathBuf> {
@@ -170,6 +176,54 @@ impl FileEventStore {
         fs::rename(&temp_path, &task_path)?;
         Ok(())
     }
+
+    // ── M5: telemetry evidence index ──
+    //
+    // `telemetry.jsonl` is a SEPARATE append-only evidence index (fact model),
+    // not part of the canonical event ledger. It lives at the `.ctl/` root so it
+    // is cross-task, mirroring `control.json`.
+
+    /// Path to the cross-task telemetry evidence index.
+    pub fn telemetry_path(&self) -> PathBuf {
+        self.ctl_dir.join("telemetry.jsonl")
+    }
+
+    /// Append one telemetry evidence record. Append-only, flushed.
+    pub fn append_telemetry(&self, entry: &TelemetryEntry) -> Result<()> {
+        fs::create_dir_all(&self.ctl_dir)?;
+        let line = serde_json::to_string(entry)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.telemetry_path())?;
+        writeln!(file, "{}", line)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Read all telemetry entries for one task, in append order. Skips blank
+    /// lines; parse errors carry the line number.
+    pub fn read_telemetry_for_task(&self, task_id: &str) -> Result<Vec<TelemetryEntry>> {
+        let path = self.telemetry_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+        let mut entries = Vec::new();
+        for (i, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: TelemetryEntry = serde_json::from_str(&line)
+                .map_err(|e| anyhow!("{} line {}: parse error: {}", path.display(), i + 1, e))?;
+            if entry.task_id == task_id {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
 }
 
 fn validate_task_id(task_id: &str) -> Result<()> {
@@ -298,6 +352,43 @@ mod tests {
         assert_eq!(store.next_seq_for_task("t1").unwrap(), 1);
         store.append(&make_create_event("t1", 1)).unwrap();
         assert_eq!(store.next_seq_for_task("t1").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_telemetry_append_and_read_round_trip() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        // No file yet → empty.
+        assert!(store.read_telemetry_for_task("t1").unwrap().is_empty());
+
+        let e1 = TelemetryEntry::new("t1", "test_failures", 2, "2026-06-14T00:00:00Z", "human");
+        let e2 = TelemetryEntry::new("t2", "lint_errors", 1, "2026-06-14T00:00:01Z", "human");
+        let e3 = TelemetryEntry::new("t1", "retries", 4, "2026-06-14T00:00:02Z", "agent");
+        store.append_telemetry(&e1).unwrap();
+        store.append_telemetry(&e2).unwrap();
+        store.append_telemetry(&e3).unwrap();
+
+        // Filters by task, preserves append order.
+        let t1 = store.read_telemetry_for_task("t1").unwrap();
+        assert_eq!(t1, vec![e1, e3]);
+        let t2 = store.read_telemetry_for_task("t2").unwrap();
+        assert_eq!(t2.len(), 1);
+        assert_eq!(t2[0].kind, "lint_errors");
+    }
+
+    #[test]
+    fn test_telemetry_skips_blank_lines() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        let entry = TelemetryEntry::new("t1", "test_failures", 1, "2026-06-14T00:00:00Z", "human");
+        store.append_telemetry(&entry).unwrap();
+        // Inject a blank line.
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(store.telemetry_path())
+            .unwrap();
+        writeln!(f).unwrap();
+        assert_eq!(store.read_telemetry_for_task("t1").unwrap().len(), 1);
     }
 
     #[test]

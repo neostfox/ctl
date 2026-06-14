@@ -408,7 +408,7 @@ lease 并发）按 ROADMAP 仍排在 M5 之后。
 
 ---
 
-### M5：可解释控制闭环 ⏭ 下一步
+### M5：可解释控制闭环 ✅ 已实现
 
 **用户价值**
 
@@ -417,10 +417,10 @@ lease 并发）按 ROADMAP 仍排在 M5 之后。
 **命令**
 
 ```text
-control telemetry add
-control drift compute
-control drift explain
-control next-action
+ctl telemetry add        # 向证据索引追加一条信号
+ctl drift compute        # 透明规则算出 drift level/score
+ctl drift explain        # 列出信号、规则 ID、evidence 与建议动作
+ctl next-action          # pass / ask / stop / replan / rescope（只读、建议性）
 ```
 
 **实现约束**
@@ -440,6 +440,30 @@ control next-action
 **暂不做**
 
 模型评分、dashboard、OpenTelemetry Collector、自动重规划执行。
+
+**已落地**：
+
+- **证据索引而非 canonical event**——按事实模型，telemetry 是*独立的 append-only 证据索引*
+  （`.ctl/telemetry.jsonl`），不是 canonical event：`ctl telemetry add` 是 M5 唯一写操作。
+  因此 **冻结的 event-envelope schema 与 reducer 完全不动**（telemetry 是 evidence 不是真相，
+  也不该污染 canonical 事件流）。条目带 `schema/task_id/kind/value/recorded_at/source`，
+  `recorded_at` 由应用层打戳，domain 保持无时钟。
+- **纯函数 drift 引擎**——`src/domain/drift.rs`（无 IO、无时钟，过 MODULE-001/002 纯度门）：
+  `evaluate(signals)→DriftReport` + `next_action(report,phase)→NextActionProposal`。
+  固定规则目录 DRIFT-001…009（边界越界 30 / 门失败 20 / 审核 needs_work 25 / 测试失败 15 /
+  lint 5 / retries≥3 15 / 越界写 30 / held 10 / 未知信号 10），**整数计分**、规则按 ID 升序输出，
+  故相同 signals 字节一致。level 阈值 none=0 / low=1–19 / medium=20–49 / high≥50。
+- **next-action 决策表**（首个命中胜出，确定性）：未知信号→`ASK`（失败关闭，绝不放宽）·
+  high+越界信号→`STOP`· high→`REPLAN`· medium+in_progress→`RESCOPE`· medium→`ASK`·
+  held→`STOP`· low/none→`PASS`。`REPLAN`/`RESCOPE` **只产出结构化 proposal**（CLI 打印），
+  不发事件、不改 scope、不批 lease、不启动任务——全程建议性。
+- **决策投影进 control.json**——`generate_board()` 每任务行追加 `drift_level/drift_score/
+  drift_rules/recommended_action`；`reconcile` 重建，且**带 telemetry 时重复 reconcile 仍字节一致**
+  （信号取整数、引擎无时钟）。signals 由 `drift_signals_from(events,state,telemetry)` 统一派生，
+  `compute_drift`/`next_action` 与 board 投影同口径。
+- **测试**：drift 纯函数单测（逐规则、阈值边界、确定性、不放宽不变量）+ golden fixture
+  `fixtures/m5_drift_golden.json`→固定动作 + store telemetry round-trip + 应用层
+  （telemetry_add 写/dry-run 不写、compute/next-action 不发事件、reconcile 字节一致）。共 215 测试绿。
 
 ### M6：受限多智能体
 
