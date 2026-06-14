@@ -506,6 +506,11 @@ enum HookCommands {
         /// Subagent type (for task tool): explore, task, oracle, etc.
         #[arg(long)]
         agent_type: Option<String>,
+        /// M-e: dispatch binding — the task that dispatched this call. Binds
+        /// governance to that task's write_allow even amid multiple active
+        /// tasks. Falls back to the CTL_TASK_ID env var when omitted.
+        #[arg(long)]
+        task: Option<String>,
     },
     /// Append a decision record to decisions.jsonl
     RecordDecision {
@@ -2283,11 +2288,13 @@ fn cmd_hook(command: &HookCommands) -> Result<()> {
             path,
             command,
             agent_type,
+            task,
         } => cmd_hook_gate(
             tool,
             path.as_deref(),
             command.as_deref(),
             agent_type.as_deref(),
+            task.as_deref(),
         ),
         HookCommands::RecordDecision { data } => cmd_hook_record_decision(data),
         HookCommands::SpecStatus => cmd_hook_spec_status(),
@@ -2530,11 +2537,79 @@ enum GovState {
     /// More than one in_progress task declares a write scope (M-a). The gateway
     /// cannot bind a single `write_allow`, so it fails closed rather than
     /// silently governing only the first task. Resolve down to one active
-    /// write task (submit/hold the others) to restore write governance.
+    /// write task (submit/hold the others) — or bind the call to one of them
+    /// with a dispatch token (M-e) — to restore write governance.
     MultipleActive { task_ids: Vec<String> },
 }
 
-fn compute_gov_state(project_root: &Path) -> Result<GovState> {
+/// One non-archived `in_progress` task as seen by the gateway (M-a).
+struct ActiveTask {
+    task_id: String,
+    write_allow: Vec<String>,
+    is_held: bool,
+    approved_actions: Vec<String>,
+}
+
+/// Resolve the set of active `in_progress` tasks into a single governing state
+/// (M-a write-ambiguity + M-e dispatch binding). Pure: no IO, so it is unit
+/// tested directly without `.ctl` fixtures.
+///
+/// `bound_task` is the dispatch binding (M-e): when it names one of the active
+/// tasks, governance binds to **that** task even if other active write tasks
+/// exist — the dispatching task is stated explicitly, so there is no ambiguity
+/// to fail closed on. A binding that matches no active task is treated as stale
+/// and ignored (a bad token must never widen scope), falling through to the
+/// unbound M-a scan: ≥2 active write tasks → `MultipleActive` (fail closed),
+/// otherwise bind the sole governing task (held > write task > read-only).
+///
+/// Returns `None` when there are no active tasks (caller continues to the
+/// review/completed/idle checks).
+fn resolve_active_governance(active: &[ActiveTask], bound_task: Option<&str>) -> Option<GovState> {
+    if active.is_empty() {
+        return None;
+    }
+
+    let bind_to = |t: &ActiveTask| GovState::InProgress {
+        task_id: t.task_id.clone(),
+        write_allow: t.write_allow.clone(),
+        is_held: t.is_held,
+        approved_actions: t.approved_actions.clone(),
+    };
+
+    // M-e: explicit dispatch binding to a specific active task wins outright.
+    if let Some(want) = bound_task {
+        if let Some(t) = active.iter().find(|t| t.task_id == want) {
+            return Some(bind_to(t));
+        }
+        // else: stale/bogus token — ignore and fall through to the M-a scan.
+    }
+
+    // M-a: tasks with a non-empty write scope compete for write governance.
+    // Read-only in_progress tasks (empty write_allow) never write, so they do
+    // not create write ambiguity. Two or more write tasks → fail closed.
+    let write_task_ids: Vec<String> = active
+        .iter()
+        .filter(|t| !t.write_allow.is_empty())
+        .map(|t| t.task_id.clone())
+        .collect();
+    if write_task_ids.len() >= 2 {
+        return Some(GovState::MultipleActive {
+            task_ids: write_task_ids,
+        });
+    }
+
+    // Bind to a single task. Prefer a held one (held fails closed across every
+    // tool), then the sole write task, then the first active task (all
+    // read-only). Priority: Held > the write task > read-only.
+    let chosen = active
+        .iter()
+        .find(|t| t.is_held)
+        .or_else(|| active.iter().find(|t| !t.write_allow.is_empty()))
+        .unwrap_or(&active[0]);
+    Some(bind_to(chosen))
+}
+
+fn compute_gov_state(project_root: &Path, bound_task: Option<&str>) -> Result<GovState> {
     let tasks_dir = project_root.join(".ctl").join("tasks");
     if !tasks_dir.exists() {
         return Ok(GovState::Ungoverned);
@@ -2547,16 +2622,9 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
     // Collect EVERY non-archived in_progress task, not just the first one.
     // Pre-M-a this loop early-returned on the first in_progress task, so when
     // several were active simultaneously (e.g. concurrent sub-agent reviews)
-    // the rest were silently ungoverned at the gateway. Now: if more than one
-    // active task declares a write scope, the gateway cannot bind a single
-    // write_allow and fails closed (MultipleActive); otherwise it binds to the
-    // one governing task as before.
-    struct ActiveTask {
-        task_id: String,
-        write_allow: Vec<String>,
-        is_held: bool,
-        approved_actions: Vec<String>,
-    }
+    // the rest were silently ungoverned at the gateway. The collected set is
+    // resolved to a single governing state by `resolve_active_governance`
+    // (M-a fail-closed + M-e dispatch binding).
     let mut active: Vec<ActiveTask> = Vec::new();
     for report in &reports {
         let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
@@ -2597,34 +2665,8 @@ fn compute_gov_state(project_root: &Path) -> Result<GovState> {
         });
     }
 
-    if !active.is_empty() {
-        // Tasks with a non-empty write scope compete for write governance.
-        // Read-only in_progress tasks (empty write_allow) never write, so they
-        // do not create write ambiguity. Two or more write tasks → fail closed.
-        let write_task_ids: Vec<String> = active
-            .iter()
-            .filter(|t| !t.write_allow.is_empty())
-            .map(|t| t.task_id.clone())
-            .collect();
-        if write_task_ids.len() >= 2 {
-            return Ok(GovState::MultipleActive {
-                task_ids: write_task_ids,
-            });
-        }
-        // Bind to a single task. Prefer a held one (held fails closed across
-        // every tool), then the sole write task, then the first active task
-        // (all read-only). Priority: Held > the write task > read-only.
-        let chosen = active
-            .iter()
-            .find(|t| t.is_held)
-            .or_else(|| active.iter().find(|t| !t.write_allow.is_empty()))
-            .unwrap_or(&active[0]);
-        return Ok(GovState::InProgress {
-            task_id: chosen.task_id.clone(),
-            write_allow: chosen.write_allow.clone(),
-            is_held: chosen.is_held,
-            approved_actions: chosen.approved_actions.clone(),
-        });
+    if let Some(state) = resolve_active_governance(&active, bound_task) {
+        return Ok(state);
     }
 
     // Check for completed (not archived) — commit window
@@ -2816,9 +2858,18 @@ fn cmd_hook_gate(
     path: Option<&str>,
     command: Option<&str>,
     agent_type: Option<&str>,
+    bound_task: Option<&str>,
 ) -> Result<()> {
     let project_root = std::env::current_dir()?;
-    let state = compute_gov_state(&project_root)?;
+    // M-e: dispatch binding. Prefer the explicit `--task` flag; fall back to the
+    // `CTL_TASK_ID` env var the dispatcher exports for its subagent. A blank
+    // value is treated as absent (no binding).
+    let env_task = std::env::var("CTL_TASK_ID").ok();
+    let bound = bound_task
+        .or(env_task.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let state = compute_gov_state(&project_root, bound)?;
 
     // UNGOVERNED — no .ctl, allow everything
     if matches!(state, GovState::Ungoverned) {
@@ -2913,7 +2964,7 @@ fn cmd_hook_gate(
                         "state": "multiple_active",
                         "task_ids": task_ids,
                         "reason": "multiple in_progress tasks declare write scopes — gateway cannot bind a single write_allow",
-                        "remedy": "leave exactly one task in_progress: submit or hold the others (ctl task submit --id <id>)"
+                        "remedy": "bind this call to its dispatching task (export CTL_TASK_ID=<id>, or ctl hook gate --task <id>), or leave exactly one task in_progress (ctl task submit --id <id>)"
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
@@ -3245,7 +3296,116 @@ fn cmd_hook_spec_status() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_bash;
+    use super::{classify_bash, resolve_active_governance, ActiveTask, GovState};
+
+    fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
+        ActiveTask {
+            task_id: id.to_string(),
+            write_allow: paths.iter().map(|s| s.to_string()).collect(),
+            is_held: held,
+            approved_actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn no_active_tasks_yields_none() {
+        assert!(resolve_active_governance(&[], None).is_none());
+        assert!(resolve_active_governance(&[], Some("anything")).is_none());
+    }
+
+    #[test]
+    fn single_write_task_binds_without_token() {
+        let active = vec![at("a", &["src"], false)];
+        match resolve_active_governance(&active, None) {
+            Some(GovState::InProgress { task_id, .. }) => assert_eq!(task_id, "a"),
+            other => panic!("expected InProgress(a), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_write_tasks_without_binding_fail_closed() {
+        // M-a: ambiguous write governance → MultipleActive (fail closed).
+        let active = vec![at("a", &["src"], false), at("b", &["docs"], false)];
+        match resolve_active_governance(&active, None) {
+            Some(GovState::MultipleActive { task_ids }) => {
+                assert_eq!(task_ids, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected MultipleActive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_token_binds_amid_multiple_active() {
+        // M-e: an explicit binding to one of the active write tasks resolves the
+        // ambiguity that would otherwise fail closed.
+        let active = vec![at("a", &["src"], false), at("b", &["docs"], false)];
+        match resolve_active_governance(&active, Some("b")) {
+            Some(GovState::InProgress {
+                task_id,
+                write_allow,
+                ..
+            }) => {
+                assert_eq!(task_id, "b");
+                assert_eq!(write_allow, vec!["docs".to_string()]);
+            }
+            other => panic!("expected InProgress(b), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_dispatch_token_is_ignored_not_honored() {
+        // A token naming no active task must NOT widen scope; fall back to the
+        // unbound M-a scan (here: still ambiguous → fail closed).
+        let active = vec![at("a", &["src"], false), at("b", &["docs"], false)];
+        match resolve_active_governance(&active, Some("ghost")) {
+            Some(GovState::MultipleActive { task_ids }) => assert_eq!(task_ids.len(), 2),
+            other => panic!("expected MultipleActive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binding_to_held_task_stays_held() {
+        // Binding to a held task surfaces the hold (gate then blocks); the token
+        // cannot launder a held task into a writable one.
+        let active = vec![at("a", &["src"], false), at("b", &["docs"], true)];
+        match resolve_active_governance(&active, Some("b")) {
+            Some(GovState::InProgress {
+                task_id, is_held, ..
+            }) => {
+                assert_eq!(task_id, "b");
+                assert!(is_held, "bound held task must remain held");
+            }
+            other => panic!("expected InProgress(b, held), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn readonly_active_tasks_do_not_create_ambiguity() {
+        // Only write-scoped tasks compete for write governance.
+        let active = vec![at("w", &["src"], false), at("r", &[], false)];
+        match resolve_active_governance(&active, None) {
+            Some(GovState::InProgress { task_id, .. }) => assert_eq!(task_id, "w"),
+            other => panic!("expected InProgress(w), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binding_to_readonly_task_governs_as_readonly() {
+        // M-e binds to the *dispatching* task even if it is read-only: its empty
+        // write_allow then denies writes, exactly as that task should.
+        let active = vec![at("w", &["src"], false), at("r", &[], false)];
+        match resolve_active_governance(&active, Some("r")) {
+            Some(GovState::InProgress {
+                task_id,
+                write_allow,
+                ..
+            }) => {
+                assert_eq!(task_id, "r");
+                assert!(write_allow.is_empty());
+            }
+            other => panic!("expected InProgress(r), got {other:?}"),
+        }
+    }
 
     #[test]
     fn simple_commands_classify_directly() {

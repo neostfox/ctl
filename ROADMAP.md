@@ -473,12 +473,13 @@ ctl workspace merge-candidate
 **方向**：网关按「派发该工具调用的那个任务」绑定治理（见 M-e），或在存在多活动写入任务时显式拒绝。
 与 M5（reconcile）的活动任务集合定义对齐。
 
-**已落地**：取「显式拒绝」分支（M-e 子代理绑定仍留后续）。`compute_gov_state` 改为收集**全部**
+**已落地**：先取「显式拒绝」分支，后由 M-e 补上派发绑定（见下）。`compute_gov_state` 改为收集**全部**
 非归档 `in_progress` 任务而非首个；**活动写入任务**定义为 phase=`in_progress`、非归档、`write_allow`
 非空。≥2 个活动写入任务时返回新状态 `MultipleActive { task_ids }`，网关对 `write`/`edit` 与可写子代理
 **失败关闭**（只读、`cargo check/test/build/fmt` 等非变更操作仍放行，便于消歧期间验证）；恰好 1 个写入
 任务时按该任务绑定治理（held 优先），与旧单任务行为一致。只读 `in_progress` 任务（空 `write_allow`）
-不产生写治理歧义。消解方式：`ctl task submit`/hold 其余任务，只留一个 `in_progress`。
+不产生写治理歧义。消解方式：`ctl task submit`/hold 其余任务只留一个 `in_progress`，**或**用派发令牌把
+单次调用绑定到某个活动任务（M-e）。
 
 ### M-b：control.json + `ctl board`✅ 已实现
 
@@ -538,10 +539,24 @@ verdict→evidence 事件。
   `ctl board --json` 与 `control.json` 均展示 `depends_on`(持久化的 `task.json` 投影受 task-view
   schema 冻结,暂不改,故不含该字段)。
 
-### M-e：子代理↔任务绑定
+### M-e：子代理↔任务绑定 ✅ 已实现
 
 **方向**：可写子代理按「派发它的那个任务」的 `write_allow` 受治，而非网关扫描第一个活动任务；
 与 M6 `AgentRun` aggregate 和 capability lease 对齐。
+
+**已落地**：
+- 派发令牌——`ctl hook gate` 新增 `--task <id>`，缺省回退到 `CTL_TASK_ID` 环境变量（空值视为无绑定）。
+  `.claude/hooks/ctl-gate.py` 从 `CTL_TASK_ID` 透传 `--task`，作为显式且可审计的接缝；ctl 自身亦读同名
+  env，二者互为兜底。
+- 绑定治理——把 M-a 的「收集全部活动任务 → 归约为单一治理态」抽成纯函数 `resolve_active_governance`
+  （无 IO，直接单测）。令牌命中某个活动任务时，**即使存在多个活动写入任务也按该任务绑定**
+  （派发已显式声明，无歧义可言）；令牌指向非活动/未知任务则视为过期、忽略，回退到 M-a 扫描
+  （≥2 写入任务仍 `MultipleActive` 失败关闭，绝不因坏令牌扩权）。绑定到 held 任务仍 held；绑定到只读
+  任务则按其空 `write_allow` 拒写——每个子代理按**它自己**的任务受治。
+- M-c 跨任务写重叠对绑定任务依然生效（绑定不豁免重叠硬拒）。
+- 8 条纯函数单测 + 真实 ledger e2e：无绑定写→`multiple_active` 拒；`--task`/`CTL_TASK_ID` 绑定→
+  `in_progress` 放行本作用域、拒他作用域；过期令牌→回退 `multiple_active`。
+- 这关闭了 M-a 遗留的「M-e 子代理绑定仍留后续」，并解除 M-f 的前置依赖（M-a + M-e 均就绪）。
 
 ### M-f：硬版审核门
 
@@ -552,7 +567,7 @@ ctl apply --path <p>      # 越界编辑申请，记录 reviewer 裁决为事件
 ctl task finish           # 联锁：要求存在通过的完成审计裁决事件
 ```
 
-**依赖**：M-a（多活动任务治理）+ M-e（子代理绑定）。在两者就绪前，审核门只能停留在软层。
+**依赖**：M-a（多活动任务治理）+ M-e（子代理绑定）——**两者均已就绪**，M-f 前置依赖已解除，可上硬版审核门。
 
 ### M-g：提交联锁（未提交不得完成）✅ 已实现
 
