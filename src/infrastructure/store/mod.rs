@@ -4,9 +4,41 @@ use anyhow::{anyhow, Result};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::domain::event::Event;
 use crate::domain::telemetry::TelemetryEntry;
+
+/// Max time to wait to acquire a per-task write lock before giving up.
+const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A lock file older than this is treated as abandoned by a crashed writer and
+/// reclaimed. The locked critical section (read-seq → validate → append) is a
+/// few milliseconds, so no legitimate holder is ever this old.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+
+/// RAII guard for an exclusive per-task write lock. Dropping it releases the lock
+/// (removes the lock file).
+pub struct TaskLock {
+    path: PathBuf,
+}
+
+impl Drop for TaskLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Whether a lock file is old enough to be considered abandoned.
+fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    match fs::metadata(path).and_then(|m| m.modified()) {
+        // `elapsed` errors if mtime is in the future (clock skew) — treat as fresh.
+        Ok(mtime) => mtime
+            .elapsed()
+            .map(|age| age >= stale_after)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
 
 pub struct FileEventStore {
     pub tasks_dir: PathBuf,
@@ -44,6 +76,61 @@ impl FileEventStore {
 
     pub fn events_path(&self, task_id: &str) -> Result<PathBuf> {
         Ok(self.task_dir(task_id)?.join("events.jsonl"))
+    }
+
+    /// Acquire an exclusive per-task write lock (cross-process, advisory).
+    ///
+    /// Held across the read-seq → validate → append critical section so two
+    /// concurrent `ctl` processes cannot read the same max sequence and append
+    /// conflicting events. Implemented as an atomic create-new lock file (no
+    /// external deps); a lock left behind by a crashed writer is reclaimed after
+    /// `LOCK_STALE_AFTER`.
+    pub fn lock_task(&self, task_id: &str) -> Result<TaskLock> {
+        self.lock_task_with(task_id, LOCK_ACQUIRE_TIMEOUT, LOCK_STALE_AFTER)
+    }
+
+    /// `lock_task` with explicit timing — for tests.
+    fn lock_task_with(
+        &self,
+        task_id: &str,
+        acquire_timeout: Duration,
+        stale_after: Duration,
+    ) -> Result<TaskLock> {
+        let task_dir = self.task_dir(task_id)?;
+        fs::create_dir_all(&task_dir)?;
+        let path = task_dir.join(".lock");
+        let start = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    let _ = writeln!(f, "pid={}", std::process::id());
+                    return Ok(TaskLock { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path, stale_after) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if start.elapsed() >= acquire_timeout {
+                        return Err(anyhow!(
+                            "could not acquire write lock for task '{}' within {:?}; \
+                             another writer holds {}",
+                            task_id,
+                            acquire_timeout,
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "failed to acquire task lock {}: {}",
+                        path.display(),
+                        e
+                    ))
+                }
+            }
+        }
     }
 
     /// Append a single event to `.ctl/tasks/<task>/events.jsonl`.
@@ -407,5 +494,66 @@ mod tests {
         assert_eq!(content["schema"], "control.task-view.v1");
         assert_eq!(content["id"], "t1");
         assert_eq!(content["is_archived"], false);
+    }
+
+    // ── per-task write lock ──
+
+    #[test]
+    fn lock_acquire_release_reacquire() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        {
+            let _g = store.lock_task("t").unwrap();
+            assert!(store.task_dir("t").unwrap().join(".lock").exists());
+        } // drop releases
+        assert!(!store.task_dir("t").unwrap().join(".lock").exists());
+        // Re-acquire succeeds after release.
+        let _g2 = store.lock_task("t").unwrap();
+    }
+
+    #[test]
+    fn lock_times_out_while_held() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        let _held = store.lock_task("t").unwrap();
+        // A second acquisition cannot succeed while the first is held.
+        let r = store.lock_task_with("t", Duration::from_millis(150), Duration::from_secs(30));
+        assert!(r.is_err(), "second lock must not acquire while held");
+    }
+
+    #[test]
+    fn lock_blocks_then_succeeds_after_release() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        let held = store.lock_task("t").unwrap();
+
+        let store2 = FileEventStore::init(dir.path()).unwrap();
+        let waiter = std::thread::spawn(move || {
+            let start = Instant::now();
+            let g = store2.lock_task_with("t", Duration::from_secs(5), Duration::from_secs(30));
+            (g.is_ok(), start.elapsed())
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held); // release; waiter should now acquire
+        let (ok, waited) = waiter.join().unwrap();
+        assert!(ok, "waiter should acquire after release");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "waiter returned too early: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn lock_reclaims_stale_lock() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        // Simulate a lock left by a crashed writer.
+        let task_dir = store.task_dir("t").unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join(".lock"), "pid=999999").unwrap();
+        // stale_after = 0 → any existing lock is reclaimable immediately.
+        let g = store.lock_task_with("t", Duration::from_secs(1), Duration::ZERO);
+        assert!(g.is_ok(), "stale lock must be reclaimed");
     }
 }

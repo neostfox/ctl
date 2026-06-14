@@ -1432,14 +1432,21 @@ impl ControlApp {
     }
 
     fn validate_and_append(&self, event: &Event) -> Result<()> {
-        self.validate_event(event)?;
         if self.dry_run {
+            self.validate_event(event)?;
             println!(
                 "[dry-run] Would append event: type={}, task={}, seq={}",
                 event.event_type, event.task_id, event.seq
             );
             return Ok(());
         }
+        // Single-writer: hold a per-task lock across validate + append so the
+        // sequence read inside `validate_event` and the append are atomic across
+        // processes. A concurrent writer that built the same seq will, once it
+        // acquires the lock, re-read the now-longer stream and be rejected by the
+        // reducer's "Sequence error" rather than appending a duplicate.
+        let _lock = self.store.lock_task(&event.task_id)?;
+        self.validate_event(event)?;
         self.store.append(event)?;
         Ok(())
     }
@@ -3602,6 +3609,53 @@ mod tests {
         audit_pass(&app, "p", None);
         let err = app.finish_task("p").unwrap_err().to_string();
         assert!(err.contains("completion evidence is stale"), "{err}");
+    }
+
+    // ── single-writer ledger ──
+
+    // Many concurrent writers on one task must never produce a duplicate or
+    // non-monotonic sequence number; the per-task lock serializes the
+    // read-seq → validate → append critical section. Losers of a race fail safe
+    // (reducer "Sequence error") rather than corrupting the ledger.
+    #[test]
+    fn concurrent_writers_never_duplicate_seq() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review_bare(&app, "c"); // task in Review with a cargo_check gate
+        let root = app.project_root.clone();
+
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let r = root.clone();
+            handles.push(std::thread::spawn(move || {
+                // Each thread is an independent "process" view of the ledger.
+                let a = ControlApp::open(&r, false).unwrap();
+                let _ = a.record_gate("c", "cargo_check", true, "ok");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let app2 = ControlApp::open(dir.path(), false).unwrap();
+        let seqs: Vec<i64> = app2
+            .store
+            .read_for_task("c")
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        let mut uniq = seqs.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            seqs.len(),
+            uniq.len(),
+            "duplicate sequence under concurrency: {seqs:?}"
+        );
+        for w in seqs.windows(2) {
+            assert!(w[1] > w[0], "non-monotonic sequence: {seqs:?}");
+        }
     }
 
     // ── M6: merge-candidate ──
