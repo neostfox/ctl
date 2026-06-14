@@ -455,6 +455,17 @@ enum RunCommands {
         #[arg(long)]
         reason: String,
     },
+    /// M6: read-only verdict — can this run's worktree land, and if not, how to
+    /// recover? Classifies blockers (out-of-scope / cross-run / dirty main) with
+    /// recommended recovery actions. Never merges.
+    MergeCandidate {
+        /// Run identifier (aggregate under .ctl/runs/<run_id>/).
+        #[arg(long)]
+        run: String,
+        /// Emit JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Crash recovery (M6): report Running run aggregates + orphaned worktrees;
     /// with --abort, tear down one run (free its scope, remove its worktree).
     Recover {
@@ -1228,6 +1239,42 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
         RunCommands::Abort { id, reason } => {
             app.run_abort(id, reason)?;
             println!("Aborted run for task '{}'.", id);
+        }
+        RunCommands::MergeCandidate { run, json } => {
+            let verdict = app.run_merge_candidate(run)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&verdict)?);
+            } else {
+                let mergeable = verdict
+                    .get("mergeable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let touched = verdict
+                    .get("touched_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                println!(
+                    "Run {}: {} ({} touched file(s))",
+                    run,
+                    if mergeable { "MERGEABLE" } else { "BLOCKED" },
+                    touched
+                );
+                if let Some(reasons) = verdict.get("blocking_reasons").and_then(|v| v.as_array()) {
+                    for r in reasons {
+                        if let Some(s) = r.as_str() {
+                            println!("  - blocker: {}", s);
+                        }
+                    }
+                }
+                if let Some(rec) = verdict.get("recovery").and_then(|v| v.as_array()) {
+                    for r in rec {
+                        if let Some(a) = r.get("action").and_then(|v| v.as_str()) {
+                            println!("  -> recover: {}", a);
+                        }
+                    }
+                }
+            }
         }
         RunCommands::Recover {
             abort,

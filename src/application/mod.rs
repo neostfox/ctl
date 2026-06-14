@@ -2277,6 +2277,138 @@ impl ControlApp {
         Ok(orphans)
     }
 
+    /// M6 slice 3: read-only "can this run's work land, and if not, how do I
+    /// recover?" verdict for a run aggregate's isolated worktree. Emits NO
+    /// events and never merges. A run is `mergeable` iff every touched file is
+    /// inside the run's write scope, none collides with another active run's
+    /// scope, and the main workspace is clean in those paths. Each blocker is
+    /// classified into a `recovery` entry with a recommended action (commit/stash
+    /// the dirty main files, let the other run land first, or abort this run via
+    /// `ctl run recover --abort`). High-risk changes are surfaced but do not
+    /// themselves block.
+    pub fn run_merge_candidate(&self, run_id: &str) -> Result<serde_json::Value> {
+        let run = self.replay_run(run_id)?;
+        let worktree_path = run.worktree_path.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Run '{}' has no worktree (not started?) — nothing to merge",
+                run_id
+            )
+        })?;
+        let wt = Path::new(worktree_path);
+        if !wt.exists() {
+            return Err(anyhow!(
+                "Run '{}' worktree is missing at {} — recover with `ctl run recover --abort {}`",
+                run_id,
+                worktree_path,
+                run_id
+            ));
+        }
+
+        let diff_files = crate::infrastructure::workspace::diff_worktree(&self.project_root, wt)?;
+        let touched: Vec<String> = diff_files.iter().map(|(_, p)| p.clone()).collect();
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        let empty_deny = std::collections::BTreeSet::new();
+
+        // (1) Every touched file must be inside this run's write scope.
+        let mut out_of_scope = Vec::new();
+        for (_status, path) in &diff_files {
+            if !file_in_write_scope(&normalizer, path, &run.write_allow, &run.write_deny)? {
+                out_of_scope.push(path.clone());
+            }
+        }
+
+        // (2) No touched file may fall into another ACTIVE run's write scope.
+        // Slice 1 already keeps active runs disjoint, so this is defense in
+        // depth: it catches a run that wrote outside its own scope, into a
+        // concurrently-running peer's territory.
+        let mut cross_run_conflicts = Vec::new();
+        for other in self.active_runs()? {
+            if other.run_id == run_id {
+                continue;
+            }
+            for (_status, path) in &diff_files {
+                if file_in_write_scope(&normalizer, path, &other.write_allow, &empty_deny)? {
+                    cross_run_conflicts.push(serde_json::json!({
+                        "path": path,
+                        "conflicting_run": other.run_id,
+                        "conflicting_task": other.task_id,
+                    }));
+                }
+            }
+        }
+
+        // (3) The main workspace must be clean in the touched paths, else the
+        // merge would clobber concurrent edits. Non-git / unverifiable → no
+        // fabricated conflict.
+        let workspace_conflicts = if touched.is_empty() {
+            Vec::new()
+        } else {
+            crate::infrastructure::workspace::dirty_paths_in_scope(&self.project_root, &touched)?
+                .unwrap_or_default()
+        };
+
+        let requires_approval: Vec<String> =
+            crate::infrastructure::workspace::detect_high_risk(&diff_files)
+                .iter()
+                .map(|(risk, path)| format!("{}: {}", risk, path))
+                .collect();
+
+        // Classify each blocker into a recovery action.
+        let mut blocking_reasons = Vec::new();
+        let mut recovery = Vec::new();
+        if !out_of_scope.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) outside run write scope",
+                out_of_scope.len()
+            ));
+            recovery.push(serde_json::json!({
+                "category": "out_of_scope",
+                "paths": out_of_scope.clone(),
+                "action": format!(
+                    "the run wrote outside its scope — abort and re-scope: ctl run recover --abort {}",
+                    run_id
+                ),
+            }));
+        }
+        if !cross_run_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} cross-run scope conflict(s)",
+                cross_run_conflicts.len()
+            ));
+            recovery.push(serde_json::json!({
+                "category": "cross_run_conflict",
+                "conflicts": cross_run_conflicts.clone(),
+                "action": "another active run owns these paths — let it land or abort it first, then re-check",
+            }));
+        }
+        if !workspace_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) dirty in the main workspace",
+                workspace_conflicts.len()
+            ));
+            recovery.push(serde_json::json!({
+                "category": "dirty_main_workspace",
+                "paths": workspace_conflicts.clone(),
+                "action": "commit or stash these files in the main workspace, then re-run `ctl run merge-candidate`",
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "run_id": run_id,
+            "task_id": run.task_id,
+            "mergeable": blocking_reasons.is_empty(),
+            "touched_files": touched,
+            "out_of_scope": out_of_scope,
+            "cross_run_conflicts": cross_run_conflicts,
+            "workspace_conflicts": workspace_conflicts,
+            "requires_approval": requires_approval,
+            "blocking_reasons": blocking_reasons,
+            "recovery": recovery,
+        }))
+    }
+
     // ── M4: Helpers ──
 
     fn get_worktree_path(&self, task_id: &str) -> Result<PathBuf> {
@@ -3866,5 +3998,110 @@ mod tests {
         assert!(!wt.exists());
         assert_eq!(app.replay_run(&r).unwrap().phase, RunPhase::Aborted);
         assert!(app.recover_report().unwrap().is_empty());
+    }
+
+    // ── M6: merge-candidate / recovery (slice 3) ────────────────────────────
+
+    /// git repo (tracked src/lib.rs + docs/readme.md) + an InProgress task and a
+    /// started run with a real worktree. Returns (app, run_id, worktree_path).
+    fn git_repo_with_started_run(
+        dir: &Path,
+        task: &str,
+        scope: &[&str],
+    ) -> (ControlApp, String, PathBuf) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("docs/readme.md"), "x\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-qm", "init"]);
+
+        let app = ControlApp::init(dir).unwrap();
+        inprogress_task(&app, task, scope);
+        let run_id = app.create_run(task, "omp").unwrap();
+        app.start_run(&run_id).unwrap();
+        let wt = crate::infrastructure::workspace::run_worktree_path(dir, &run_id);
+        (app, run_id, wt)
+    }
+
+    #[test]
+    fn run_merge_candidate_clean_is_mergeable() {
+        let dir = TempDir::new();
+        let (app, run_id, wt) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        // Edit a tracked, in-scope file inside the run's isolated worktree.
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* run edit */ }\n").unwrap();
+        let v = app.run_merge_candidate(&run_id).unwrap();
+        assert_eq!(v["mergeable"], true, "verdict: {v}");
+        assert!(v["touched_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/lib.rs"));
+        assert!(v["recovery"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_merge_candidate_dirty_main_blocks_with_recovery() {
+        let dir = TempDir::new();
+        let (app, run_id, wt) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* run edit */ }\n").unwrap();
+        // The main workspace has its own uncommitted edit to the same file.
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "fn a() { /* main edit */ }\n",
+        )
+        .unwrap();
+        let v = app.run_merge_candidate(&run_id).unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["workspace_conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/lib.rs"));
+        let rec = v["recovery"].as_array().unwrap();
+        assert!(rec
+            .iter()
+            .any(|r| r["category"] == "dirty_main_workspace" && r["action"].is_string()));
+    }
+
+    #[test]
+    fn run_merge_candidate_out_of_scope_and_cross_run() {
+        let dir = TempDir::new();
+        // Run A scoped to src; a concurrent run B scoped to docs.
+        let (app, run_a, wt_a) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        inprogress_task(&app, "task-docs", &["docs"]);
+        let run_b = app.create_run("task-docs", "omp").unwrap();
+        app.start_run(&run_b).unwrap();
+        // Run A writes into docs/ — outside its own scope AND into B's territory.
+        std::fs::write(wt_a.join("docs/readme.md"), "y\n").unwrap();
+        let v = app.run_merge_candidate(&run_a).unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["out_of_scope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "docs/readme.md"));
+        let crc = v["cross_run_conflicts"].as_array().unwrap();
+        assert!(crc.iter().any(|c| c["conflicting_run"] == run_b.as_str()));
+        let cats: Vec<&str> = v["recovery"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["category"].as_str().unwrap())
+            .collect();
+        assert!(cats.contains(&"out_of_scope") && cats.contains(&"cross_run_conflict"));
+    }
+
+    #[test]
+    fn run_merge_candidate_missing_worktree_errors() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // Seeded run points at a worktree that was never created.
+        let run_id = seed_running_run(&app, "t", &["src"]);
+        let err = app.run_merge_candidate(&run_id).unwrap_err().to_string();
+        assert!(err.contains("worktree is missing"), "got: {err}");
+        assert!(err.contains("recover"), "should point at recovery: {err}");
     }
 }
