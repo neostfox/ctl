@@ -67,7 +67,9 @@ jobs:
         shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        # No --locked: the version-stamp step above edits Cargo.toml, which
+        # would otherwise put Cargo.lock out of sync and fail --locked.
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -85,7 +87,8 @@ jobs:
           mkdir -p dist
           archive="ctl-${{ matrix.target }}.zip"
           7z a "dist/$archive" "./target/${{ matrix.target }}/release/ctl.exe" >/dev/null
-          ( cd dist && certutil -hashfile "$archive" SHA256 | sed -n '2p' | tr -d '\r' | awk -v f="$archive" '{print $1"  "f}' > "$archive.sha256" )
+          # sha256sum ships with Git Bash on the windows runner.
+          ( cd dist && sha256sum "$archive" > "$archive.sha256" )
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
