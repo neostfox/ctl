@@ -483,6 +483,18 @@ enum WorkspaceCommands {
         #[arg(long)]
         id: String,
     },
+    /// Read-only clean-merge verdict for a task's worktree (M6). Reports
+    /// whether the changes can be merged: in scope, no cross-task collision,
+    /// main workspace clean. Emits no events and never merges — a human
+    /// confirms, then runs `workspace apply`.
+    MergeCandidate {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1222,8 +1234,78 @@ fn cmd_workspace(command: &WorkspaceCommands, dry_run: bool) -> Result<()> {
             let event = app.workspace_cleanup(id)?;
             println!("Cleaned workspace for task '{}' at seq {}.", id, event.seq);
         }
+        WorkspaceCommands::MergeCandidate { id, json } => {
+            let verdict = app.merge_candidate(id)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&verdict)?);
+            } else {
+                print_merge_candidate(&verdict);
+            }
+        }
     }
     Ok(())
+}
+
+fn print_merge_candidate(v: &Value) {
+    let id = v.get("task_id").and_then(|x| x.as_str()).unwrap_or("?");
+    let mergeable = v
+        .get("mergeable")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let list = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+    println!(
+        "Task '{}': merge candidate = {}",
+        id,
+        if mergeable { "MERGEABLE" } else { "BLOCKED" }
+    );
+    println!("  touched files: {}", list("touched_files"));
+    if let Some(reasons) = v.get("blocking_reasons").and_then(|x| x.as_array()) {
+        for r in reasons {
+            if let Some(s) = r.as_str() {
+                println!("  blocked: {}", s);
+            }
+        }
+    }
+    if let Some(oos) = v.get("out_of_scope").and_then(|x| x.as_array()) {
+        for f in oos {
+            if let Some(s) = f.as_str() {
+                println!("    out-of-scope: {}", s);
+            }
+        }
+    }
+    if let Some(conf) = v.get("cross_task_conflicts").and_then(|x| x.as_array()) {
+        for c in conf {
+            let p = c.get("path").and_then(|x| x.as_str()).unwrap_or("?");
+            let t = c
+                .get("conflicting_task")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            println!("    cross-task conflict: {} (also in task '{}')", p, t);
+        }
+    }
+    if let Some(wc) = v.get("workspace_conflicts").and_then(|x| x.as_array()) {
+        for f in wc {
+            if let Some(s) = f.as_str() {
+                println!("    dirty in main workspace: {}", s);
+            }
+        }
+    }
+    if list("requires_approval") > 0 {
+        println!(
+            "  note: {} high-risk change(s) will need approval at apply time",
+            list("requires_approval")
+        );
+    }
+    if mergeable {
+        println!("Next: review, then `ctl workspace apply --id {}`", id);
+    } else {
+        println!("Resolve the blocking reasons above before merging.");
+    }
 }
 
 fn cmd_apply(id: &str, path: &str, reason: &str, ttl: u64, dry_run: bool) -> Result<()> {

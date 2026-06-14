@@ -1400,21 +1400,7 @@ impl ControlApp {
         );
         let mut files_to_apply = Vec::new();
         for (status, path) in &diff_files {
-            let normalized = normalizer
-                .normalize(path)
-                .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
-            let normalized_str = normalized.to_string_lossy().replace('\\', "/");
-            let in_scope = state.write_allow.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
-            });
-            let in_deny = state.write_deny.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
-            });
-            if !in_scope || in_deny {
+            if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
                 return Err(anyhow!(
                     "File '{}' is out of write scope or in deny list. Rule: scope_enforcement",
                     path
@@ -1504,6 +1490,109 @@ impl ControlApp {
             self.rebuild_task_view(task_id)?;
         }
         Ok(event)
+    }
+
+    /// M6: Read-only "is this worktree a clean merge candidate?" verdict.
+    ///
+    /// Emits NO events and never merges — the human reviews this, then runs
+    /// `workspace apply` to actually merge. A candidate is `mergeable` iff all
+    /// touched files are in the task's write scope, none collide with another
+    /// active task's write scope, and the main workspace has no conflicting
+    /// dirty state in those paths. High-risk changes are surfaced for human
+    /// attention but do not by themselves block the candidate (the apply path
+    /// still gates them via approval).
+    pub fn merge_candidate(&self, task_id: &str) -> Result<serde_json::Value> {
+        let state = self.replay_task(task_id)?;
+        let worktree_path = self.get_worktree_path(task_id)?;
+        let diff_files =
+            crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
+        let touched: Vec<String> = diff_files.iter().map(|(_, p)| p.clone()).collect();
+
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+
+        // (1) Every touched file must be inside this task's write scope.
+        let mut out_of_scope = Vec::new();
+        for (_status, path) in &diff_files {
+            if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
+                out_of_scope.push(path.clone());
+            }
+        }
+
+        // (2) No touched file may fall into another ACTIVE task's write scope
+        // (in_progress | review, non-archived) — that would be a concurrent-write
+        // collision. Mirrors the gateway's cross-task overlap rule (M-c).
+        let mut cross_task_conflicts = Vec::new();
+        let empty_deny = std::collections::BTreeSet::new();
+        for report in &self.generate_status_report()? {
+            let other_id = report.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            let phase = report.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            let archived = report
+                .get("is_archived")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if other_id == task_id || archived || !matches!(phase, "in_progress" | "review") {
+                continue;
+            }
+            let other = self.replay_task(other_id)?;
+            for (_status, path) in &diff_files {
+                if file_in_write_scope(&normalizer, path, &other.write_allow, &empty_deny)? {
+                    cross_task_conflicts.push(serde_json::json!({
+                        "path": path,
+                        "conflicting_task": other_id,
+                    }));
+                }
+            }
+        }
+
+        // (3) The main workspace must be clean in the touched paths, else the
+        // merge would clobber concurrent edits. Non-git / unverifiable → no
+        // fabricated conflict (Ok(None)).
+        let workspace_conflicts = if touched.is_empty() {
+            Vec::new()
+        } else {
+            crate::infrastructure::workspace::dirty_paths_in_scope(&self.project_root, &touched)?
+                .unwrap_or_default()
+        };
+
+        // High-risk changes are informational (apply still gates them).
+        let requires_approval: Vec<String> =
+            crate::infrastructure::workspace::detect_high_risk(&diff_files)
+                .iter()
+                .map(|(risk, path)| format!("{}: {}", risk, path))
+                .collect();
+
+        let mut blocking_reasons = Vec::new();
+        if !out_of_scope.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) outside write scope",
+                out_of_scope.len()
+            ));
+        }
+        if !cross_task_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} cross-task scope conflict(s)",
+                cross_task_conflicts.len()
+            ));
+        }
+        if !workspace_conflicts.is_empty() {
+            blocking_reasons.push(format!(
+                "{} file(s) dirty in the main workspace",
+                workspace_conflicts.len()
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "task_id": task_id,
+            "mergeable": blocking_reasons.is_empty(),
+            "touched_files": touched,
+            "out_of_scope": out_of_scope,
+            "cross_task_conflicts": cross_task_conflicts,
+            "workspace_conflicts": workspace_conflicts,
+            "requires_approval": requires_approval,
+            "blocking_reasons": blocking_reasons,
+        }))
     }
 
     // ── M4: Approval commands ──
@@ -2221,6 +2310,27 @@ fn drift_signals_from(
     }
 }
 
+/// Decide whether a worktree-relative `path` is writable under a task boundary:
+/// inside some `write_allow` scope and not shadowed by a `write_deny` scope,
+/// after normalization. Shared by `workspace_apply` (which errors on the first
+/// out-of-scope file) and `merge_candidate` (which collects them).
+fn file_in_write_scope(
+    normalizer: &crate::infrastructure::boundary::normalizer::PathNormalizer,
+    path: &str,
+    write_allow: &std::collections::BTreeSet<String>,
+    write_deny: &std::collections::BTreeSet<String>,
+) -> Result<bool> {
+    let normalized = normalizer
+        .normalize(path)
+        .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
+    let normalized_str = normalized.to_string_lossy().replace('\\', "/");
+    let matches = |scope: &String| {
+        let scope_norm = scope.replace('\\', "/");
+        normalized_str.starts_with(scope_norm.as_str()) || normalized_str == scope_norm
+    };
+    Ok(write_allow.iter().any(matches) && !write_deny.iter().any(matches))
+}
+
 // ── UUID generation (no external crate) ──
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2601,6 +2711,139 @@ mod tests {
         git(dir.path(), &["commit", "-qm", "work"]);
         let event = app.finish_task("ilk").unwrap();
         assert_eq!(event.event_type, "task_completed");
+    }
+
+    // ── M6: merge-candidate ──
+
+    /// git repo + initial commit (tracked src/lib.rs and docs/readme.md), then
+    /// a started task with an isolated worktree. Returns (app, worktree_path).
+    fn setup_worktree(dir: &Path, id: &str, write_allow: &[&str]) -> (ControlApp, PathBuf) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("docs/readme.md"), "x\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-qm", "init"]);
+
+        let app = ControlApp::init(dir).unwrap();
+        let scope: Vec<String> = write_allow.iter().map(|s| s.to_string()).collect();
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "merge candidate",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.workspace_create(id).unwrap();
+        let wt = dir.join(".ctl/tasks").join(id).join("worktree");
+        (app, wt)
+    }
+
+    #[test]
+    fn merge_candidate_in_scope_is_mergeable() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        // Modify a tracked, in-scope file in the worktree.
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], true, "verdict: {v}");
+        assert!(v["blocking_reasons"].as_array().unwrap().is_empty());
+        assert!(v["touched_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_out_of_scope_blocks() {
+        let dir = TempDir::new();
+        // Task scope is only src/, but the worktree also edits docs/readme.md.
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("docs/readme.md"), "edited\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["out_of_scope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "docs/readme.md"));
+    }
+
+    #[test]
+    fn merge_candidate_cross_task_conflict_blocks() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+
+        // Another active task claims the same file → cross-task collision.
+        let other_scope = vec!["src/lib.rs".to_string()];
+        app.create_task(
+            "other",
+            CreateTaskInput {
+                objective: "rival",
+                read_scope: &other_scope,
+                write_allow: &other_scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("other").unwrap();
+        app.start_task("other").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        let conflicts = v["cross_task_conflicts"].as_array().unwrap();
+        assert!(conflicts
+            .iter()
+            .any(|c| c["conflicting_task"] == "other" && c["path"] == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_dirty_main_workspace_blocks() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+        // The main workspace has its own uncommitted edit to the same file.
+        std::fs::write(dir.path().join("src/lib.rs"), "fn a() { /* main */ }\n").unwrap();
+
+        let v = app.merge_candidate("mc").unwrap();
+        assert_eq!(v["mergeable"], false, "verdict: {v}");
+        assert!(v["workspace_conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "src/lib.rs"));
+    }
+
+    #[test]
+    fn merge_candidate_emits_no_events() {
+        let dir = TempDir::new();
+        let (app, wt) = setup_worktree(dir.path(), "mc", &["src"]);
+        std::fs::write(wt.join("src/lib.rs"), "fn a() { /* edit */ }\n").unwrap();
+        let before = app.store.read_for_task("mc").unwrap().len();
+        app.merge_candidate("mc").unwrap();
+        assert_eq!(
+            app.store.read_for_task("mc").unwrap().len(),
+            before,
+            "merge_candidate must be read-only"
+        );
     }
 
     fn create_planning(app: &ControlApp, id: &str) {
