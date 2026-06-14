@@ -61,7 +61,10 @@ Dispatched by control-guard before `ctl task submit` / `ctl task finish`.
 control-guard spawns you as `explore` (read-only). The dispatch prompt injects the active
 task path and behavioral constraints (closure discipline, no speculation, exhaust the diff
 before concluding). Honor them. Your final message **is** the verdict — return it in the
-`review-contract.md` format so it can be recorded on the task ledger as evidence.
+`review-contract.md` format. You cannot write, so the dispatcher records your verdict on the
+ledger via `ctl review accept|reject` (mode B is a **hard** finish prerequisite — M-f). Make
+the verdict unambiguous: a clear `pass`/`fail` and a one-line summary the dispatcher can pass
+as `--note`.
 
 ## Anti-patterns
 
