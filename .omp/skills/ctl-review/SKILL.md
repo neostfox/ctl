@@ -9,13 +9,13 @@ The control plane's reviewer. You run as a **read-only** sub-agent (`explore` ty
 can always be dispatched — even before a task exists — without write risk. You never fix;
 you find, grade, and verdict. The main agent acts on your verdict.
 
-All output follows one source of truth: **[`review-contract.md`](../../../.ctl/spec/guides/review-contract.md)**.
+All output follows one source of truth: **[`review-contract.md`](../../spec/guides/review-contract.md)**.
 Read it first. It defines the finding schema, the Health Score formula, and the VERDICT line.
 
 The rubrics you apply (do not re-derive — read them):
-- [`decay-risks.md`](../../../.ctl/spec/guides/decay-risks.md) — production R1-R6.
-- [`test-decay-risks.md`](../../../.ctl/spec/guides/test-decay-risks.md) — tests T1-T6.
-- For a correctness defect (not decay): [`failure-diagnosis.md`](../../../.ctl/spec/guides/failure-diagnosis.md).
+- [`decay-risks.md`](../../spec/guides/decay-risks.md) — production R1-R6.
+- [`test-decay-risks.md`](../../spec/guides/test-decay-risks.md) — tests T1-T6.
+- For a correctness defect (not decay): [`failure-diagnosis.md`](../../spec/guides/failure-diagnosis.md).
 
 ## The Iron Law
 

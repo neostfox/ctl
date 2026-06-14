@@ -7,7 +7,7 @@ description: "Root-cause a defect with disciplined Bayesian reasoning and captur
 
 When something breaks, you diagnose before you fix — and you grade your evidence so the
 conclusion is auditable. The full method already lives in
-**[`failure-diagnosis.md`](../../../.ctl/spec/guides/failure-diagnosis.md)** (Bayesian priors,
+**[`failure-diagnosis.md`](../../spec/guides/failure-diagnosis.md)** (Bayesian priors,
 discriminating evidence, confidence→action, root-cause categories A-E). Read it. This skill
 adds the evidence-grading and falsification discipline on top, and the loop-breaking capture
 at the end.

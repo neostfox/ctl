@@ -34,6 +34,27 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-spec-bootstrap/SKILL.md"),
         },
+        // Fixed review-rule files the skills reference. These are universal
+        // (not project-specific), so they ship verbatim with `ctl init` rather
+        // than being regenerated per project by ctl-spec-bootstrap. Closes the
+        // distribution gap: ctl-review/ctl-diagnose pointed at these but they
+        // lived only in the gitignored, per-project `.ctl/spec/`.
+        EmbeddedFile {
+            relative_path: "spec/guides/review-contract.md",
+            content: include_str!("../../.omp/spec/guides/review-contract.md"),
+        },
+        EmbeddedFile {
+            relative_path: "spec/guides/decay-risks.md",
+            content: include_str!("../../.omp/spec/guides/decay-risks.md"),
+        },
+        EmbeddedFile {
+            relative_path: "spec/guides/test-decay-risks.md",
+            content: include_str!("../../.omp/spec/guides/test-decay-risks.md"),
+        },
+        EmbeddedFile {
+            relative_path: "spec/guides/failure-diagnosis.md",
+            content: include_str!("../../.omp/spec/guides/failure-diagnosis.md"),
+        },
         // Attribution for adapted MIT skill packs
         EmbeddedFile {
             relative_path: "skills/NOTICE.md",
@@ -119,4 +140,73 @@ fn merge_settings(settings_path: &std::path::Path) -> anyhow::Result<()> {
     std::fs::rename(&temp_path, settings_path)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct TmpDir {
+        path: PathBuf,
+    }
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ctl-skills-test-{}-{}",
+                std::process::id(),
+                tag
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn inject_ships_fixed_review_rule_guides() {
+        let d = TmpDir::new("guides");
+        inject_all(&d.path).unwrap();
+        for f in [
+            "review-contract.md",
+            "decay-risks.md",
+            "test-decay-risks.md",
+            "failure-diagnosis.md",
+        ] {
+            assert!(
+                d.path.join(".omp/spec/guides").join(f).exists(),
+                "ctl init must ship the fixed guide {f}"
+            );
+        }
+    }
+
+    /// The distribution gap: ctl-review linked guide files that `ctl init` never
+    /// shipped. Assert every `../../spec/guides/*.md` the skill references now
+    /// resolves to a real file after init.
+    #[test]
+    fn ctl_review_guide_references_resolve_after_init() {
+        let d = TmpDir::new("refs");
+        inject_all(&d.path).unwrap();
+        let skill =
+            std::fs::read_to_string(d.path.join(".omp/skills/ctl-review/SKILL.md")).unwrap();
+        let mut checked = 0;
+        for chunk in skill.split("../../spec/guides/").skip(1) {
+            let end = chunk.find(".md").expect("guide link ends in .md") + 3;
+            let rel = &chunk[..end];
+            assert!(
+                d.path.join(".omp/spec/guides").join(rel).exists(),
+                "ctl-review references missing guide: {rel}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 3,
+            "expected several guide references, got {checked}"
+        );
+    }
 }
