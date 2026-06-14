@@ -390,7 +390,25 @@ ctl approval deny
 
 并发写入、自动合并、其他执行器 adapter、长期密钥注入。
 
-### M5：可解释控制闭环
+---
+
+## 决策记录：dogfood 门已满足，进入 M5（2026-06-14）
+
+M0–M4 的退出条件「至少用 M3/M4 完成 **20 个真实任务**，再决定是否进入 M5/M6」**已达成**：
+
+- 任务账本累计 **66 个 completed**（走完整生命周期）+ 17 个 cancelled（弃置实验）。
+- 仅算真功能/里程碑（非冒烟探针）也有 **30+ 个**：本轮硬层 8 个（M-a…M-g / M-f / M6-reviewer
+  / flaky 修复 / 分发对齐）、更早的 quick-mode·stepup·architecture-convergence·unify-governance
+  等、以及 `df-m4-01…21` 的 M4 dogfood 批。
+- 治理层（边界·账本·门·审核·提交联锁·身份绑定）不仅实现且**在线强制**，并被这 66 个任务反复压测
+  （本轮 9 个提交全程 dogfood，连 `cargo install` 自身都走 deps 审批 + 完成审计流程）。
+
+**结论**：M5/M6 的前置条件满足。**下一个任务开启 M5（可解释控制闭环）**；M6 主体（完整 capability
+lease 并发）按 ROADMAP 仍排在 M5 之后。
+
+---
+
+### M5：可解释控制闭环 ⏭ 下一步
 
 **用户价值**
 
