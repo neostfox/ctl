@@ -44,12 +44,14 @@
 
 | 级别 | 含义 | 示例 | 性质 |
 | --- | --- | --- | --- |
-| **L0** | 自由文本 / Skill 裸产物 | `.ctl/brainstorms/<id>.json` | 可直接修改、无 seq、不经 reducer。**不得称为审计证据**,只是"未验证的内容制品"。 |
+| **L0** | 自由文本 / Skill 裸产物 | `brainstorms/<id>/`(divergence/critic/convergence) | 可直接修改、无 seq、不经 reducer。**不得称为审计证据**,只是"未验证的内容制品"。 |
 | **L1** | fact index / 事实索引 | `telemetry.jsonl` | 可查询、可关联,仍可被本地修改。 |
 | **L2** | canonical event / 参与 replay | `gate_checked`、`brainstorm_artifact_recorded` | 经应用层验证并追加,有 seq、幂等、可重放。 |
 | **L3** | 防篡改证据 | 单写者 / hash chain / 签名 / 外部锚定 | 抗对手。当前未实现。 |
 
-> **关键:信封层级(L0–L3)和内容可信等级是两条独立轴。** 一条 L2 事件可以包裹一个 L0 等级的声明(例如自报的 `critic_run_id`)。事件证明"它被如实记录了",不证明"它描述的事实为真"。文档和 UI 必须按内容的真实等级标注,不能因为文件位于 `.ctl/` 下、或因为它进了 canonical event,就把它渲染成控制层事实。
+> **关键:信封层级(L0–L3)和内容可信等级是两条独立轴。** 一条 L2 事件可以包裹一个 L0 等级的声明(例如自报的 `critic_run_id`)。事件证明"它被如实记录了",不证明"它描述的事实为真"。文档和 UI 必须按内容的真实等级标注,不能因为文件位于 `brainstorms/` 下、或因为它进了 canonical event,就把它渲染成控制层事实。
+
+> **目录边界(与强制实现一致):** `.ctl/` 存放**受保护的控制状态**(`events.jsonl`、`task.json`/`control.json` 投影、配置)——`PathNormalizer` 拒绝对整棵 `.ctl/` 树的写入,Agent 不得直接写。**认知产物(L0)放在受 git 跟踪的顶层 `brainstorms/<id>/`**,而非 `.ctl/`:L0 是可直接修改、未验证的内容制品,跟踪它只是为了让 path+hash provenance 可持久,绝不因此提升其可信等级。
 
 ---
 
