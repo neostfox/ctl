@@ -1106,7 +1106,9 @@ mod tests {
     // Baseline manifest (AUDIT-005: fixed-set regression)
     // ============================================================
     /// Audit matrix version — bump when test structure changes.
-    const AUDIT_MATRIX_VERSION: u32 = 9;
+    /// v10: BS-provenance V1 added 3 canonical event types to the vocabulary
+    /// (brainstorm_artifact_recorded, critic_artifact_attached, brainstorm_skipped).
+    const AUDIT_MATRIX_VERSION: u32 = 10;
     const BASELINE_SCHEMA_FILES: &[&str] = &[
         "control.event-envelope.v1.schema.json",
         "control.task-definition.v1.schema.json",
@@ -1138,7 +1140,7 @@ mod tests {
     #[test]
     fn baseline_audit_matrix_version() {
         assert_eq!(
-            AUDIT_MATRIX_VERSION, 9,
+            AUDIT_MATRIX_VERSION, 10,
             "Audit matrix version must be explicitly bumped on structural changes"
         );
     }
@@ -1189,6 +1191,187 @@ mod tests {
             4,
             "Required gate count changed — update this test if intentional"
         );
+    }
+
+    // ============================================================
+    // BS-provenance V1 (reducer + schema)
+    // ============================================================
+
+    #[test]
+    fn bs_provenance_absent_for_legacy_streams() {
+        // Behavior 7: a normal lifecycle with no brainstorm events replays
+        // unchanged, and the brainstorm reference stays None — old tasks (which
+        // never emitted these events) remain fully replayable.
+        let mut s = TaskState::new("t");
+        apply(
+            &mut s,
+            &ev(
+                1,
+                "t",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        apply(&mut s, &ev(2, "t", "task_marked_ready", json!({}))).unwrap();
+        apply(&mut s, &ev(3, "t", "task_started", json!({}))).unwrap();
+        assert!(s.brainstorm_ref.is_none());
+    }
+
+    #[test]
+    fn bs_provenance_reducer_pins_trust_and_independence() {
+        // Behavior 9: a canonical event only proves a reference was recorded — it
+        // never raises content trust, and independence can never be claimed.
+        let mut s = TaskState::new("t");
+        apply(
+            &mut s,
+            &ev(
+                1,
+                "t",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        // Recorded with no trust claim → pinned to content_l0 / unattested.
+        apply(
+            &mut s,
+            &ev(
+                2,
+                "t",
+                "brainstorm_artifact_recorded",
+                json!({"brainstorm_id": "BS-1", "divergence_path": "d", "divergence_hash": "h"}),
+            ),
+        )
+        .unwrap();
+        let reference = s.brainstorm_ref.clone().unwrap();
+        assert_eq!(reference.trust_level, "content_l0");
+        assert_eq!(reference.critic_independence, "unattested");
+        assert_eq!(reference.critic_disposition.as_str(), "absent");
+        // Trust can never be inflated: a higher trust_level is rejected.
+        assert!(apply(
+            &mut s,
+            &ev(
+                3,
+                "t",
+                "brainstorm_artifact_recorded",
+                json!({"brainstorm_id": "BS-1", "divergence_path": "d", "divergence_hash": "h", "trust_level": "verified"}),
+            ),
+        )
+        .is_err());
+        // Independence can never be claimed: a critic asserting it is rejected.
+        assert!(apply(
+            &mut s,
+            &ev(
+                4,
+                "t",
+                "critic_artifact_attached",
+                json!({"brainstorm_id": "BS-1", "critic_path": "c", "critic_hash": "h", "critic_independence": "independent"}),
+            ),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bs_provenance_critic_requires_recorded_brainstorm() {
+        // A critic or skip can only attach to a recorded brainstorm whose id matches.
+        let mut s = TaskState::new("t");
+        apply(
+            &mut s,
+            &ev(
+                1,
+                "t",
+                "task_created",
+                task_payload("T", &["src/"], &["src/"], &["cargo_check"]),
+            ),
+        )
+        .unwrap();
+        // No brainstorm recorded yet → attach/skip rejected.
+        assert!(apply(
+            &mut s,
+            &ev(
+                2,
+                "t",
+                "critic_artifact_attached",
+                json!({"brainstorm_id": "BS-1", "critic_path": "c", "critic_hash": "h"}),
+            ),
+        )
+        .is_err());
+        apply(
+            &mut s,
+            &ev(
+                3,
+                "t",
+                "brainstorm_artifact_recorded",
+                json!({"brainstorm_id": "BS-1", "divergence_path": "d", "divergence_hash": "h"}),
+            ),
+        )
+        .unwrap();
+        // Mismatched brainstorm id → rejected.
+        assert!(apply(
+            &mut s,
+            &ev(
+                4,
+                "t",
+                "brainstorm_skipped",
+                json!({"brainstorm_id": "BS-OTHER", "skip_reason": "x", "decided_by": "human"}),
+            ),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn schema_accepts_brainstorm_events_and_pins_claims() {
+        let validator = SchemaValidator::new("schemas/").unwrap();
+        let envelope = |ty: &str, payload: serde_json::Value| {
+            json!({
+                "schema": "control.event-envelope.v1",
+                "event_id": "550e8400-e29b-41d4-a716-446655440000",
+                "command_id": "550e8400-e29b-41d4-a716-446655440001",
+                "task_id": "t", "seq": 1, "occurred_at": "2026-06-15T10:00:00Z",
+                "actor": "human", "type": ty, "payload": payload
+            })
+        };
+        // Valid originator event passes.
+        validator
+            .validate_instance(
+                &envelope(
+                    "brainstorm_artifact_recorded",
+                    json!({"brainstorm_id": "BS-1", "divergence_path": "d", "divergence_hash": "h", "trust_level": "content_l0"}),
+                ),
+                "control.event-envelope.v1",
+            )
+            .unwrap();
+        // Missing required field fails.
+        assert!(validator
+            .validate_instance(
+                &envelope(
+                    "brainstorm_artifact_recorded",
+                    json!({"brainstorm_id": "BS-1"})
+                ),
+                "control.event-envelope.v1",
+            )
+            .is_err());
+        // Inflated trust level fails the schema enum.
+        assert!(validator
+            .validate_instance(
+                &envelope(
+                    "brainstorm_artifact_recorded",
+                    json!({"brainstorm_id": "BS-1", "divergence_path": "d", "divergence_hash": "h", "trust_level": "verified"}),
+                ),
+                "control.event-envelope.v1",
+            )
+            .is_err());
+        // A critic claiming independence fails the schema enum.
+        assert!(validator
+            .validate_instance(
+                &envelope(
+                    "critic_artifact_attached",
+                    json!({"brainstorm_id": "BS-1", "critic_path": "c", "critic_hash": "h", "critic_independence": "independent"}),
+                ),
+                "control.event-envelope.v1",
+            )
+            .is_err());
     }
 
     // ============================================================

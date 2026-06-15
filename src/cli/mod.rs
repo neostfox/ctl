@@ -164,6 +164,75 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Brainstorm provenance (V1): record which cognitive artifacts a task
+    /// derived from. Record-only — never gates create/finish, never claims
+    /// thinking quality or review independence.
+    Brainstorm {
+        #[command(subcommand)]
+        command: BrainstormCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BrainstormCommands {
+    /// Record originator (divergence/convergence) artifacts for a brainstorm.
+    Record {
+        /// Task identifier to bind the brainstorm to
+        #[arg(long)]
+        id: String,
+        /// Logical brainstorm identifier (e.g. BS-001)
+        #[arg(long = "brainstorm")]
+        brainstorm: String,
+        /// Path to the divergence (candidate-directions) artifact
+        #[arg(long)]
+        divergence: String,
+        /// Path to the convergence (task-proposal) artifact, if any
+        #[arg(long)]
+        convergence: Option<String>,
+        /// Claimed originating run id, if any (never attested in V1)
+        #[arg(long = "source-run")]
+        source_run: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Attach a critic (challenge) artifact to a recorded brainstorm.
+    AttachCritic {
+        #[arg(long)]
+        id: String,
+        #[arg(long = "brainstorm")]
+        brainstorm: String,
+        /// Path to the critic artifact
+        #[arg(long)]
+        critic: String,
+        #[arg(long = "source-run")]
+        source_run: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Record that the critic step was explicitly skipped, with a reason.
+    SkipCritic {
+        #[arg(long)]
+        id: String,
+        #[arg(long = "brainstorm")]
+        brainstorm: String,
+        /// Why the critic step was skipped
+        #[arg(long)]
+        reason: String,
+        /// Who decided to skip (defaults to the recording actor)
+        #[arg(long = "decided-by")]
+        decided_by: Option<String>,
+        #[arg(long = "source-run")]
+        source_run: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show a task's brainstorm provenance (fact-only; staleness resolved).
+    Show {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -703,6 +772,7 @@ pub fn run() -> Result<()> {
         Commands::Telemetry { command } => cmd_telemetry(command, dry_run),
         Commands::Drift { command } => cmd_drift(command),
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
+        Commands::Brainstorm { command } => cmd_brainstorm(command),
     }
 }
 
@@ -883,10 +953,13 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             // still unfinished. Computed here (not persisted) so the frozen
             // task-view schema / task.json projection is untouched.
             let blocked_by = app.unmet_dependencies(id)?;
+            // BS-provenance V1: fact-only provenance block, staleness resolved
+            // against the working tree. None when no brainstorm was recorded.
+            let provenance = app.brainstorm_provenance_view(&state);
             if *json {
-                print_task_state(&state, &blocked_by)?;
+                print_task_state(&state, &blocked_by, provenance.as_ref())?;
             } else {
-                print_task_human(&state, &blocked_by)?;
+                print_task_human(&state, &blocked_by, provenance.as_ref())?;
             }
         }
         TaskCommands::Start { id } => {
@@ -1535,7 +1608,11 @@ fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
     Ok(())
 }
 
-fn print_task_state(state: &TaskState, blocked_by: &[String]) -> Result<()> {
+fn print_task_state(
+    state: &TaskState,
+    blocked_by: &[String],
+    provenance: Option<&crate::domain::task::BrainstormProvenanceView>,
+) -> Result<()> {
     let gate_results: BTreeMap<_, _> = state.gate_results.iter().collect();
     let active_leases: usize = state
         .leases
@@ -1564,13 +1641,19 @@ fn print_task_state(state: &TaskState, blocked_by: &[String]) -> Result<()> {
         "active_run": state.active_run,
         "leases_active": active_leases,
         "pending_approvals": pending_approvals_count,
+        // BS-provenance V1: fact-only, display-only (null when none recorded).
+        "brainstorm_provenance": provenance,
         "last_event_seq": state.last_seq,
     });
     println!("{}", serde_json::to_string_pretty(&view)?);
     Ok(())
 }
 
-fn print_task_human(state: &TaskState, blocked_by: &[String]) -> Result<()> {
+fn print_task_human(
+    state: &TaskState,
+    blocked_by: &[String],
+    provenance: Option<&crate::domain::task::BrainstormProvenanceView>,
+) -> Result<()> {
     println!("Task: {}", state.id);
     println!("Phase: {:?}", state.phase);
     if state.is_held {
@@ -1633,7 +1716,140 @@ fn print_task_human(state: &TaskState, blocked_by: &[String]) -> Result<()> {
     for approval in state.pending_approvals.values() {
         println!("Approval {}: {:?}", approval.request_id, approval.status);
     }
+    // BS-provenance V1: fact-only disclosure (omitted when none recorded).
+    if let Some(view) = provenance {
+        print_brainstorm_provenance(view);
+    }
     println!("Seq: {}", state.last_seq);
+    Ok(())
+}
+
+fn print_brainstorm_provenance(view: &crate::domain::task::BrainstormProvenanceView) {
+    print!("{}", format_brainstorm_provenance(view));
+}
+
+/// Render a brainstorm-provenance view as fact-only disclosure. Deliberately uses
+/// neutral words ("present", "absent", "STALE", "unattested", "unavailable") and
+/// NEVER a pass/green marker — and never the word "independent" as a positive
+/// claim. It discloses what was recorded; it does not evaluate it.
+fn format_brainstorm_provenance(view: &crate::domain::task::BrainstormProvenanceView) -> String {
+    fn artifact_line(label: &str, status: Option<&crate::domain::task::ArtifactStatus>) -> String {
+        match status {
+            None => format!("  {label} artifact: absent\n"),
+            Some(s) if s.stale => format!(
+                "  {label} artifact: present (STALE — artifact changed or missing since recording)\n"
+            ),
+            Some(_) => format!("  {label} artifact: present\n"),
+        }
+    }
+    let mut out = String::new();
+    out.push_str("BRAINSTORM PROVENANCE\n");
+    out.push_str(&format!("  brainstorm id: {}\n", view.id));
+    out.push_str(&artifact_line("divergence", view.divergence.as_ref()));
+    out.push_str(&artifact_line("convergence", view.convergence.as_ref()));
+    out.push_str(&artifact_line("critic", view.critic.as_ref()));
+    out.push_str(&format!(
+        "  critic disposition: {}\n",
+        view.critic_disposition
+    ));
+    // Always "unattested" in V1; a bare disclosure, never rendered as "independent".
+    out.push_str(&format!(
+        "  critic independence: {}\n",
+        view.critic_independence
+    ));
+    match &view.skip_reason {
+        Some(reason) => {
+            let by = view.skip_decided_by.as_deref().unwrap_or("unknown");
+            out.push_str(&format!("  skip reason: {reason} (decided by: {by})\n"));
+        }
+        None => out.push_str("  skip reason: none\n"),
+    }
+    match &view.source_run_id {
+        Some(run) => out.push_str(&format!("  source run: {run} (attestation: unavailable)\n")),
+        None => out.push_str("  source run attestation: unavailable\n"),
+    }
+    out.push_str(&format!(
+        "  trust level: {} (untrusted content)\n",
+        view.trust_level
+    ));
+    out.push_str(&format!("  recorded by: {}\n", view.recorded_by));
+    out
+}
+
+fn cmd_brainstorm(command: &BrainstormCommands) -> Result<()> {
+    match command {
+        BrainstormCommands::Record {
+            id,
+            brainstorm,
+            divergence,
+            convergence,
+            source_run,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_brainstorm_artifacts(
+                id,
+                brainstorm,
+                divergence,
+                convergence.as_deref(),
+                source_run.as_deref(),
+            )?;
+            println!(
+                "Recorded brainstorm '{}' artifacts for task '{}' at seq {}.",
+                brainstorm, id, event.seq
+            );
+        }
+        BrainstormCommands::AttachCritic {
+            id,
+            brainstorm,
+            critic,
+            source_run,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event =
+                app.attach_brainstorm_critic(id, brainstorm, critic, source_run.as_deref())?;
+            println!(
+                "Attached critic artifact to brainstorm '{}' on task '{}' at seq {} \
+                 (independence: unattested).",
+                brainstorm, id, event.seq
+            );
+        }
+        BrainstormCommands::SkipCritic {
+            id,
+            brainstorm,
+            reason,
+            decided_by,
+            source_run,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.skip_brainstorm_critic(
+                id,
+                brainstorm,
+                reason,
+                decided_by.as_deref(),
+                source_run.as_deref(),
+            )?;
+            println!(
+                "Recorded critic skip for brainstorm '{}' on task '{}' at seq {}.",
+                brainstorm, id, event.seq
+            );
+        }
+        BrainstormCommands::Show { id, json } => {
+            let app = app_open(false)?;
+            let state = app.get_status(id)?;
+            let provenance = app.brainstorm_provenance_view(&state);
+            match provenance {
+                Some(view) if *json => {
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                }
+                Some(view) => print_brainstorm_provenance(&view),
+                None if *json => println!("null"),
+                None => println!("No brainstorm provenance recorded for task '{}'.", id),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3889,7 +4105,10 @@ fn cmd_hook_spec_status() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_bash, resolve_active_governance, ActiveTask, GovState};
+    use super::{
+        classify_bash, format_brainstorm_provenance, resolve_active_governance, ActiveTask,
+        GovState,
+    };
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
         ActiveTask {
@@ -4042,5 +4261,48 @@ mod tests {
     fn subshell_and_backtick_segments_are_scanned() {
         assert_eq!(classify_bash("echo $(git push)"), "git_push");
         assert_eq!(classify_bash("x=`git push`"), "git_push");
+    }
+
+    #[test]
+    fn brainstorm_provenance_never_renders_as_independent() {
+        // Behavior 8: the status block discloses `unattested` and never renders
+        // it as an independence claim or a pass/green marker.
+        use crate::domain::task::{ArtifactStatus, BrainstormProvenanceView};
+        let view = BrainstormProvenanceView {
+            id: "BS-001".into(),
+            divergence: Some(ArtifactStatus {
+                path: "d".into(),
+                present: true,
+                stale: false,
+                recorded_hash: "h".into(),
+            }),
+            convergence: Some(ArtifactStatus {
+                path: "c".into(),
+                present: true,
+                stale: true,
+                recorded_hash: "h".into(),
+            }),
+            critic: None,
+            critic_disposition: "absent".into(),
+            critic_independence: "unattested".into(),
+            trust_level: "content_l0".into(),
+            source_run_id: Some("run-1".into()),
+            source_run_attested: false,
+            recorded_by: "human".into(),
+            skip_reason: None,
+            skip_decided_by: None,
+        };
+        let out = format_brainstorm_provenance(&view);
+        // Discloses unattested independence verbatim...
+        assert!(out.contains("critic independence: unattested"));
+        // ...and never as an independence claim or a pass/green marker.
+        assert!(!out.to_lowercase().contains("independent"));
+        assert!(!out.contains("PASS"));
+        assert!(!out.contains('✅'));
+        // Staleness is surfaced; source-run attestation disclosed unavailable.
+        assert!(out.contains("convergence artifact: present (STALE"));
+        assert!(out.contains("attestation: unavailable"));
+        // L0 content trust disclosed, never elevated.
+        assert!(out.contains("trust level: content_l0"));
     }
 }

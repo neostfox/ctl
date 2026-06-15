@@ -714,6 +714,146 @@ impl ControlApp {
         self.record_gate(task_id, gate_id, result.passed, &evidence)
     }
 
+    // ── BS-provenance V1: record-only brainstorm artifact provenance ──
+    //
+    // These emit canonical, task-scoped events binding brainstorm artifacts (by
+    // path + SHA-256) to a task. They NEVER gate task creation or completion and
+    // make no claim about thinking quality or review independence. Trust is pinned
+    // at L0 content and critic independence at `unattested` by the reducer.
+
+    /// Hash a brainstorm artifact, resolving its path against the project root.
+    /// The file must exist: a reference is provenance only for content actually
+    /// present at record time — a bare path on disk is never auto-provenance.
+    fn hash_artifact(&self, path: &str) -> Result<String> {
+        let resolved = self.project_root.join(path);
+        if !resolved.is_file() {
+            return Err(anyhow!("brainstorm artifact not found: {}", path));
+        }
+        hash_file(&resolved)
+    }
+
+    /// Record originator (divergence/convergence) artifacts for a brainstorm.
+    pub fn record_brainstorm_artifacts(
+        &self,
+        task_id: &str,
+        brainstorm_id: &str,
+        divergence_path: &str,
+        convergence_path: Option<&str>,
+        source_run_id: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "brainstorm_id": brainstorm_id,
+            "divergence_path": divergence_path,
+            "divergence_hash": self.hash_artifact(divergence_path)?,
+            "trust_level": crate::domain::task::BRAINSTORM_TRUST_LEVEL,
+        });
+        if let Some(convergence) = convergence_path {
+            payload["convergence_path"] = serde_json::json!(convergence);
+            payload["convergence_hash"] = serde_json::json!(self.hash_artifact(convergence)?);
+        }
+        if let Some(run) = source_run_id {
+            payload["source_run_id"] = serde_json::json!(run);
+        }
+        let event = self.build_event(task_id, "brainstorm_artifact_recorded", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Attach a critic (challenge) artifact to a recorded brainstorm.
+    pub fn attach_brainstorm_critic(
+        &self,
+        task_id: &str,
+        brainstorm_id: &str,
+        critic_path: &str,
+        source_run_id: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "brainstorm_id": brainstorm_id,
+            "critic_path": critic_path,
+            "critic_hash": self.hash_artifact(critic_path)?,
+            "critic_independence": crate::domain::task::CRITIC_INDEPENDENCE_UNATTESTED,
+            "trust_level": crate::domain::task::BRAINSTORM_TRUST_LEVEL,
+        });
+        if let Some(run) = source_run_id {
+            payload["source_run_id"] = serde_json::json!(run);
+        }
+        let event = self.build_event(task_id, "critic_artifact_attached", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Record that the critic step was explicitly skipped, with a reason and the
+    /// deciding actor (defaults to the recording actor when not supplied).
+    pub fn skip_brainstorm_critic(
+        &self,
+        task_id: &str,
+        brainstorm_id: &str,
+        reason: &str,
+        decided_by: Option<&str>,
+        source_run_id: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "brainstorm_id": brainstorm_id,
+            "skip_reason": reason,
+            "decided_by": decided_by.unwrap_or(self.actor.as_str()),
+            "trust_level": crate::domain::task::BRAINSTORM_TRUST_LEVEL,
+        });
+        if let Some(run) = source_run_id {
+            payload["source_run_id"] = serde_json::json!(run);
+        }
+        let event = self.build_event(task_id, "brainstorm_skipped", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Build a fact-only provenance view, resolving artifact staleness against the
+    /// current working tree. Returns None when the task has no recorded brainstorm.
+    pub fn brainstorm_provenance_view(
+        &self,
+        state: &TaskState,
+    ) -> Option<crate::domain::task::BrainstormProvenanceView> {
+        use crate::domain::task::{ArtifactRef, ArtifactStatus, BrainstormProvenanceView};
+        let reference = state.brainstorm_ref.as_ref()?;
+        let status = |artifact: &ArtifactRef| -> ArtifactStatus {
+            let resolved = self.project_root.join(&artifact.path);
+            let present = resolved.is_file();
+            // Missing → stale; present but hash drifted → stale; match → fresh.
+            let stale = match present.then(|| hash_file(&resolved).ok()).flatten() {
+                Some(current) => current != artifact.hash,
+                None => true,
+            };
+            ArtifactStatus {
+                path: artifact.path.clone(),
+                present,
+                stale,
+                recorded_hash: artifact.hash.clone(),
+            }
+        };
+        Some(BrainstormProvenanceView {
+            id: reference.id.clone(),
+            divergence: reference.divergence.as_ref().map(&status),
+            convergence: reference.convergence.as_ref().map(&status),
+            critic: reference.critic.as_ref().map(&status),
+            critic_disposition: reference.critic_disposition.as_str().to_string(),
+            critic_independence: reference.critic_independence.clone(),
+            trust_level: reference.trust_level.clone(),
+            source_run_id: reference.source_run_id.clone(),
+            source_run_attested: false,
+            recorded_by: reference.recorded_by.clone(),
+            skip_reason: reference.skip_reason.clone(),
+            skip_decided_by: reference.skip_decided_by.clone(),
+        })
+    }
+
     /// Build a context snapshot: hash all files within the task read scope.
     pub fn build_context(&self, task_id: &str) -> Result<serde_json::Value> {
         let state = self.replay_task(task_id)?;
@@ -4549,5 +4689,172 @@ mod tests {
         let err = app.run_merge_candidate(&run_id).unwrap_err().to_string();
         assert!(err.contains("worktree is missing"), "got: {err}");
         assert!(err.contains("recover"), "should point at recovery: {err}");
+    }
+
+    // ── BS-provenance V1 ──────────────────────────────────────────────────
+    //
+    // Record-only brainstorm artifact provenance: hashes, source, skip reason,
+    // and staleness — without gating or claiming thinking quality/independence.
+
+    /// Create a Planning task and write two originator artifacts under the
+    /// project's `.ctl/brainstorms/<bs>/`. Returns their project-relative paths.
+    fn seed_brainstorm_task(app: &ControlApp, id: &str, bs: &str) -> (String, String) {
+        let scope = vec!["src".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "bs provenance",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        let dir = app.project_root.join(".ctl").join("brainstorms").join(bs);
+        std::fs::create_dir_all(&dir).unwrap();
+        let div = format!(".ctl/brainstorms/{bs}/divergence.json");
+        let conv = format!(".ctl/brainstorms/{bs}/convergence.json");
+        std::fs::write(app.project_root.join(&div), b"{\"candidates\":[1,2,3]}").unwrap();
+        std::fs::write(app.project_root.join(&conv), b"{\"proposal\":\"x\"}").unwrap();
+        (div, conv)
+    }
+
+    #[test]
+    fn bs_provenance_records_artifact_hash() {
+        // Behavior 1: the recorded reference carries the SHA-256 of the artifact.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (div, conv) = seed_brainstorm_task(&app, "t", "BS-001");
+        app.record_brainstorm_artifacts("t", "BS-001", &div, Some(&conv), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let reference = state.brainstorm_ref.expect("reference recorded");
+        let expected = hash_file(&app.project_root.join(&div)).unwrap();
+        assert_eq!(reference.divergence.unwrap().hash, expected);
+        // A recorded reference is L0 content and never asserts independence.
+        assert_eq!(reference.trust_level, "content_l0");
+        assert_eq!(reference.critic_independence, "unattested");
+    }
+
+    #[test]
+    fn bs_provenance_detects_stale_artifact() {
+        // Behavior 2: editing or deleting an artifact makes the reference stale.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (div, conv) = seed_brainstorm_task(&app, "t", "BS-002");
+        app.record_brainstorm_artifacts("t", "BS-002", &div, Some(&conv), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        // Fresh immediately after recording.
+        let view = app.brainstorm_provenance_view(&state).unwrap();
+        assert!(!view.divergence.as_ref().unwrap().stale);
+        // Edited on disk → present but stale.
+        std::fs::write(app.project_root.join(&div), b"MUTATED").unwrap();
+        let edited = app.brainstorm_provenance_view(&state).unwrap();
+        let d = edited.divergence.unwrap();
+        assert!(
+            d.present && d.stale,
+            "edited artifact must read present+stale"
+        );
+        // Deleted → absent from disk and stale.
+        std::fs::remove_file(app.project_root.join(&conv)).unwrap();
+        let removed = app.brainstorm_provenance_view(&state).unwrap();
+        let c = removed.convergence.unwrap();
+        assert!(
+            !c.present && c.stale,
+            "deleted artifact must read missing+stale"
+        );
+    }
+
+    #[test]
+    fn bs_provenance_task_references_brainstorm() {
+        // Behavior 3: a task can reference a brainstorm (with an unattested run).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (div, conv) = seed_brainstorm_task(&app, "t", "BS-003");
+        app.record_brainstorm_artifacts("t", "BS-003", &div, Some(&conv), Some("run-9"))
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let reference = state.brainstorm_ref.clone().unwrap();
+        assert_eq!(reference.id, "BS-003");
+        assert_eq!(reference.source_run_id.as_deref(), Some("run-9"));
+        // A recorded source run is a claim, never an attestation.
+        let view = app.brainstorm_provenance_view(&state).unwrap();
+        assert!(!view.source_run_attested);
+    }
+
+    #[test]
+    fn bs_provenance_critic_attached_independently() {
+        // Behavior 4: a critic artifact can be attached as a separate invocation.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (div, conv) = seed_brainstorm_task(&app, "t", "BS-004");
+        app.record_brainstorm_artifacts("t", "BS-004", &div, Some(&conv), None)
+            .unwrap();
+        let critic = ".ctl/brainstorms/BS-004/critic.json";
+        std::fs::write(app.project_root.join(critic), b"{\"challenge\":\"...\"}").unwrap();
+        app.attach_brainstorm_critic("t", "BS-004", critic, None)
+            .unwrap();
+        let reference = app.get_status("t").unwrap().brainstorm_ref.unwrap();
+        assert_eq!(reference.critic_disposition.as_str(), "present");
+        assert!(reference.critic.is_some());
+        // Even attached, independence is never asserted in V1.
+        assert_eq!(reference.critic_independence, "unattested");
+    }
+
+    #[test]
+    fn bs_provenance_skip_records_reason_and_actor() {
+        // Behaviors 5 + 6: with no critic, a skip records reason + decider, and
+        // the recording actor is captured in the canonical event.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (div, conv) = seed_brainstorm_task(&app, "t", "BS-005");
+        app.record_brainstorm_artifacts("t", "BS-005", &div, Some(&conv), None)
+            .unwrap();
+        ControlApp::open(&app.project_root, false)
+            .unwrap()
+            .with_actor("agent-7")
+            .skip_brainstorm_critic("t", "BS-005", "explicit_user_skip", Some("human"), None)
+            .unwrap();
+        let reference = app.get_status("t").unwrap().brainstorm_ref.unwrap();
+        assert_eq!(reference.critic_disposition.as_str(), "skipped");
+        assert_eq!(reference.skip_reason.as_deref(), Some("explicit_user_skip"));
+        assert_eq!(reference.skip_decided_by.as_deref(), Some("human"));
+        // The actor that recorded the skip is in the ledger event itself.
+        let events = app.store.read_for_task("t").unwrap();
+        let skip = events
+            .iter()
+            .find(|e| e.event_type == "brainstorm_skipped")
+            .unwrap();
+        assert_eq!(skip.actor, "agent-7");
+    }
+
+    #[test]
+    fn bs_provenance_bare_file_is_not_canonical_provenance() {
+        // Behavior 10: a brainstorm file on disk is never auto-promoted to
+        // canonical provenance — only an explicit recording event creates it,
+        // and recording refuses a path that is not actually present.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let (_div, _conv) = seed_brainstorm_task(&app, "t", "BS-010");
+        // Artifacts exist on disk, but nothing was recorded.
+        let state = app.get_status("t").unwrap();
+        assert!(state.brainstorm_ref.is_none());
+        assert!(app.brainstorm_provenance_view(&state).is_none());
+        // Recording a non-existent artifact is refused.
+        let err = app
+            .record_brainstorm_artifacts(
+                "t",
+                "BS-010",
+                ".ctl/brainstorms/BS-010/missing.json",
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "got: {err}");
     }
 }

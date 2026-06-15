@@ -76,7 +76,10 @@
         "run_merged",
         "run_created",
         "run_finished",
-        "run_aborted"
+        "run_aborted",
+        "brainstorm_artifact_recorded",
+        "critic_artifact_attached",
+        "brainstorm_skipped"
       ]
     },
     "payload": {
@@ -1138,6 +1141,156 @@
                 "description": "Reason for aborting the run.",
                 "type": "string",
                 "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "brainstorm_artifact_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "BS-provenance V1: originator (divergence/convergence) artifacts a task derived from. Record-only; never raises trust.",
+            "required": ["brainstorm_id", "divergence_path", "divergence_hash"],
+            "properties": {
+              "brainstorm_id": {
+                "description": "Logical brainstorm identifier this task derives from.",
+                "type": "string",
+                "minLength": 1
+              },
+              "divergence_path": {
+                "description": "Path to the divergence (candidate-directions) artifact.",
+                "type": "string",
+                "minLength": 1
+              },
+              "divergence_hash": {
+                "description": "SHA-256 of the divergence artifact at record time.",
+                "type": "string",
+                "minLength": 1
+              },
+              "convergence_path": {
+                "description": "Path to the convergence (task-proposal) artifact, if any.",
+                "type": "string",
+                "minLength": 1
+              },
+              "convergence_hash": {
+                "description": "SHA-256 of the convergence artifact at record time.",
+                "type": "string",
+                "minLength": 1
+              },
+              "source_run_id": {
+                "description": "Claimed originating run id, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "critic_artifact_attached" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "BS-provenance V1: attaches a critic (challenge) artifact to a recorded brainstorm. Independence is never attested.",
+            "required": ["brainstorm_id", "critic_path", "critic_hash"],
+            "properties": {
+              "brainstorm_id": {
+                "description": "Brainstorm identifier the critic artifact belongs to.",
+                "type": "string",
+                "minLength": 1
+              },
+              "critic_path": {
+                "description": "Path to the critic artifact.",
+                "type": "string",
+                "minLength": 1
+              },
+              "critic_hash": {
+                "description": "SHA-256 of the critic artifact at attach time.",
+                "type": "string",
+                "minLength": 1
+              },
+              "critic_independence": {
+                "description": "Disclosure of critic independence. Only 'unattested' is permitted in V1 (no independent orchestrator).",
+                "type": "string",
+                "enum": ["unattested"]
+              },
+              "source_run_id": {
+                "description": "Claimed originating run id for the critic, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "brainstorm_skipped" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "BS-provenance V1: records that the critic step was explicitly skipped, with a reason and the deciding actor.",
+            "required": ["brainstorm_id", "skip_reason", "decided_by"],
+            "properties": {
+              "brainstorm_id": {
+                "description": "Brainstorm identifier whose critic step was skipped.",
+                "type": "string",
+                "minLength": 1
+              },
+              "skip_reason": {
+                "description": "Why the critic step was skipped.",
+                "type": "string",
+                "minLength": 1
+              },
+              "decided_by": {
+                "description": "Who decided to skip the critic step.",
+                "type": "string",
+                "minLength": 1
+              },
+              "source_run_id": {
+                "description": "Claimed originating run id, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
               }
             },
             "additionalProperties": false
