@@ -331,6 +331,110 @@ pub struct UncertaintyLedgerView {
     pub items: Vec<UncertaintyItemView>,
 }
 
+// ── Research/Spike V1 ───────────────────────────────────────────────────────
+//
+// A task kind whose completion is defined by evidence + epistemic outcomes, not
+// by code. Reuses the Uncertainty Ledger for epistemic outcomes and `ArtifactRef`
+// for produced artifacts — no new trust model. Disclosure is fact-only: it never
+// renders a verdict, and it deliberately surfaces NO "uncertainties discovered"
+// scalar (a rankable integer becomes a covert quality metric, and it is
+// manufacturable by recording uncertainties before `start`); "recorded after
+// start" is disclosed only as a per-item tag.
+
+/// Pinned trust level for every research artifact reference. Bare L0 content.
+pub const RESEARCH_TRUST_LEVEL: &str = "content_l0";
+
+/// Whether a task produces code (implementation) or evidence + epistemic
+/// outcomes (research). Set at `task_created`; immutable thereafter. Defaults to
+/// `Implementation` so legacy streams (and any absent field) replay unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    #[default]
+    Implementation,
+    Research,
+}
+
+impl TaskKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskKind::Implementation => "implementation",
+            TaskKind::Research => "research",
+        }
+    }
+}
+
+/// The kind of a produced research artifact. Fixed enum (no free string, no
+/// `other`): a free taxonomy invites labels that pretend to be meaningful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchArtifactKind {
+    Findings,
+    Experiment,
+    Recommendation,
+    DesignDraft,
+}
+
+impl ResearchArtifactKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResearchArtifactKind::Findings => "findings",
+            ResearchArtifactKind::Experiment => "experiment",
+            ResearchArtifactKind::Recommendation => "recommendation",
+            ResearchArtifactKind::DesignDraft => "design_draft",
+        }
+    }
+}
+
+/// A tracked research artifact bound by path + ctl-computed hash. `source_run_id`
+/// is an unattested claim (no trusted orchestrator). L0 content throughout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResearchArtifact {
+    pub artifact_ref: ArtifactRef,
+    pub kind: ResearchArtifactKind,
+    pub source_run_id: Option<String>,
+}
+
+/// Fact-only view of one produced research artifact, freshness resolved against
+/// the working tree (same primitive as evidence freshness).
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchArtifactView {
+    pub path: String,
+    pub recorded_hash: String,
+    pub kind: String,
+    pub freshness: EvidenceFreshness,
+    pub source_run_id: Option<String>,
+    /// Always `false` in V1 — a recorded source run is a claim, never attested.
+    pub source_run_attested: bool,
+}
+
+/// One uncertainty as disclosed in research output: the fact-only item plus a
+/// per-item tag for whether it was recorded after the task started. The tag is a
+/// fact, never a rankable subtotal.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchUncertaintyView {
+    #[serde(flatten)]
+    pub item: UncertaintyItemView,
+    pub recorded_after_start: bool,
+}
+
+/// Fact-only research-output disclosure: raw per-status counts, the produced
+/// artifacts, and the uncertainty items. NO aggregate verdict/score/ratio, and
+/// deliberately NO "discovered" count — uncertainty reduction is never a success
+/// metric.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchOutputView {
+    pub artifacts_produced: usize,
+    pub uncertainties_opened: usize,
+    pub resolved_with_evidence: usize,
+    pub accepted_as_assumptions: usize,
+    pub invalidated: usize,
+    /// Always `content_l0` in V1.
+    pub trust_level: String,
+    pub artifacts: Vec<ResearchArtifactView>,
+    pub uncertainties: Vec<ResearchUncertaintyView>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
     pub id: String,
@@ -366,6 +470,14 @@ pub struct TaskState {
     /// Default empty; absent in old streams, which replay unchanged.
     #[serde(default)]
     pub uncertainties: Vec<Uncertainty>,
+    /// Research/Spike V1: whether this task produces code or evidence. Set at
+    /// create, immutable. Defaults to `Implementation` for legacy/absent streams.
+    #[serde(default)]
+    pub task_kind: TaskKind,
+    /// Research/Spike V1: tracked research artifacts this task produced, in
+    /// record order. Default empty; absent in old streams, which replay unchanged.
+    #[serde(default)]
+    pub research_artifacts: Vec<ResearchArtifact>,
     /// M4: Capability leases keyed by lease_id.
     pub leases: HashMap<String, LeaseState>,
     /// M4: Pending/approved/denied approval requests keyed by request_id.
@@ -396,6 +508,8 @@ impl TaskState {
             schedule_plan_id: None,
             brainstorm_ref: None,
             uncertainties: Vec::new(),
+            task_kind: TaskKind::Implementation,
+            research_artifacts: Vec::new(),
             leases: HashMap::new(),
             pending_approvals: HashMap::new(),
             history: Vec::new(),
@@ -544,6 +658,36 @@ fn decode_artifact(
     }
 }
 
+/// Decode `task_kind` from a `task_created` payload. Absent → `Implementation`
+/// (legacy default). Unknown value → rejected.
+fn decode_task_kind(payload: &serde_json::Value) -> Result<TaskKind, String> {
+    match payload.get("task_kind").and_then(|v| v.as_str()) {
+        None | Some("implementation") => Ok(TaskKind::Implementation),
+        Some("research") => Ok(TaskKind::Research),
+        Some(other) => Err(format!(
+            "task_created: unknown task_kind '{other}' (implementation | research)"
+        )),
+    }
+}
+
+/// Decode the fixed `artifact_kind` enum. Required; unknown value → rejected (no
+/// free string, no `other`).
+fn decode_research_artifact_kind(
+    payload: &serde_json::Value,
+) -> Result<ResearchArtifactKind, String> {
+    let kind = require_str(payload, "artifact_kind")?;
+    match kind.as_str() {
+        "findings" => Ok(ResearchArtifactKind::Findings),
+        "experiment" => Ok(ResearchArtifactKind::Experiment),
+        "recommendation" => Ok(ResearchArtifactKind::Recommendation),
+        "design_draft" => Ok(ResearchArtifactKind::DesignDraft),
+        other => Err(format!(
+            "research_artifact_recorded: unknown artifact_kind '{other}' \
+             (findings | experiment | recommendation | design_draft)"
+        )),
+    }
+}
+
 pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
     // R6: Check task_id BEFORE command_id idempotency (per-task, not global)
     if event.task_id != state.id {
@@ -584,6 +728,8 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.risk_triggers = boundary.risk_triggers;
             state.gates = boundary.gates;
             state.depends_on = boundary.depends_on;
+            // Research/Spike V1: kind is fixed at creation and never revised.
+            state.task_kind = decode_task_kind(&event.payload)?;
         }
         "task_revised" => {
             if state.phase != Phase::Planning {
@@ -1390,6 +1536,23 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                     ));
                 }
             }
+        }
+        // ── Research/Spike V1: record a tracked research artifact ──
+        "research_artifact_recorded" => {
+            check_trust_level(&event.payload)?;
+            let artifact_ref =
+                decode_artifact(&event.payload, "artifact_path", "artifact_hash", true)?
+                    .ok_or_else(|| {
+                        "research_artifact_recorded: artifact_path and artifact_hash are required"
+                            .to_string()
+                    })?;
+            let kind = decode_research_artifact_kind(&event.payload)?;
+            let source_run_id = optional_str(&event.payload, "source_run_id");
+            state.research_artifacts.push(ResearchArtifact {
+                artifact_ref,
+                kind,
+                source_run_id,
+            });
         }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }

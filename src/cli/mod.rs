@@ -177,6 +177,12 @@ enum Commands {
         #[command(subcommand)]
         command: UncertaintyCommands,
     },
+    /// Research/Spike (V1): record tracked research artifacts. A research task
+    /// completes by producing evidence + uncertainty outcomes, not code.
+    Research {
+        #[command(subcommand)]
+        command: ResearchCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -241,6 +247,43 @@ enum BrainstormCommands {
     },
 }
 
+/// Task kind argument (Research/Spike V1). Maps to the domain `TaskKind`.
+#[derive(Clone, Copy, ValueEnum)]
+enum TaskKindArg {
+    Implementation,
+    Research,
+}
+
+impl TaskKindArg {
+    fn to_domain(self) -> crate::domain::task::TaskKind {
+        match self {
+            TaskKindArg::Implementation => crate::domain::task::TaskKind::Implementation,
+            TaskKindArg::Research => crate::domain::task::TaskKind::Research,
+        }
+    }
+}
+
+/// Research artifact kind argument. Rendered kebab-case on the CLI; mapped to the
+/// canonical snake_case payload value.
+#[derive(Clone, Copy, ValueEnum)]
+enum ResearchKindArg {
+    Findings,
+    Experiment,
+    Recommendation,
+    DesignDraft,
+}
+
+impl ResearchKindArg {
+    fn as_payload(&self) -> &'static str {
+        match self {
+            ResearchKindArg::Findings => "findings",
+            ResearchKindArg::Experiment => "experiment",
+            ResearchKindArg::Recommendation => "recommendation",
+            ResearchKindArg::DesignDraft => "design_draft",
+        }
+    }
+}
+
 /// Terminal disposition of an uncertainty (V1). Rendered kebab-case on the CLI;
 /// mapped to the canonical snake_case payload value.
 #[derive(Clone, Copy, ValueEnum)]
@@ -301,6 +344,34 @@ enum UncertaintyCommands {
         dry_run: bool,
     },
     /// Show a task's uncertainty ledger (fact-only; freshness resolved).
+    Status {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResearchCommands {
+    /// Record a tracked research artifact (hash computed by ctl).
+    Record {
+        /// Task identifier (must be a research task)
+        #[arg(long)]
+        id: String,
+        /// Artifact kind
+        #[arg(long, value_enum)]
+        kind: ResearchKindArg,
+        /// Path to the artifact (normalized + hashed by ctl)
+        #[arg(long)]
+        artifact: String,
+        /// Claimed originating run id, if any (never attested in V1)
+        #[arg(long = "source-run")]
+        source_run: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show a research task's fact-only output (artifacts + uncertainty outcomes).
     Status {
         #[arg(long)]
         id: String,
@@ -379,6 +450,9 @@ enum TaskCommands {
         /// Task IDs that must complete before this one (M-d); repeat for multiple
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
+        /// Task kind: implementation (default) or research. Immutable after create.
+        #[arg(long, value_enum, default_value_t = TaskKindArg::Implementation)]
+        kind: TaskKindArg,
     },
     /// Fuse create + ready + start into one command with sensible defaults.
     /// Keeps the write boundary explicit (`--write-allow` required) but removes
@@ -848,6 +922,7 @@ pub fn run() -> Result<()> {
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
+        Commands::Research { command } => cmd_research(command),
     }
 }
 
@@ -928,8 +1003,9 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             risk_triggers,
             gates,
             depends_on,
+            kind,
         } => {
-            let event = app.create_task(
+            let event = app.create_task_with_kind(
                 id,
                 CreateTaskInput {
                     objective,
@@ -940,8 +1016,14 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     gates,
                     depends_on,
                 },
+                kind.to_domain(),
             )?;
-            println!("Created task '{}' at seq {}.", id, event.seq);
+            println!(
+                "Created {} task '{}' at seq {}.",
+                kind.to_domain().as_str(),
+                id,
+                event.seq
+            );
         }
         TaskCommands::Quick {
             write_allow,
@@ -1035,6 +1117,12 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 print_task_state(&state, &blocked_by, provenance.as_ref())?;
             } else {
                 print_task_human(&state, &blocked_by, provenance.as_ref())?;
+                // Research/Spike V1: append the fact-only research output block.
+                if state.task_kind == crate::domain::task::TaskKind::Research {
+                    if let Some(view) = app.research_output_view(id)? {
+                        print!("{}", format_research_output(&view));
+                    }
+                }
             }
         }
         TaskCommands::Start { id } => {
@@ -1731,6 +1819,9 @@ fn print_task_human(
 ) -> Result<()> {
     println!("Task: {}", state.id);
     println!("Phase: {:?}", state.phase);
+    if state.task_kind == crate::domain::task::TaskKind::Research {
+        println!("Kind: research");
+    }
     if state.is_held {
         println!("HELD");
     }
@@ -2019,6 +2110,122 @@ fn cmd_uncertainty(command: &UncertaintyCommands) -> Result<()> {
                 Some(view) => print!("{}", format_uncertainty_ledger(&view)),
                 None if *json => println!("null"),
                 None => println!("No uncertainties recorded for task '{}'.", id),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render a research-output view as fact-only disclosure: raw per-status counts,
+/// produced artifacts (with freshness), and uncertainty items each tagged with
+/// whether it was recorded after start. NEVER emits a verdict, score, ratio, or
+/// a "discovered" count, and discloses unverified content / unattested evidence.
+fn format_research_output(view: &crate::domain::task::ResearchOutputView) -> String {
+    let mut out = String::new();
+    out.push_str("RESEARCH OUTPUT  (content: unverified; evidence: unattested)\n");
+    out.push_str(&format!(
+        "  artifacts produced: {}\n",
+        view.artifacts_produced
+    ));
+    out.push_str(&format!(
+        "  uncertainties opened: {}\n",
+        view.uncertainties_opened
+    ));
+    out.push_str(&format!(
+        "  resolved with evidence: {}\n",
+        view.resolved_with_evidence
+    ));
+    out.push_str(&format!(
+        "  accepted as assumptions: {}\n",
+        view.accepted_as_assumptions
+    ));
+    out.push_str(&format!("  invalidated: {}\n", view.invalidated));
+    out.push_str(&format!(
+        "  trust level: {} (untrusted content)\n",
+        view.trust_level
+    ));
+    if !view.artifacts.is_empty() {
+        out.push_str("\n  ARTIFACTS\n");
+        for a in &view.artifacts {
+            out.push_str(&format!(
+                "    {}  {} @ {}\n",
+                a.kind, a.path, a.recorded_hash
+            ));
+            out.push_str(&format!(
+                "      freshness: {} (file consistency only; attestation: unavailable)\n",
+                a.freshness.as_str()
+            ));
+            if let Some(run) = &a.source_run_id {
+                out.push_str(&format!(
+                    "      source run: {run} (attestation: unavailable)\n"
+                ));
+            }
+        }
+    }
+    if !view.uncertainties.is_empty() {
+        out.push_str("\n  UNCERTAINTIES\n");
+        for u in &view.uncertainties {
+            let tag = if u.recorded_after_start {
+                "[recorded after start]"
+            } else {
+                "[pre-start]"
+            };
+            out.push_str(&format!(
+                "    {}  {}  {}\n",
+                u.item.id,
+                u.item.status.to_uppercase(),
+                tag
+            ));
+            if let Some(source) = &u.item.source {
+                out.push_str(&format!("      source: {source} (unattested)\n"));
+            }
+            if let Some(evidence) = &u.item.evidence {
+                out.push_str(&format!(
+                    "      evidence: {} @ {} freshness: {} (attestation: unavailable)\n",
+                    evidence.path,
+                    evidence.recorded_hash,
+                    evidence.freshness.as_str()
+                ));
+            }
+            if let Some(reason) = &u.item.reason {
+                out.push_str(&format!("      reason: {reason}\n"));
+            }
+        }
+    }
+    out
+}
+
+fn cmd_research(command: &ResearchCommands) -> Result<()> {
+    match command {
+        ResearchCommands::Record {
+            id,
+            kind,
+            artifact,
+            source_run,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_research_artifact(
+                id,
+                artifact,
+                kind.as_payload(),
+                source_run.as_deref(),
+            )?;
+            println!(
+                "Recorded {} artifact for task '{}' at seq {}.",
+                kind.as_payload(),
+                id,
+                event.seq
+            );
+        }
+        ResearchCommands::Status { id, json } => {
+            let app = app_open(false)?;
+            let view = app.research_output_view(id)?;
+            match view {
+                Some(view) if *json => println!("{}", serde_json::to_string_pretty(&view)?),
+                Some(view) => print!("{}", format_research_output(&view)),
+                None if *json => println!("null"),
+                None => println!("Task '{}' is not a research task (no research output).", id),
             }
         }
     }
@@ -4278,8 +4485,8 @@ fn cmd_hook_spec_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bash, format_brainstorm_provenance, format_uncertainty_ledger,
-        resolve_active_governance, ActiveTask, GovState,
+        classify_bash, format_brainstorm_provenance, format_research_output,
+        format_uncertainty_ledger, resolve_active_governance, ActiveTask, GovState,
     };
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
@@ -4515,6 +4722,69 @@ mod tests {
         assert!(out.contains("evidence: unattested"));
         assert!(out.contains("trust level: content_l0"));
         // ...and never a verdict, score, percentage, or green marker.
+        assert!(!out.contains('✅'));
+        assert!(!out.contains('%'));
+        assert!(!out.to_uppercase().contains("PASS"));
+        assert!(!out.to_lowercase().contains("verdict"));
+    }
+
+    #[test]
+    fn research_output_discloses_facts_no_verdict_no_discovered_scalar() {
+        // RESEARCH OUTPUT shows raw counts, artifact freshness, and a per-item
+        // recorded-after-start tag — never a verdict, score, or "discovered" count.
+        use crate::domain::task::{
+            EvidenceFreshness, ResearchArtifactView, ResearchOutputView, ResearchUncertaintyView,
+            UncertaintyItemView,
+        };
+        let view = ResearchOutputView {
+            artifacts_produced: 1,
+            uncertainties_opened: 2,
+            resolved_with_evidence: 0,
+            accepted_as_assumptions: 0,
+            invalidated: 0,
+            trust_level: "content_l0".into(),
+            artifacts: vec![ResearchArtifactView {
+                path: "research/x/findings.md".into(),
+                recorded_hash: "abc".into(),
+                kind: "findings".into(),
+                freshness: EvidenceFreshness::Current,
+                source_run_id: Some("run-1".into()),
+                source_run_attested: false,
+            }],
+            uncertainties: vec![
+                ResearchUncertaintyView {
+                    item: UncertaintyItemView {
+                        id: "U-1".into(),
+                        statement: "surfaced".into(),
+                        status: "open".into(),
+                        source: None,
+                        evidence: None,
+                        reason: None,
+                    },
+                    recorded_after_start: true,
+                },
+                ResearchUncertaintyView {
+                    item: UncertaintyItemView {
+                        id: "U-0".into(),
+                        statement: "known before".into(),
+                        status: "open".into(),
+                        source: None,
+                        evidence: None,
+                        reason: None,
+                    },
+                    recorded_after_start: false,
+                },
+            ],
+        };
+        let out = format_research_output(&view);
+        assert!(out.contains("artifacts produced: 1"));
+        assert!(out.contains("uncertainties opened: 2"));
+        assert!(out.contains("freshness: CURRENT"));
+        assert!(out.contains("[recorded after start]"));
+        assert!(out.contains("[pre-start]"));
+        assert!(out.contains("attestation: unavailable"));
+        // No discovered scalar, no verdict/score/green marker.
+        assert!(!out.to_lowercase().contains("discovered"));
         assert!(!out.contains('✅'));
         assert!(!out.contains('%'));
         assert!(!out.to_uppercase().contains("PASS"));

@@ -81,7 +81,8 @@
         "critic_artifact_attached",
         "brainstorm_skipped",
         "uncertainty_recorded",
-        "uncertainty_disposition_recorded"
+        "uncertainty_disposition_recorded",
+        "research_artifact_recorded"
       ]
     },
     "payload": {
@@ -270,6 +271,11 @@
                 "description": "Task IDs that must complete before this task can run (declared dependency edges, M-d). Optional; absent means no dependencies.",
                 "type": "array",
                 "items": { "type": "string" }
+              },
+              "task_kind": {
+                "description": "Research/Spike V1: task kind. Optional; absent means implementation (legacy default). Fixed at creation, never revised.",
+                "type": "string",
+                "enum": ["implementation", "research"]
               }
             },
             "additionalProperties": false
@@ -1376,6 +1382,51 @@
               },
               "reason": {
                 "description": "Why the disposition was recorded. Required for invalidated; optional context otherwise.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "research_artifact_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Research/Spike V1: a tracked research artifact a task produced. Record-only; L0 content. The hash is computed by ctl from a normalized path; recording never raises trust or asserts the findings are correct.",
+            "required": ["artifact_path", "artifact_hash", "artifact_kind"],
+            "properties": {
+              "artifact_path": {
+                "description": "Normalized repo-relative path to the artifact. Computed and hashed by ctl, not the caller.",
+                "type": "string",
+                "minLength": 1
+              },
+              "artifact_hash": {
+                "description": "SHA-256 of the artifact at record time. Freshness is derived lazily; this never asserts the content is valid.",
+                "type": "string",
+                "minLength": 1
+              },
+              "artifact_kind": {
+                "description": "Kind of research artifact.",
+                "type": "string",
+                "enum": ["findings", "experiment", "recommendation", "design_draft"]
+              },
+              "source_run_id": {
+                "description": "Claimed originating run id, if any. Never attested in V1.",
                 "type": "string",
                 "minLength": 1
               },

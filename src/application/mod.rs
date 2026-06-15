@@ -10,7 +10,7 @@ use crate::adapters::ExecutorAdapter;
 use crate::domain::event::Event;
 use crate::domain::lease::LeaseStatus;
 use crate::domain::run::{apply_run, AgentRunState, RunPhase};
-use crate::domain::task::{apply, Phase, TaskState};
+use crate::domain::task::{apply, Phase, TaskKind, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::run_store::RunEventStore;
 use crate::infrastructure::store::FileEventStore;
@@ -114,6 +114,19 @@ impl ControlApp {
     // ── Commands ──
 
     pub fn create_task(&self, id: &str, input: CreateTaskInput<'_>) -> Result<Event> {
+        self.create_task_with_kind(id, input, TaskKind::Implementation)
+    }
+
+    /// Create a task with an explicit kind (Research/Spike V1). `create_task`
+    /// delegates here with `Implementation`. The kind is fixed at creation and
+    /// never revised; the field is emitted only for research tasks so
+    /// implementation payloads stay byte-identical to pre-feature output.
+    pub fn create_task_with_kind(
+        &self,
+        id: &str,
+        input: CreateTaskInput<'_>,
+        kind: TaskKind,
+    ) -> Result<Event> {
         let existing = self.store.read_for_task(id)?;
         if !existing.is_empty() {
             return Err(anyhow!("Task '{}' already exists", id));
@@ -137,6 +150,9 @@ impl ControlApp {
         // dependency-free events byte-identical to pre-M-d output.
         if !input.depends_on.is_empty() {
             payload["depends_on"] = serde_json::json!(input.depends_on);
+        }
+        if kind != TaskKind::Implementation {
+            payload["task_kind"] = serde_json::json!(kind.as_str());
         }
         let event = self.build_event(id, "task_created", payload)?;
         self.validate_and_append(&event)?;
@@ -497,6 +513,32 @@ impl ControlApp {
                 return Err(anyhow!(
                     "Completion interlock: no passing completion audit since submit. \
                      A reviewer must record one: ctl review accept --id {}",
+                    task_id
+                ));
+            }
+        }
+
+        // Research/Spike V1: a research task is not exempt from execution
+        // integrity (all checks above still applied). It additionally must show a
+        // non-degenerate footprint — at least one tracked artifact and at least
+        // one uncertainty outcome — so a spike never completes looking identical
+        // to an implementation task that produced nothing. This NEVER requires the
+        // open-uncertainty count to fall: opening unknowns is a legitimate result.
+        if state.task_kind == TaskKind::Research {
+            if state.research_artifacts.is_empty() {
+                return Err(anyhow!(
+                    "Completion interlock: research task requires at least one recorded \
+                     research artifact (ctl research record --id {})",
+                    task_id
+                ));
+            }
+            // "at least one uncertainty outcome" — a recorded uncertainty (a
+            // disposition is impossible without a prior record), so this is the
+            // real floor.
+            if state.uncertainties.is_empty() {
+                return Err(anyhow!(
+                    "Completion interlock: research task requires at least one recorded \
+                     uncertainty outcome (ctl uncertainty record --id {})",
                     task_id
                 ));
             }
@@ -937,6 +979,48 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// Resolve evidence/artifact freshness against the working tree: ABSENT if
+    /// the file is gone, STALE if its hash drifted, CURRENT if it matches. Never
+    /// asserts the content is valid — only whether the file still matches what was
+    /// recorded. Shared by evidence and research-artifact disclosure.
+    fn artifact_freshness(
+        &self,
+        artifact: &crate::domain::task::ArtifactRef,
+    ) -> crate::domain::task::EvidenceFreshness {
+        use crate::domain::task::EvidenceFreshness;
+        let resolved = self.project_root.join(&artifact.path);
+        if !resolved.is_file() {
+            EvidenceFreshness::Absent
+        } else if hash_file(&resolved).ok().as_deref() == Some(artifact.hash.as_str()) {
+            EvidenceFreshness::Current
+        } else {
+            EvidenceFreshness::Stale
+        }
+    }
+
+    /// Build the fact-only view of one uncertainty (shared by the ledger view and
+    /// the research-output view).
+    fn uncertainty_item_view(
+        &self,
+        u: &crate::domain::task::Uncertainty,
+    ) -> crate::domain::task::UncertaintyItemView {
+        use crate::domain::task::{EvidenceView, UncertaintyItemView};
+        let evidence = u.evidence_ref.as_ref().map(|ev| EvidenceView {
+            path: ev.path.clone(),
+            recorded_hash: ev.hash.clone(),
+            freshness: self.artifact_freshness(ev),
+            attested: false,
+        });
+        UncertaintyItemView {
+            id: u.id.clone(),
+            statement: u.statement.clone(),
+            status: u.status.as_str().to_string(),
+            source: u.source.clone(),
+            evidence,
+            reason: u.reason.clone(),
+        }
+    }
+
     /// Build a fact-only uncertainty-ledger view, resolving evidence freshness
     /// against the working tree. Returns None when the task records no uncertainty.
     pub fn uncertainty_ledger_view(
@@ -944,14 +1028,12 @@ impl ControlApp {
         state: &TaskState,
     ) -> Option<crate::domain::task::UncertaintyLedgerView> {
         use crate::domain::task::{
-            EvidenceFreshness, EvidenceView, UncertaintyItemView, UncertaintyLedgerView,
-            UncertaintyStatus, UNCERTAINTY_TRUST_LEVEL,
+            UncertaintyLedgerView, UncertaintyStatus, UNCERTAINTY_TRUST_LEVEL,
         };
         if state.uncertainties.is_empty() {
             return None;
         }
         let (mut open, mut accepted_as_assumption, mut resolved, mut invalidated) = (0, 0, 0, 0);
-        let mut items = Vec::with_capacity(state.uncertainties.len());
         for uncertainty in &state.uncertainties {
             match uncertainty.status {
                 UncertaintyStatus::Open => open += 1,
@@ -959,33 +1041,12 @@ impl ControlApp {
                 UncertaintyStatus::Resolved => resolved += 1,
                 UncertaintyStatus::Invalidated => invalidated += 1,
             }
-            let evidence = uncertainty.evidence_ref.as_ref().map(|ev| {
-                let resolved_path = self.project_root.join(&ev.path);
-                // Freshness is whether the file still matches the recorded hash —
-                // it never asserts the evidence content is valid.
-                let freshness = if !resolved_path.is_file() {
-                    EvidenceFreshness::Absent
-                } else if hash_file(&resolved_path).ok().as_deref() == Some(ev.hash.as_str()) {
-                    EvidenceFreshness::Current
-                } else {
-                    EvidenceFreshness::Stale
-                };
-                EvidenceView {
-                    path: ev.path.clone(),
-                    recorded_hash: ev.hash.clone(),
-                    freshness,
-                    attested: false,
-                }
-            });
-            items.push(UncertaintyItemView {
-                id: uncertainty.id.clone(),
-                statement: uncertainty.statement.clone(),
-                status: uncertainty.status.as_str().to_string(),
-                source: uncertainty.source.clone(),
-                evidence,
-                reason: uncertainty.reason.clone(),
-            });
         }
+        let items = state
+            .uncertainties
+            .iter()
+            .map(|u| self.uncertainty_item_view(u))
+            .collect();
         Some(UncertaintyLedgerView {
             open,
             accepted_as_assumption,
@@ -994,6 +1055,113 @@ impl ControlApp {
             trust_level: UNCERTAINTY_TRUST_LEVEL.to_string(),
             items,
         })
+    }
+
+    /// Record a tracked research artifact (Research/Spike V1). ctl computes the
+    /// hash from a normalized path; the caller never supplies it.
+    pub fn record_research_artifact(
+        &self,
+        task_id: &str,
+        artifact_path: &str,
+        artifact_kind: &str,
+        source_run_id: Option<&str>,
+    ) -> Result<Event> {
+        let (rel, hash) = self.hash_evidence(artifact_path)?;
+        let mut payload = serde_json::json!({
+            "artifact_path": rel,
+            "artifact_hash": hash,
+            "artifact_kind": artifact_kind,
+            "trust_level": crate::domain::task::RESEARCH_TRUST_LEVEL,
+        });
+        if let Some(run) = source_run_id {
+            payload["source_run_id"] = serde_json::json!(run);
+        }
+        let event = self.build_event(task_id, "research_artifact_recorded", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Build a fact-only research-output view for a research task; None for
+    /// implementation tasks. Raw per-status counts, artifacts with freshness, and
+    /// uncertainty items each tagged `recorded_after_start` (derived from the
+    /// single `task_started` seq). Deliberately NO "discovered" scalar and no verdict.
+    pub fn research_output_view(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<crate::domain::task::ResearchOutputView>> {
+        use crate::domain::task::{
+            ResearchArtifactView, ResearchOutputView, ResearchUncertaintyView, UncertaintyStatus,
+            RESEARCH_TRUST_LEVEL,
+        };
+        let state = self.replay_task(task_id)?;
+        if state.task_kind != TaskKind::Research {
+            return Ok(None);
+        }
+        let events = self.store.read_for_task(task_id)?;
+        // A finishable task has exactly one task_started (reopen emits
+        // task_reopened, not a second start). Uncertainties recorded after it are
+        // tagged "recorded after start" — a per-item fact, never a rankable count.
+        let start_seq = events
+            .iter()
+            .find(|e| e.event_type == "task_started")
+            .map(|e| e.seq);
+        let mut recorded_seq: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        for e in &events {
+            if e.event_type == "uncertainty_recorded" {
+                if let Some(id) = e.payload.get("uncertainty_id").and_then(|v| v.as_str()) {
+                    recorded_seq.insert(id.to_string(), e.seq);
+                }
+            }
+        }
+        let (mut accepted_as_assumptions, mut resolved, mut invalidated) = (0, 0, 0);
+        for u in &state.uncertainties {
+            match u.status {
+                UncertaintyStatus::Resolved => resolved += 1,
+                UncertaintyStatus::AcceptedAsAssumption => accepted_as_assumptions += 1,
+                UncertaintyStatus::Invalidated => invalidated += 1,
+                UncertaintyStatus::Open => {}
+            }
+        }
+        let artifacts = state
+            .research_artifacts
+            .iter()
+            .map(|a| ResearchArtifactView {
+                path: a.artifact_ref.path.clone(),
+                recorded_hash: a.artifact_ref.hash.clone(),
+                kind: a.kind.as_str().to_string(),
+                freshness: self.artifact_freshness(&a.artifact_ref),
+                source_run_id: a.source_run_id.clone(),
+                source_run_attested: false,
+            })
+            .collect();
+        let uncertainties = state
+            .uncertainties
+            .iter()
+            .map(|u| {
+                let recorded_after_start = match (start_seq, recorded_seq.get(&u.id)) {
+                    (Some(start), Some(&seq)) => seq > start,
+                    _ => false,
+                };
+                ResearchUncertaintyView {
+                    item: self.uncertainty_item_view(u),
+                    recorded_after_start,
+                }
+            })
+            .collect();
+        Ok(Some(ResearchOutputView {
+            artifacts_produced: state.research_artifacts.len(),
+            uncertainties_opened: state.uncertainties.len(),
+            resolved_with_evidence: resolved,
+            accepted_as_assumptions,
+            invalidated,
+            trust_level: RESEARCH_TRUST_LEVEL.to_string(),
+            artifacts,
+            uncertainties,
+        }))
     }
 
     /// Build a context snapshot: hash all files within the task read scope.
@@ -5197,5 +5365,177 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown uncertainty"), "got: {err}");
+    }
+
+    // ── Research/Spike V1 ──
+    // A research task completes by producing evidence + uncertainty outcomes, not
+    // code. Kind is immutable; completion never requires fewer unknowns.
+
+    fn seed_research_task(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        app.create_task_with_kind(
+            id,
+            CreateTaskInput {
+                objective: "spike",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+            TaskKind::Research,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn task_kind_defaults_implementation_and_is_set_for_research() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "impl"); // uses create_task (default)
+        seed_research_task(&app, "res");
+        assert_eq!(
+            app.get_status("impl").unwrap().task_kind,
+            TaskKind::Implementation
+        );
+        assert_eq!(app.get_status("res").unwrap().task_kind, TaskKind::Research);
+    }
+
+    #[test]
+    fn task_kind_is_immutable_through_revise() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_research_task(&app, "res");
+        app.revise_task(
+            "res",
+            ReviseTaskInput {
+                objective: Some("revised spike"),
+                read_scope: None,
+                write_allow: None,
+                write_deny: None,
+                risk_triggers: None,
+                gates: None,
+                depends_on: None,
+            },
+        )
+        .unwrap();
+        // Revise changed the objective but never the kind.
+        let state = app.get_status("res").unwrap();
+        assert_eq!(state.objective.as_deref(), Some("revised spike"));
+        assert_eq!(state.task_kind, TaskKind::Research);
+    }
+
+    #[test]
+    fn research_artifact_records_hash_kind_and_freshness() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_research_task(&app, "res");
+        let path = app.project_root.join("src").join("findings.md");
+        std::fs::write(&path, b"# findings").unwrap();
+        app.record_research_artifact("res", "src/findings.md", "findings", Some("run-7"))
+            .unwrap();
+        let state = app.get_status("res").unwrap();
+        assert_eq!(state.research_artifacts.len(), 1);
+        let a = &state.research_artifacts[0];
+        assert_eq!(a.artifact_ref.hash, hash_file(&path).unwrap());
+        assert_eq!(a.kind.as_str(), "findings");
+        // View: fresh + never attested; mutate → STALE.
+        let view = app.research_output_view("res").unwrap().unwrap();
+        assert_eq!(view.artifacts_produced, 1);
+        assert_eq!(view.artifacts[0].freshness.as_str(), "CURRENT");
+        assert!(!view.artifacts[0].source_run_attested);
+        std::fs::write(&path, b"MUTATED").unwrap();
+        let stale = app.research_output_view("res").unwrap().unwrap();
+        assert_eq!(stale.artifacts[0].freshness.as_str(), "STALE");
+    }
+
+    #[test]
+    fn research_artifact_unknown_kind_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_research_task(&app, "res");
+        std::fs::write(app.project_root.join("src").join("x.md"), b"x").unwrap();
+        let err = app
+            .record_research_artifact("res", "src/x.md", "manifesto", None)
+            .unwrap_err()
+            .to_string();
+        // Rejected by the schema enum (defense-in-depth before the reducer's own
+        // unknown-kind guard); either way an unknown kind cannot be recorded.
+        assert!(err.contains("artifact_kind"), "got: {err}");
+    }
+
+    #[test]
+    fn research_output_none_for_implementation_and_tags_discovered_items() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "impl");
+        assert!(app.research_output_view("impl").unwrap().is_none());
+
+        seed_research_task(&app, "res");
+        // Recorded in Planning (before start) → pre-start.
+        app.record_uncertainty("res", "U-pre", "known before start", None)
+            .unwrap();
+        app.mark_ready("res").unwrap();
+        app.start_task("res").unwrap();
+        // Recorded after start → tagged recorded_after_start.
+        app.record_uncertainty("res", "U-post", "surfaced during spike", None)
+            .unwrap();
+        let view = app.research_output_view("res").unwrap().unwrap();
+        assert_eq!(view.uncertainties_opened, 2);
+        let pre = view
+            .uncertainties
+            .iter()
+            .find(|u| u.item.id == "U-pre")
+            .unwrap();
+        let post = view
+            .uncertainties
+            .iter()
+            .find(|u| u.item.id == "U-post")
+            .unwrap();
+        assert!(
+            !pre.recorded_after_start,
+            "pre-start uncertainty must not be tagged"
+        );
+        assert!(
+            post.recorded_after_start,
+            "post-start uncertainty must be tagged"
+        );
+    }
+
+    fn drive_research_to_review(app: &ControlApp, id: &str) {
+        seed_research_task(app, id);
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        app.submit_task(id).unwrap();
+        app.record_gate(id, "cargo_check", true, "ok").unwrap();
+        ControlApp::open(&app.project_root, false)
+            .unwrap()
+            .with_actor("reviewer")
+            .record_completion_audit(id, true, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn research_finish_requires_artifact_then_uncertainty_then_succeeds() {
+        // Non-git temp dir → tree/commit interlocks skipped, isolating the
+        // research-specific completion checks (which run after the M-f audit gate).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_research_to_review(&app, "res");
+        // No artifact yet.
+        let e1 = app.finish_task("res").unwrap_err().to_string();
+        assert!(e1.contains("research artifact"), "got: {e1}");
+        // Artifact, but no uncertainty outcome.
+        std::fs::write(app.project_root.join("src").join("f.md"), b"f").unwrap();
+        app.record_research_artifact("res", "src/f.md", "findings", None)
+            .unwrap();
+        let e2 = app.finish_task("res").unwrap_err().to_string();
+        assert!(e2.contains("uncertainty outcome"), "got: {e2}");
+        // One recorded uncertainty satisfies the floor — even though it stays open
+        // (completion never requires the open count to fall).
+        app.record_uncertainty("res", "U-1", "still open", None)
+            .unwrap();
+        assert_eq!(app.finish_task("res").unwrap().event_type, "task_completed");
     }
 }
