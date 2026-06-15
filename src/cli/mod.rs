@@ -3335,7 +3335,7 @@ fn classify_bash(command: &str) -> &'static str {
     let (mut push, mut deps, mut commit, mut build) = (false, false, false, false);
     // Split on shell control/grouping operators so a restricted action inside a
     // compound or substitution (`$(..)`, backticks) becomes its own segment.
-    for segment in command.split(|c| matches!(c, ';' | '\n' | '&' | '|' | '(' | ')' | '`')) {
+    for segment in command.split([';', '\n', '&', '|', '(', ')', '`']) {
         match classify_bash_segment(segment) {
             "git_push" => push = true,
             "cargo_deps" => deps = true,
