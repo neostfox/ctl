@@ -2591,13 +2591,15 @@ impl ControlApp {
         event_type: &str,
         payload: serde_json::Value,
     ) -> Result<Event> {
-        let seq = self.run_store()?.next_seq_for_run(run_id)?;
+        // seq is a placeholder: the authoritative sequence number is assigned by
+        // `append_run_event[_locked]` *inside* the per-run lock, so seq allocation
+        // and the append are atomic (no unlocked read-seq race).
         Ok(Event {
             schema: "control.event-envelope.v1".to_string(),
             event_id: generate_uuid(),
             command_id: generate_uuid(),
             task_id: run_id.to_string(),
-            seq,
+            seq: 0,
             occurred_at: now_iso8601(),
             actor: self.actor.clone(),
             event_type: event_type.to_string(),
@@ -2616,20 +2618,50 @@ impl ControlApp {
     /// (`run_id`+`adapter`+`lease_id`), which deliberately differs from the M6
     /// run-aggregate shape (`worktree_path`+`lease_id`). Validating run events
     /// against the task conditionals would be a category error.
-    fn append_run_event(&self, run_id: &str, event: &Event) -> Result<()> {
+    /// Append a run event, taking the per-run lock for the whole transaction.
+    /// Use this for callers that do not already hold the lock (e.g. `create_run`).
+    fn append_run_event(&self, run_id: &str, event: Event) -> Result<Event> {
         let store = self.run_store()?;
+        // Single-writer: hold the per-run lock across seq allocation + validate +
+        // append, so two processes cannot read the same max seq and append
+        // conflicting events. Skipped in dry-run (nothing is persisted).
+        let _lock = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run(run_id)?)
+        };
+        self.append_run_event_locked(&store, run_id, event)
+    }
+
+    /// Locked core of the run-event append: assumes the caller already holds the
+    /// per-run lock (e.g. `start_run`/`terminate_run`, which hold it across their
+    /// filesystem side-effects too). Assigns the authoritative seq from the
+    /// current stream, dry-run-validates via the reducer, then appends + projects.
+    fn append_run_event_locked(
+        &self,
+        store: &RunEventStore,
+        run_id: &str,
+        mut event: Event,
+    ) -> Result<Event> {
         let mut state = AgentRunState::new(run_id);
-        for prior in store.read_for_run(run_id)? {
-            apply_run(&mut state, &prior)
-                .map_err(|e| anyhow!("Run reducer error at seq {}: {}", prior.seq, e))?;
+        let prior = store.read_for_run(run_id)?;
+        let mut max_seq = 0;
+        for p in &prior {
+            apply_run(&mut state, p)
+                .map_err(|e| anyhow!("Run reducer error at seq {}: {}", p.seq, e))?;
+            if p.seq > max_seq {
+                max_seq = p.seq;
+            }
         }
-        apply_run(&mut state, event).map_err(|e| anyhow!("Run reducer rejected: {}", e))?;
+        // Authoritative seq, allocated under the lock.
+        event.seq = max_seq + 1;
+        apply_run(&mut state, &event).map_err(|e| anyhow!("Run reducer rejected: {}", e))?;
         if self.dry_run {
-            return Ok(());
+            return Ok(event);
         }
-        store.append(event)?;
+        store.append(&event)?;
         store.write_run_view(run_id, &state)?;
-        Ok(())
+        Ok(event)
     }
 
     /// Create a queued AgentRun for an InProgress task, returning the run_id.
@@ -2662,7 +2694,7 @@ impl ControlApp {
             "gates": task.gates.iter().collect::<Vec<_>>(),
         });
         let event = self.build_run_event(&run_id, "run_created", payload)?;
-        self.append_run_event(&run_id, &event)?;
+        self.append_run_event(&run_id, event)?;
         Ok(run_id)
     }
 
@@ -2695,6 +2727,24 @@ impl ControlApp {
     /// record `run_started`. The overlap check runs *before* any side effect,
     /// so a rejected start leaves no worktree or events behind.
     pub fn start_run(&self, run_id: &str) -> Result<Event> {
+        let store = self.run_store()?;
+        // Lock order: registry → per-run (deadlock-free; create/terminate take
+        // only the per-run lock). The registry lock serializes concurrent starts
+        // so the cross-run overlap check + the run_started append are atomic — a
+        // second start blocks here, then sees the first run as Running and is
+        // rejected by the overlap check. The per-run lock additionally serializes
+        // against create/terminate of THIS run and is held across the worktree +
+        // manifest side-effects, not merely the append.
+        let _registry = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run_registry()?)
+        };
+        let _run_lock = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run(run_id)?)
+        };
         let run = self.replay_run(run_id)?;
         if run.phase != RunPhase::Queued {
             return Err(anyhow!(
@@ -2727,7 +2777,7 @@ impl ControlApp {
                 &write_deny,
                 &gates,
             )?;
-            let run_dir = self.run_store()?.run_dir(run_id);
+            let run_dir = store.run_dir(run_id);
             std::fs::create_dir_all(&run_dir)?;
             let manifest_path = run_dir.join("run-manifest.json");
             let temp_path = run_dir.join("run-manifest.json.tmp");
@@ -2740,8 +2790,8 @@ impl ControlApp {
             "lease_id": lease_id,
         });
         let event = self.build_run_event(run_id, "run_started", payload)?;
-        self.append_run_event(run_id, &event)?;
-        Ok(event)
+        // Lock already held (registry + per-run) — append via the locked core.
+        self.append_run_event_locked(&store, run_id, event)
     }
 
     /// Finish a Running run (→ Completed), freeing its write scope so an
@@ -2777,6 +2827,15 @@ impl ControlApp {
         event_type: &str,
         payload: serde_json::Value,
     ) -> Result<Event> {
+        let store = self.run_store()?;
+        // Hold the per-run lock across the worktree cleanup side-effect AND the
+        // append, so a terminate cannot interleave with a concurrent create/start
+        // of the same run.
+        let _run_lock = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run(run_id)?)
+        };
         let run = self.replay_run(run_id)?;
         if !self.dry_run {
             if let Some(ref wt) = run.worktree_path {
@@ -2790,8 +2849,7 @@ impl ControlApp {
             }
         }
         let event = self.build_run_event(run_id, event_type, payload)?;
-        self.append_run_event(run_id, &event)?;
-        Ok(event)
+        self.append_run_event_locked(&store, run_id, event)
     }
 
     // ── M6: crash recovery (slice 2) — read-only detection + explicit abort ──
@@ -4646,7 +4704,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        app.append_run_event(&run_id, &created).unwrap();
+        app.append_run_event(&run_id, created).unwrap();
         let started = app
             .build_run_event(
                 &run_id,
@@ -4657,7 +4715,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        app.append_run_event(&run_id, &started).unwrap();
+        app.append_run_event(&run_id, started).unwrap();
         run_id
     }
 
@@ -5537,5 +5595,35 @@ mod tests {
         app.record_uncertainty("res", "U-1", "still open", None)
             .unwrap();
         assert_eq!(app.finish_task("res").unwrap().event_type, "task_completed");
+    }
+
+    // ── Run-ledger single-writer ──
+
+    #[test]
+    fn run_event_seq_is_assigned_authoritatively_under_lock() {
+        // build_run_event emits a placeholder seq 0; append_run_event assigns the
+        // real seq (max+1) inside the per-run lock. If that assignment regressed,
+        // the run reducer would reject seq 0 ("Sequence error") and create_run
+        // would fail — so a successful create with last_seq == 1 proves the fix.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let scope = vec!["src".to_string()];
+        app.create_task(
+            "t",
+            CreateTaskInput {
+                objective: "runs",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("t").unwrap();
+        app.start_task("t").unwrap();
+        let run_id = app.create_run("t", "omp").unwrap();
+        assert_eq!(app.replay_run(&run_id).unwrap().last_seq, 1);
     }
 }

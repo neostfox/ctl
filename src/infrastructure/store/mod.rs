@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use crate::domain::event::Event;
 use crate::domain::telemetry::TelemetryEntry;
 
-/// Max time to wait to acquire a per-task write lock before giving up.
-const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max time to wait to acquire a per-entity write lock before giving up.
+pub(crate) const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Monotonic counter for lock ownership nonces (unique per process).
 static LOCK_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -20,7 +20,8 @@ fn new_lock_nonce() -> String {
     format!("{}-{}", std::process::id(), n)
 }
 
-/// RAII guard for an exclusive per-task write lock.
+/// RAII guard for an exclusive per-directory write lock (used for both the
+/// per-task and the per-run ledgers, and the run registry).
 ///
 /// Mutual exclusion is unconditional: the lock is acquired by atomically creating
 /// the lock file (`create_new`), and nothing ever removes a lock it does not own.
@@ -29,7 +30,7 @@ fn new_lock_nonce() -> String {
 /// and a crashed holder's lock is recovered explicitly, not by a heuristic. (A
 /// race-free automatic reclaim is not achievable with plain lock files; it needs
 /// OS advisory locks — flock/LockFileEx — which would add a platform dependency.)
-pub struct TaskLock {
+pub struct DirLock {
     path: PathBuf,
     /// Ownership token written into the lock file at creation. Drop removes the
     /// file ONLY if it still carries this nonce, so a guard can never delete a
@@ -37,12 +38,66 @@ pub struct TaskLock {
     nonce: String,
 }
 
-impl Drop for TaskLock {
+impl Drop for DirLock {
     fn drop(&mut self) {
         // Remove only if we still own it (first line == our nonce).
         if let Ok(content) = fs::read_to_string(&self.path) {
             if content.lines().next() == Some(self.nonce.as_str()) {
                 let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+/// Acquire an exclusive lock on `<dir>/.lock` (cross-process, advisory). Shared by
+/// the task ledger, run ledger, and run registry. `kind`/`id` only shape the
+/// error message ("task"/"run"/"run-registry"). Creates `dir` first, so a lock
+/// can be taken before the entity's directory exists (e.g. a new run). Mutual
+/// exclusion is unconditional: a live holder's lock is never stolen; a crashed
+/// holder's lock is recovered explicitly (the timeout error reports its path/pid).
+pub(crate) fn lock_dir(
+    dir: &Path,
+    kind: &str,
+    id: &str,
+    acquire_timeout: Duration,
+) -> Result<DirLock> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(".lock");
+    let nonce = new_lock_nonce();
+    let start = Instant::now();
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                // Line 1: ownership nonce (checked on Drop). Line 2: holder pid
+                // (diagnostic only — never used to steal a live lock).
+                let _ = writeln!(f, "{}", nonce);
+                let _ = writeln!(f, "pid={}", std::process::id());
+                return Ok(DirLock { path, nonce });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if start.elapsed() >= acquire_timeout {
+                    let holder = fs::read_to_string(&path).unwrap_or_default();
+                    let holder_pid = holder.lines().nth(1).unwrap_or("pid=unknown");
+                    return Err(anyhow!(
+                        "could not acquire write lock for {} '{}' within {:?} (held by {}). \
+                         If no ctl process is running, the holder crashed — remove the stale \
+                         lock file to recover: {}",
+                        kind,
+                        id,
+                        acquire_timeout,
+                        holder_pid,
+                        path.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "failed to acquire {} lock {}: {}",
+                    kind,
+                    path.display(),
+                    e
+                ))
             }
         }
     }
@@ -94,51 +149,15 @@ impl FileEventStore {
     /// external deps). Mutual exclusion is unconditional: a live holder's lock is
     /// never stolen. A lock left by a crashed writer must be removed explicitly
     /// (the acquire-timeout error reports its path and the holder pid).
-    pub fn lock_task(&self, task_id: &str) -> Result<TaskLock> {
+    pub fn lock_task(&self, task_id: &str) -> Result<DirLock> {
         self.lock_task_with(task_id, LOCK_ACQUIRE_TIMEOUT)
     }
 
-    /// `lock_task` with an explicit acquire timeout — for tests.
-    fn lock_task_with(&self, task_id: &str, acquire_timeout: Duration) -> Result<TaskLock> {
+    /// `lock_task` with an explicit acquire timeout — for tests. Delegates to the
+    /// shared `lock_dir` primitive; `task_dir` validates the id.
+    fn lock_task_with(&self, task_id: &str, acquire_timeout: Duration) -> Result<DirLock> {
         let task_dir = self.task_dir(task_id)?;
-        fs::create_dir_all(&task_dir)?;
-        let path = task_dir.join(".lock");
-        let nonce = new_lock_nonce();
-        let start = Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    // Line 1: ownership nonce (checked on Drop). Line 2: holder pid
-                    // (diagnostic only — never used to steal a live lock).
-                    let _ = writeln!(f, "{}", nonce);
-                    let _ = writeln!(f, "pid={}", std::process::id());
-                    return Ok(TaskLock { path, nonce });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() >= acquire_timeout {
-                        let holder = fs::read_to_string(&path).unwrap_or_default();
-                        let holder_pid = holder.lines().nth(1).unwrap_or("pid=unknown");
-                        return Err(anyhow!(
-                            "could not acquire write lock for task '{}' within {:?} (held by {}). \
-                             If no ctl process is running, the holder crashed — remove the stale \
-                             lock file to recover: {}",
-                            task_id,
-                            acquire_timeout,
-                            holder_pid,
-                            path.display()
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => {
-                    return Err(anyhow!(
-                        "failed to acquire task lock {}: {}",
-                        path.display(),
-                        e
-                    ))
-                }
-            }
-        }
+        lock_dir(&task_dir, "task", task_id, acquire_timeout)
     }
 
     /// Append a single event to `.ctl/tasks/<task>/events.jsonl`.

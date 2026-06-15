@@ -7,7 +7,9 @@ use anyhow::{anyhow, Result};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use super::{lock_dir, DirLock, LOCK_ACQUIRE_TIMEOUT};
 use crate::domain::event::Event;
 use crate::domain::run::AgentRunState;
 pub struct RunEventStore {
@@ -94,6 +96,34 @@ impl RunEventStore {
             events.push(event);
         }
         Ok(events)
+    }
+
+    /// Acquire the exclusive per-run write lock, held across the run ledger's
+    /// read-seq → validate → append critical section (mirrors `lock_task`). The
+    /// run dir need not exist yet — `lock_dir` creates it.
+    pub fn lock_run(&self, run_id: &str) -> Result<DirLock> {
+        self.lock_run_with(run_id, LOCK_ACQUIRE_TIMEOUT)
+    }
+
+    /// `lock_run` with an explicit acquire timeout — for tests.
+    fn lock_run_with(&self, run_id: &str, acquire_timeout: Duration) -> Result<DirLock> {
+        validate_run_id(run_id)?;
+        lock_dir(&self.run_dir(run_id), "run", run_id, acquire_timeout)
+    }
+
+    /// Acquire the coarse run-registry lock (`.ctl/runs/.lock`). Serializes
+    /// concurrent run *starts* so the cross-run scope-overlap check and the
+    /// `run_started` append are atomic across runs — two starts cannot both pass
+    /// the disjoint-scope check against a snapshot that excludes each other.
+    /// Always acquired BEFORE any per-run lock (registry → per-run) to stay
+    /// deadlock-free. The `.lock` file is skipped by `run_ids` (it is not a dir).
+    pub fn lock_run_registry(&self) -> Result<DirLock> {
+        lock_dir(
+            &self.runs_dir,
+            "run-registry",
+            "__registry__",
+            LOCK_ACQUIRE_TIMEOUT,
+        )
     }
 
     /// Get the next sequence number for a run.
@@ -338,5 +368,150 @@ mod tests {
         assert_eq!(v["run_id"], "run-view");
         assert_eq!(v["phase"], "running");
         assert_eq!(v["last_seq"], 5);
+    }
+
+    // ── per-run write lock (mirrors the task-lock suite in the parent module) ──
+
+    #[test]
+    fn lock_run_acquire_release_reacquire() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        {
+            let _g = store.lock_run("run-a").unwrap();
+            assert!(store.run_dir("run-a").join(".lock").exists());
+        } // drop releases
+        assert!(!store.run_dir("run-a").join(".lock").exists());
+        let _g2 = store.lock_run("run-a").unwrap(); // re-acquire after release
+    }
+
+    #[test]
+    fn lock_run_times_out_while_held() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        let _held = store.lock_run("run-a").unwrap();
+        let r = store.lock_run_with("run-a", Duration::from_millis(150));
+        assert!(r.is_err(), "second run lock must not acquire while held");
+    }
+
+    #[test]
+    fn lock_run_blocks_then_succeeds_after_release() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        let held = store.lock_run("run-a").unwrap();
+
+        let store2 = RunEventStore::init(&tmp).unwrap();
+        let waiter = std::thread::spawn(move || {
+            let g = store2.lock_run_with("run-a", Duration::from_secs(5));
+            g.is_ok()
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        assert!(
+            waiter.join().unwrap(),
+            "waiter should acquire after release"
+        );
+    }
+
+    #[test]
+    fn run_live_lock_is_never_stolen() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        let _held = store.lock_run("run-a").unwrap();
+        let stolen = store
+            .lock_run_with("run-a", Duration::from_millis(200))
+            .is_ok();
+        assert!(
+            !stolen,
+            "live run lock was stolen — mutual exclusion broken"
+        );
+    }
+
+    #[test]
+    fn run_drop_does_not_delete_foreign_lock() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        let path = store.run_dir("run-a").join(".lock");
+        let a = store.lock_run("run-a").unwrap();
+        std::fs::write(&path, "someone-else\npid=999").unwrap();
+        drop(a);
+        assert!(path.exists(), "Drop deleted a run lock it no longer owns");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn run_explicit_recovery_after_stale_lock() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        let run_dir = store.run_dir("run-a");
+        fs::create_dir_all(&run_dir).unwrap();
+        let lock_path = run_dir.join(".lock");
+        std::fs::write(&lock_path, "dead-holder\npid=999999").unwrap();
+        assert!(store
+            .lock_run_with("run-a", Duration::from_millis(100))
+            .is_err());
+        std::fs::remove_file(&lock_path).unwrap();
+        assert!(store.lock_run("run-a").is_ok());
+    }
+
+    #[test]
+    fn run_registry_lock_acquires_and_releases() {
+        let tmp = make_tmp_dir();
+        let store = RunEventStore::init(&tmp).unwrap();
+        {
+            let _g = store.lock_run_registry().unwrap();
+            assert!(store.runs_dir.join(".lock").exists());
+        }
+        assert!(!store.runs_dir.join(".lock").exists());
+    }
+
+    // The crux of single-writer: concurrent writers that each acquire lock_run,
+    // read the next seq, and append cannot collide — the resulting stream has
+    // contiguous, unique seqs (no duplicate seq, no gap). Deterministic assertion
+    // (no timing): without the lock, the read-seq/append race would drop or
+    // duplicate events.
+    #[test]
+    fn concurrent_locked_appends_get_contiguous_seqs() {
+        let tmp = make_tmp_dir();
+        let n_threads = 4;
+        let per_thread = 5;
+        let threads: Vec<_> = (0..n_threads)
+            .map(|t| {
+                let tmp = tmp.clone();
+                std::thread::spawn(move || {
+                    let store = RunEventStore::init(&tmp).unwrap();
+                    for i in 0..per_thread {
+                        let _lock = store.lock_run("run-x").unwrap();
+                        let seq = store.next_seq_for_run("run-x").unwrap();
+                        let event = Event {
+                            schema: "control.event-envelope.v1".to_string(),
+                            event_id: format!("evt-{}-{}", t, i),
+                            command_id: format!("cmd-{}-{}", t, i),
+                            task_id: "run-x".to_string(),
+                            seq,
+                            occurred_at: "2026-06-15T00:00:00Z".to_string(),
+                            actor: "agent".to_string(),
+                            event_type: "run_started".to_string(),
+                            payload: serde_json::json!({}),
+                        };
+                        store.append(&event).unwrap();
+                        // _lock drops here, releasing before the next iteration.
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let events = RunEventStore::init(&tmp)
+            .unwrap()
+            .read_for_run("run-x")
+            .unwrap();
+        let mut seqs: Vec<i64> = events.iter().map(|e| e.seq).collect();
+        seqs.sort_unstable();
+        let expected: Vec<i64> = (1..=(n_threads * per_thread) as i64).collect();
+        assert_eq!(
+            seqs, expected,
+            "per-run lock must serialize seq allocation: no duplicate seq, no gap"
+        );
     }
 }
