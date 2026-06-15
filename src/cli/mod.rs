@@ -2267,8 +2267,8 @@ fn format_research_output(view: &crate::domain::task::ResearchOutputView) -> Str
     let mut out = String::new();
     out.push_str("RESEARCH OUTPUT  (content: unverified; evidence: unattested)\n");
     out.push_str(&format!(
-        "  artifacts produced: {}\n",
-        view.artifacts_produced
+        "  artifacts recorded: {}\n",
+        view.artifacts_recorded
     ));
     out.push_str(&format!(
         "  uncertainties opened: {}\n",
@@ -4894,7 +4894,7 @@ mod tests {
             UncertaintyItemView,
         };
         let view = ResearchOutputView {
-            artifacts_produced: 1,
+            artifacts_recorded: 1,
             uncertainties_opened: 2,
             resolved_with_evidence: 0,
             accepted_as_assumptions: 0,
@@ -4940,7 +4940,7 @@ mod tests {
             ],
         };
         let out = format_research_output(&view);
-        assert!(out.contains("artifacts produced: 1"));
+        assert!(out.contains("artifacts recorded: 1"));
         assert!(out.contains("uncertainties opened: 2"));
         assert!(out.contains("freshness: CURRENT"));
         assert!(out.contains("[recorded after start]"));

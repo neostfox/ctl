@@ -532,6 +532,21 @@ impl ControlApp {
                     task_id
                 ));
             }
+            // Freshness floor: a finish must point at at least one artifact that
+            // still matches what was recorded. An artifact deleted or edited away
+            // after recording (STALE/ABSENT) must not satisfy completion — otherwise
+            // the disclosed footprint no longer corresponds to anything on disk.
+            let has_current = state.research_artifacts.iter().any(|a| {
+                self.artifact_freshness(&a.artifact_ref)
+                    == crate::domain::task::EvidenceFreshness::Current
+            });
+            if !has_current {
+                return Err(anyhow!(
+                    "Completion interlock: research task requires at least one CURRENT research \
+                     artifact (every recorded artifact is STALE or ABSENT — re-record against \
+                     the current files before finishing)"
+                ));
+            }
             // "at least one uncertainty outcome" — a recorded uncertainty (a
             // disposition is impossible without a prior record), so this is the
             // real floor.
@@ -1131,7 +1146,36 @@ impl ControlApp {
         artifact_kind: &str,
         source_run_id: Option<&str>,
     ) -> Result<Event> {
+        // Pre-check against current state for a clear CLI message before any file
+        // hashing. The reducer re-asserts every one of these invariants so they
+        // also hold on replay — this layer is for ergonomics, not enforcement.
+        let state = self.replay_task(task_id)?;
+        if state.task_kind != TaskKind::Research {
+            return Err(anyhow!(
+                "only a research task may record research artifacts; task '{}' is an \
+                 implementation task",
+                task_id
+            ));
+        }
+        if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
+            return Err(anyhow!(
+                "task '{}' is {}; a terminal task cannot record further research artifacts",
+                task_id,
+                state.phase.as_str()
+            ));
+        }
         let (rel, hash) = self.hash_evidence(artifact_path)?;
+        // Scope binding: the artifact must sit inside the task's write_allow (and
+        // outside write_deny) — the same boundary the write gate enforces.
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        if !file_in_write_scope(&normalizer, &rel, &state.write_allow, &state.write_deny)? {
+            return Err(anyhow!(
+                "research artifact '{}' is outside the task's write_allow (or within write_deny)",
+                rel
+            ));
+        }
         let mut payload = serde_json::json!({
             "artifact_path": rel,
             "artifact_hash": hash,
@@ -1218,7 +1262,7 @@ impl ControlApp {
             })
             .collect();
         Ok(Some(ResearchOutputView {
-            artifacts_produced: state.research_artifacts.len(),
+            artifacts_recorded: state.research_artifacts.len(),
             uncertainties_opened: state.uncertainties.len(),
             resolved_with_evidence: resolved,
             accepted_as_assumptions,
@@ -5813,7 +5857,7 @@ mod tests {
         assert_eq!(a.kind.as_str(), "findings");
         // View: fresh + never attested; mutate → STALE.
         let view = app.research_output_view("res").unwrap().unwrap();
-        assert_eq!(view.artifacts_produced, 1);
+        assert_eq!(view.artifacts_recorded, 1);
         assert_eq!(view.artifacts[0].freshness.as_str(), "CURRENT");
         assert!(!view.artifacts[0].source_run_attested);
         std::fs::write(&path, b"MUTATED").unwrap();
@@ -5906,6 +5950,79 @@ mod tests {
         // One recorded uncertainty satisfies the floor — even though it stays open
         // (completion never requires the open count to fall).
         app.record_uncertainty("res", "U-1", "still open", None)
+            .unwrap();
+        assert_eq!(app.finish_task("res").unwrap().event_type, "task_completed");
+    }
+
+    #[test]
+    fn research_artifact_rejected_on_implementation_task() {
+        // Kind binding: an implementation task must never accrue a research
+        // footprint it never declared. (Checked before any file hashing.)
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "impl"); // implementation kind
+        let err = app
+            .record_research_artifact("impl", "src/note.md", "findings", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("research task"), "got: {err}");
+    }
+
+    #[test]
+    fn research_artifact_rejected_out_of_scope() {
+        // Scope binding: an artifact must sit inside the task's write_allow — the
+        // same boundary the write gate enforces. Here write_allow = ["src"].
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_research_task(&app, "res");
+        std::fs::create_dir_all(app.project_root.join("docs")).unwrap();
+        std::fs::write(app.project_root.join("docs").join("x.md"), b"x").unwrap();
+        let err = app
+            .record_research_artifact("res", "docs/x.md", "findings", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("write_allow"), "got: {err}");
+    }
+
+    #[test]
+    fn research_artifact_rejected_after_terminal() {
+        // Terminal-is-terminal: a completed task's disclosed footprint must not
+        // change after the fact.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_research_to_review(&app, "res");
+        std::fs::write(app.project_root.join("src").join("f.md"), b"f").unwrap();
+        app.record_research_artifact("res", "src/f.md", "findings", None)
+            .unwrap();
+        app.record_uncertainty("res", "U-1", "open", None).unwrap();
+        assert_eq!(app.finish_task("res").unwrap().event_type, "task_completed");
+        // Now Completed → no further artifacts.
+        std::fs::write(app.project_root.join("src").join("g.md"), b"g").unwrap();
+        let err = app
+            .record_research_artifact("res", "src/g.md", "findings", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("terminal"), "got: {err}");
+    }
+
+    #[test]
+    fn research_finish_requires_current_artifact() {
+        // A finish must point at an artifact that still matches what was recorded;
+        // an artifact edited away after recording (STALE) must not satisfy it.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_research_to_review(&app, "res");
+        let path = app.project_root.join("src").join("f.md");
+        std::fs::write(&path, b"original").unwrap();
+        app.record_research_artifact("res", "src/f.md", "findings", None)
+            .unwrap();
+        app.record_uncertainty("res", "U-1", "open", None).unwrap();
+        // Edit the artifact away → STALE → finish blocked on freshness.
+        std::fs::write(&path, b"MUTATED").unwrap();
+        let err = app.finish_task("res").unwrap_err().to_string();
+        assert!(err.contains("CURRENT"), "got: {err}");
+        // Re-record against the current file → a CURRENT artifact exists → proceeds.
+        app.record_research_artifact("res", "src/f.md", "findings", None)
             .unwrap();
         assert_eq!(app.finish_task("res").unwrap().event_type, "task_completed");
     }

@@ -209,11 +209,16 @@ mod tests {
     use std::collections::{BTreeSet, HashMap, HashSet};
 
     fn make_tmp_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base =
-            std::env::temp_dir().join(format!("control-run-test-{}-{}", std::process::id(), id));
+        // `generate_uuid` mixes a nanosecond clock with a process-global atomic
+        // counter, so the path is unique across runs even when the OS recycles a
+        // pid. The old `pid + counter` scheme reused paths between runs; with no
+        // cleanup that meant a fresh test could open a stale `events.jsonl`/`.lock`
+        // left by an earlier run and flake (read back >1 events, or a stale lock
+        // that never releases).
+        let base = std::env::temp_dir().join(format!(
+            "control-run-test-{}",
+            crate::application::generate_uuid()
+        ));
         fs::create_dir_all(&base).unwrap();
         base
     }

@@ -508,7 +508,7 @@ pub struct ResearchUncertaintyView {
 /// metric.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResearchOutputView {
-    pub artifacts_produced: usize,
+    pub artifacts_recorded: usize,
     pub uncertainties_opened: usize,
     pub resolved_with_evidence: usize,
     pub accepted_as_assumptions: usize,
@@ -794,6 +794,23 @@ fn decode_research_artifact_kind(
              (findings | experiment | recommendation | design_draft)"
         )),
     }
+}
+
+/// Pure write-scope test over an already-normalized, repo-relative path (forward
+/// slashes). Mirrors the application-layer `file_in_write_scope` matcher so a
+/// research artifact is bound by exactly the boundary the write gate enforces —
+/// but without touching the filesystem, keeping the reducer pure for replay.
+fn artifact_within_write_scope(
+    path: &str,
+    write_allow: &BTreeSet<String>,
+    write_deny: &BTreeSet<String>,
+) -> bool {
+    let path = path.replace('\\', "/");
+    let matches = |scope: &String| {
+        let scope = scope.replace('\\', "/");
+        path == scope || path.starts_with(scope.as_str())
+    };
+    write_allow.iter().any(matches) && !write_deny.iter().any(matches)
 }
 
 pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
@@ -1719,12 +1736,46 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
         // ── Research/Spike V1: record a tracked research artifact ──
         "research_artifact_recorded" => {
             check_trust_level(&event.payload)?;
+            // Kind binding: only a research task accrues a research footprint. The
+            // command layer pre-checks for a friendly message, but the invariant is
+            // re-asserted here so it also holds on replay of any historical ledger.
+            if state.task_kind != TaskKind::Research {
+                return Err(
+                    "research_artifact_recorded: only a research task may record research \
+                     artifacts (task kind is fixed at creation)"
+                        .to_string(),
+                );
+            }
+            // Terminal-is-terminal: a completed/cancelled task's disclosed output
+            // must not change after the fact.
+            if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
+                return Err(format!(
+                    "research_artifact_recorded: task is '{}'; a terminal task cannot record \
+                     further research artifacts",
+                    state.phase.as_str()
+                ));
+            }
             let artifact_ref =
                 decode_artifact(&event.payload, "artifact_path", "artifact_hash", true)?
                     .ok_or_else(|| {
                         "research_artifact_recorded: artifact_path and artifact_hash are required"
                             .to_string()
                     })?;
+            // Scope binding: an artifact must live inside the task's declared
+            // write_allow (and outside write_deny) — the same boundary the write
+            // gate enforces. The path is already normalized repo-relative, so the
+            // test stays pure (no filesystem) and replay-safe.
+            if !artifact_within_write_scope(
+                &artifact_ref.path,
+                &state.write_allow,
+                &state.write_deny,
+            ) {
+                return Err(format!(
+                    "research_artifact_recorded: artifact '{}' is outside the task's write_allow \
+                     (or within write_deny)",
+                    artifact_ref.path
+                ));
+            }
             let kind = decode_research_artifact_kind(&event.payload)?;
             let source_run_id = optional_str(&event.payload, "source_run_id");
             state.research_artifacts.push(ResearchArtifact {

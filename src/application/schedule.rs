@@ -399,7 +399,7 @@ mod tests {
 
         // Overlapping write_allow → different groups.
         assert_eq!(plan.groups.len(), 2);
-        assert!(plan.conflicts.len() >= 1);
+        assert!(!plan.conflicts.is_empty());
     }
 
     #[test]
