@@ -82,6 +82,7 @@
         "brainstorm_skipped",
         "uncertainty_recorded",
         "uncertainty_disposition_recorded",
+        "evidence_recorded",
         "research_artifact_recorded"
       ]
     },
@@ -1357,7 +1358,7 @@
         "properties": {
           "payload": {
             "type": "object",
-            "description": "Uncertainty Ledger V1: terminal disposition of an open uncertainty. resolved requires hash-bound evidence; accepted_as_assumption and invalidated must NOT carry evidence; invalidated requires a reason. Terminal-is-terminal: enforced by the reducer.",
+            "description": "Uncertainty Ledger V1 / Oracle V1: terminal disposition of an open uncertainty. resolved requires evidence — EITHER an evidence_ref (an evidence_id recorded by a prior evidence_recorded, oracle-typed) OR legacy inline evidence_path+evidence_hash, never both; accepted_as_assumption and invalidated must NOT carry evidence; invalidated requires a reason. Terminal-is-terminal: enforced by the reducer.",
             "required": ["uncertainty_id", "disposition"],
             "properties": {
               "uncertainty_id": {
@@ -1370,18 +1371,77 @@
                 "type": "string",
                 "enum": ["resolved", "accepted_as_assumption", "invalidated"]
               },
+              "evidence_ref": {
+                "description": "Oracle V1: identifier of an evidence recorded by a prior evidence_recorded event in this task (resolved only). The reducer requires it to reference an existing evidence. Mutually exclusive with the legacy inline evidence_path/evidence_hash.",
+                "type": "string",
+                "minLength": 1
+              },
               "evidence_path": {
-                "description": "Normalized repo-relative path to the evidence artifact (resolved only). Computed and hashed by ctl, not the caller.",
+                "description": "Legacy inline evidence: normalized repo-relative path to the evidence artifact (resolved only). Computed and hashed by ctl, not the caller. Mutually exclusive with evidence_ref.",
                 "type": "string",
                 "minLength": 1
               },
               "evidence_hash": {
-                "description": "SHA-256 of the evidence artifact at disposition time. Freshness is derived lazily; this never asserts the evidence content is valid.",
+                "description": "SHA-256 of the inline evidence artifact at disposition time. Freshness is derived lazily; this never asserts the evidence content is valid.",
                 "type": "string",
                 "minLength": 1
               },
               "reason": {
                 "description": "Why the disposition was recorded. Required for invalidated; optional context otherwise.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "not": {
+              "description": "evidence_ref and the legacy inline evidence binding are mutually exclusive.",
+              "required": ["evidence_ref", "evidence_path"]
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "evidence_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Oracle V1: a first-class, oracle-typed evidence object an uncertainty can be resolved against. Record-only; L0 content. The artifact hash is computed by ctl from a normalized path; recording never raises trust or asserts the evidence content is correct. oracle_kind 'model' is ALWAYS advisory; 'human' is not an authenticated principal; recorded_by is the unattested envelope actor (not a payload field).",
+            "required": ["evidence_id", "oracle_kind", "artifact_path", "artifact_hash"],
+            "properties": {
+              "evidence_id": {
+                "description": "Stable identifier for the evidence, unique within its task.",
+                "type": "string",
+                "minLength": 1
+              },
+              "oracle_kind": {
+                "description": "What kind of oracle produced the evidence. Fixed enum (no free string, no 'other'). 'model' is advisory and must never be rendered as fact.",
+                "type": "string",
+                "enum": ["deterministic", "test", "runtime", "human", "model", "external_authority"]
+              },
+              "source_ref": {
+                "description": "Free-text locator for the oracle source (command, test name, URL). UNATTESTED — a claim, not verified provenance.",
+                "type": "string",
+                "minLength": 1
+              },
+              "artifact_path": {
+                "description": "Normalized repo-relative path to the file-backed evidence artifact. Computed and hashed by ctl, not the caller. Required: V1 has no tree_hash-only (content-free) evidence.",
+                "type": "string",
+                "minLength": 1
+              },
+              "artifact_hash": {
+                "description": "SHA-256 of the evidence artifact at record time. Freshness is derived lazily; this never asserts the content is valid.",
                 "type": "string",
                 "minLength": 1
               },

@@ -306,6 +306,32 @@ impl DispositionArg {
     }
 }
 
+/// Oracle kind argument (Oracle V1). Rendered kebab-case on the CLI; mapped to the
+/// canonical snake_case payload value. `model` is advisory; `human` is not an
+/// authenticated principal.
+#[derive(Clone, Copy, ValueEnum)]
+enum OracleKindArg {
+    Deterministic,
+    Test,
+    Runtime,
+    Human,
+    Model,
+    ExternalAuthority,
+}
+
+impl OracleKindArg {
+    fn as_payload(&self) -> &'static str {
+        match self {
+            OracleKindArg::Deterministic => "deterministic",
+            OracleKindArg::Test => "test",
+            OracleKindArg::Runtime => "runtime",
+            OracleKindArg::Human => "human",
+            OracleKindArg::Model => "model",
+            OracleKindArg::ExternalAuthority => "external_authority",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum UncertaintyCommands {
     /// Record an open uncertainty (an unknown the task carries).
@@ -325,6 +351,28 @@ enum UncertaintyCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Record a first-class, oracle-typed evidence object (Oracle V1) that a
+    /// `resolved` disposition can later reference by id. ctl computes the hash.
+    Evidence {
+        /// Task identifier to bind the evidence to
+        #[arg(long)]
+        id: String,
+        /// Stable evidence identifier (e.g. E-001), unique within the task
+        #[arg(long = "evidence")]
+        evidence: String,
+        /// What kind of oracle produced it. `model` is advisory; `human` is not an
+        /// authenticated principal.
+        #[arg(long = "oracle-kind", value_enum)]
+        oracle_kind: OracleKindArg,
+        /// Free-text locator for the source (command, test name, URL); unattested
+        #[arg(long)]
+        source: Option<String>,
+        /// Path to the file-backed evidence artifact (normalized + hashed by ctl)
+        #[arg(long)]
+        artifact: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Record a terminal disposition for an uncertainty.
     Dispose {
         #[arg(long)]
@@ -334,7 +382,12 @@ enum UncertaintyCommands {
         /// How the uncertainty was disposed
         #[arg(long, value_enum)]
         disposition: DispositionArg,
-        /// Path to the evidence artifact (resolved only; hashed by ctl)
+        /// Oracle V1: id of a recorded evidence (from `uncertainty evidence`) that
+        /// resolves this uncertainty. Resolved only. Mutually exclusive with --evidence.
+        #[arg(long = "evidence-ref")]
+        evidence_ref: Option<String>,
+        /// Legacy inline evidence: path to the artifact (resolved only; hashed by ctl).
+        /// Mutually exclusive with --evidence-ref.
         #[arg(long)]
         evidence: Option<String>,
         /// Why it was disposed (required for invalidated)
@@ -1113,10 +1166,23 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             // BS-provenance V1: fact-only provenance block, staleness resolved
             // against the working tree. None when no brainstorm was recorded.
             let provenance = app.brainstorm_provenance_view(&state);
+            // Oracle V1: fact-only uncertainty ledger + oracle-source disclosure,
+            // surfaced in task status for every kind (None when none recorded).
+            let uncertainty = app.uncertainty_ledger_view(&state);
             if *json {
-                print_task_state(&state, &blocked_by, provenance.as_ref())?;
+                print_task_state(
+                    &state,
+                    &blocked_by,
+                    provenance.as_ref(),
+                    uncertainty.as_ref(),
+                )?;
             } else {
-                print_task_human(&state, &blocked_by, provenance.as_ref())?;
+                print_task_human(
+                    &state,
+                    &blocked_by,
+                    provenance.as_ref(),
+                    uncertainty.as_ref(),
+                )?;
                 // Research/Spike V1: append the fact-only research output block.
                 if state.task_kind == crate::domain::task::TaskKind::Research {
                     if let Some(view) = app.research_output_view(id)? {
@@ -1775,6 +1841,7 @@ fn print_task_state(
     state: &TaskState,
     blocked_by: &[String],
     provenance: Option<&crate::domain::task::BrainstormProvenanceView>,
+    uncertainty: Option<&crate::domain::task::UncertaintyLedgerView>,
 ) -> Result<()> {
     let gate_results: BTreeMap<_, _> = state.gate_results.iter().collect();
     let active_leases: usize = state
@@ -1806,6 +1873,9 @@ fn print_task_state(
         "pending_approvals": pending_approvals_count,
         // BS-provenance V1: fact-only, display-only (null when none recorded).
         "brainstorm_provenance": provenance,
+        // Oracle V1: fact-only uncertainty ledger + oracle sources (null when none).
+        // Display-only superset of the frozen persisted task-view; no verdict/score.
+        "uncertainties": uncertainty,
         "last_event_seq": state.last_seq,
     });
     println!("{}", serde_json::to_string_pretty(&view)?);
@@ -1816,6 +1886,7 @@ fn print_task_human(
     state: &TaskState,
     blocked_by: &[String],
     provenance: Option<&crate::domain::task::BrainstormProvenanceView>,
+    uncertainty: Option<&crate::domain::task::UncertaintyLedgerView>,
 ) -> Result<()> {
     println!("Task: {}", state.id);
     println!("Phase: {:?}", state.phase);
@@ -1885,6 +1956,10 @@ fn print_task_human(
     // BS-provenance V1: fact-only disclosure (omitted when none recorded).
     if let Some(view) = provenance {
         print_brainstorm_provenance(view);
+    }
+    // Oracle V1: fact-only uncertainty ledger + oracle sources (omitted when none).
+    if let Some(view) = uncertainty {
+        print!("{}", format_uncertainty_ledger(view));
     }
     println!("Seq: {}", state.last_seq);
     Ok(())
@@ -2037,6 +2112,7 @@ fn format_uncertainty_ledger(view: &crate::domain::task::UncertaintyLedgerView) 
         "  trust level: {} (untrusted content)\n",
         view.trust_level
     ));
+    out.push_str(&format_oracle_sources(&view.oracle_sources));
     for item in &view.items {
         out.push('\n');
         out.push_str(&format!("  {}  {}\n", item.id, item.status.to_uppercase()));
@@ -2044,6 +2120,7 @@ fn format_uncertainty_ledger(view: &crate::domain::task::UncertaintyLedgerView) 
         if let Some(source) = &item.source {
             out.push_str(&format!("    source: {source} (unattested)\n"));
         }
+        out.push_str(&format_item_oracle(item));
         if let Some(evidence) = &item.evidence {
             out.push_str(&format!(
                 "    evidence: {} @ {}\n",
@@ -2056,6 +2133,46 @@ fn format_uncertainty_ledger(view: &crate::domain::task::UncertaintyLedgerView) 
         }
         if let Some(reason) = &item.reason {
             out.push_str(&format!("    reason: {reason}\n"));
+        }
+    }
+    out
+}
+
+/// Render the per-oracle-kind breakdown. Raw counts only — never a score/ratio/
+/// verdict. `model` is kept on its own `model advisory` line so it can never read as
+/// external proof.
+fn format_oracle_sources(o: &crate::domain::task::OracleSourcesView) -> String {
+    let mut out = String::new();
+    out.push_str("  ORACLE SOURCES\n");
+    out.push_str(&format!(
+        "    deterministic/test: {}\n",
+        o.deterministic + o.test
+    ));
+    out.push_str(&format!("    runtime: {}\n", o.runtime));
+    out.push_str(&format!("    human decisions: {}\n", o.human));
+    out.push_str(&format!("    model advisory: {}\n", o.model_advisory));
+    out.push_str(&format!(
+        "    external authority: {}\n",
+        o.external_authority
+    ));
+    out
+}
+
+/// Per-item oracle disclosure for a resolved-via-evidence-ref uncertainty. A `model`
+/// oracle is explicitly marked ADVISORY — never external proof. Legacy inline resolves
+/// (no recorded oracle) print nothing here.
+fn format_item_oracle(item: &crate::domain::task::UncertaintyItemView) -> String {
+    let mut out = String::new();
+    if let Some(eid) = &item.evidence_id {
+        out.push_str(&format!("    evidence_ref: {eid}\n"));
+    }
+    if let Some(kind) = &item.oracle_kind {
+        if item.advisory {
+            out.push_str(&format!(
+                "    oracle: {kind} — ADVISORY (not external proof)\n"
+            ));
+        } else {
+            out.push_str(&format!("    oracle: {kind} (unattested)\n"));
         }
     }
     out
@@ -2077,10 +2194,35 @@ fn cmd_uncertainty(command: &UncertaintyCommands) -> Result<()> {
                 uncertainty, id, event.seq
             );
         }
+        UncertaintyCommands::Evidence {
+            id,
+            evidence,
+            oracle_kind,
+            source,
+            artifact,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_evidence(
+                id,
+                evidence,
+                oracle_kind.as_payload(),
+                source.as_deref(),
+                artifact,
+            )?;
+            println!(
+                "Recorded {} evidence '{}' on task '{}' at seq {}.",
+                oracle_kind.as_payload(),
+                evidence,
+                id,
+                event.seq
+            );
+        }
         UncertaintyCommands::Dispose {
             id,
             uncertainty,
             disposition,
+            evidence_ref,
             evidence,
             reason,
             dry_run,
@@ -2091,6 +2233,7 @@ fn cmd_uncertainty(command: &UncertaintyCommands) -> Result<()> {
                 uncertainty,
                 disposition.as_payload(),
                 evidence.as_deref(),
+                evidence_ref.as_deref(),
                 reason.as_deref(),
             )?;
             println!(
@@ -4690,7 +4833,8 @@ mod tests {
         // The ledger shows raw per-status counts and freshness, never a roll-up
         // verdict, score, percentage, or green marker.
         use crate::domain::task::{
-            EvidenceFreshness, EvidenceView, UncertaintyItemView, UncertaintyLedgerView,
+            EvidenceFreshness, EvidenceView, OracleSourcesView, UncertaintyItemView,
+            UncertaintyLedgerView,
         };
         let view = UncertaintyLedgerView {
             open: 2,
@@ -4698,6 +4842,10 @@ mod tests {
             resolved: 1,
             invalidated: 1,
             trust_level: "content_l0".into(),
+            oracle_sources: OracleSourcesView {
+                model_advisory: 1,
+                ..Default::default()
+            },
             items: vec![UncertaintyItemView {
                 id: "U-1".into(),
                 statement: "is the evidence external?".into(),
@@ -4709,6 +4857,9 @@ mod tests {
                     freshness: EvidenceFreshness::Stale,
                     attested: false,
                 }),
+                evidence_id: Some("E-1".into()),
+                oracle_kind: Some("model".into()),
+                advisory: true,
                 reason: None,
             }],
         };
@@ -4716,6 +4867,12 @@ mod tests {
         // Raw counts disclosed verbatim...
         assert!(out.contains("open: 2"));
         assert!(out.contains("resolved with evidence: 1"));
+        // ...the oracle-source breakdown keeps a model on its own advisory line...
+        assert!(out.contains("ORACLE SOURCES"));
+        assert!(out.contains("model advisory: 1"));
+        // ...a model-backed resolve is explicitly marked advisory, not external proof...
+        assert!(out.contains("evidence_ref: E-1"));
+        assert!(out.contains("ADVISORY (not external proof)"));
         // ...freshness is file-consistency only, attestation unavailable...
         assert!(out.contains("freshness: STALE"));
         assert!(out.contains("attestation: unavailable"));
@@ -4759,6 +4916,9 @@ mod tests {
                         status: "open".into(),
                         source: None,
                         evidence: None,
+                        evidence_id: None,
+                        oracle_kind: None,
+                        advisory: false,
                         reason: None,
                     },
                     recorded_after_start: true,
@@ -4770,6 +4930,9 @@ mod tests {
                         status: "open".into(),
                         source: None,
                         evidence: None,
+                        evidence_id: None,
+                        oracle_kind: None,
+                        advisory: false,
                         reason: None,
                     },
                     recorded_after_start: false,

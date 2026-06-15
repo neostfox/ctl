@@ -265,10 +265,73 @@ pub struct Uncertainty {
     /// Free-text note on where it came from. UNATTESTED — a claim, not provenance.
     pub source: Option<String>,
     pub status: UncertaintyStatus,
-    /// Hash-bound evidence, present only when status is `Resolved`.
+    /// Hash-bound evidence artifact, present only when status is `Resolved`. For an
+    /// Oracle-V1 resolve this is copied from the referenced evidence so freshness is
+    /// derived uniformly; for a legacy inline resolve it is the inline artifact.
     pub evidence_ref: Option<ArtifactRef>,
+    /// Oracle V1: the id of the recorded evidence that resolved this uncertainty,
+    /// when resolved via `evidence_ref`. None for legacy inline resolves and for
+    /// every non-resolved state. Absent in old streams (which replay unchanged).
+    #[serde(default)]
+    pub evidence_id: Option<String>,
+    /// Oracle V1: the oracle kind of the resolving evidence, copied from the
+    /// referenced evidence. None for legacy inline resolves (oracle unknown) and for
+    /// non-resolved states. A `Model` oracle is advisory, never external proof.
+    #[serde(default)]
+    pub oracle_kind: Option<OracleKind>,
     /// Why it was invalidated, or optional context on another disposition.
     pub reason: Option<String>,
+}
+
+/// Pinned trust level for every evidence event. Bare L0 content — recording an
+/// oracle-typed evidence never raises trust or asserts the content is correct.
+pub const EVIDENCE_TRUST_LEVEL: &str = "content_l0";
+
+/// What kind of oracle produced a piece of evidence. Fixed enum (no free string, no
+/// `other`): a free taxonomy invites labels that pretend to be meaningful. `Model`
+/// is ALWAYS advisory (never rendered as fact); `Human` is NOT an authenticated
+/// principal. The control layer discloses the kind; it never vouches for the claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OracleKind {
+    Deterministic,
+    Test,
+    Runtime,
+    Human,
+    Model,
+    ExternalAuthority,
+}
+
+impl OracleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OracleKind::Deterministic => "deterministic",
+            OracleKind::Test => "test",
+            OracleKind::Runtime => "runtime",
+            OracleKind::Human => "human",
+            OracleKind::Model => "model",
+            OracleKind::ExternalAuthority => "external_authority",
+        }
+    }
+
+    /// True only for `Model`: a model oracle is advisory and must never be rendered
+    /// as external proof.
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, OracleKind::Model)
+    }
+}
+
+/// A first-class, oracle-typed evidence object an uncertainty can be resolved
+/// against. `artifact_ref` is file-backed (ctl-computed hash); `source_ref` is an
+/// UNATTESTED free-text locator; `recorded_by` is the envelope actor at record time
+/// (an unattested principal — never a separate, forgeable payload field). L0 content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Evidence {
+    pub id: String,
+    pub oracle_kind: OracleKind,
+    pub source_ref: Option<String>,
+    pub artifact_ref: ArtifactRef,
+    pub recorded_by: String,
 }
 
 /// Freshness of a recorded evidence artifact, derived against the working tree.
@@ -314,7 +377,26 @@ pub struct UncertaintyItemView {
     pub status: String,
     pub source: Option<String>,
     pub evidence: Option<EvidenceView>,
+    /// Oracle V1: the id of the resolving evidence, when resolved via evidence_ref.
+    pub evidence_id: Option<String>,
+    /// Oracle V1: the resolving evidence's oracle kind (None for legacy inline).
+    pub oracle_kind: Option<String>,
+    /// Oracle V1: true iff `oracle_kind` is `model` — advisory, NOT external proof.
+    pub advisory: bool,
     pub reason: Option<String>,
+}
+
+/// Fact-only breakdown of how many recorded evidences came from each oracle kind.
+/// Raw counts only — never a score, ratio, or verdict. `model_advisory` is kept on
+/// its own line so a model oracle can never be summed into "external proof".
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OracleSourcesView {
+    pub deterministic: usize,
+    pub test: usize,
+    pub runtime: usize,
+    pub human: usize,
+    pub model_advisory: usize,
+    pub external_authority: usize,
 }
 
 /// A fact-only rendering of a task's uncertainty ledger: raw per-status counts
@@ -328,6 +410,8 @@ pub struct UncertaintyLedgerView {
     pub invalidated: usize,
     /// Always `content_l0` in V1.
     pub trust_level: String,
+    /// Oracle V1: per-oracle-kind counts over the task's recorded evidence.
+    pub oracle_sources: OracleSourcesView,
     pub items: Vec<UncertaintyItemView>,
 }
 
@@ -470,6 +554,11 @@ pub struct TaskState {
     /// Default empty; absent in old streams, which replay unchanged.
     #[serde(default)]
     pub uncertainties: Vec<Uncertainty>,
+    /// Oracle V1: oracle-typed evidence objects recorded on this task, in record
+    /// order. A `resolved` disposition may reference one by id. Default empty;
+    /// absent in old streams, which replay unchanged.
+    #[serde(default)]
+    pub evidences: Vec<Evidence>,
     /// Research/Spike V1: whether this task produces code or evidence. Set at
     /// create, immutable. Defaults to `Implementation` for legacy/absent streams.
     #[serde(default)]
@@ -508,6 +597,7 @@ impl TaskState {
             schedule_plan_id: None,
             brainstorm_ref: None,
             uncertainties: Vec::new(),
+            evidences: Vec::new(),
             task_kind: TaskKind::Implementation,
             research_artifacts: Vec::new(),
             leases: HashMap::new(),
@@ -666,6 +756,24 @@ fn decode_task_kind(payload: &serde_json::Value) -> Result<TaskKind, String> {
         Some("research") => Ok(TaskKind::Research),
         Some(other) => Err(format!(
             "task_created: unknown task_kind '{other}' (implementation | research)"
+        )),
+    }
+}
+
+/// Decode the fixed `oracle_kind` enum. Required; unknown value → rejected (no
+/// free string, no `other`).
+fn decode_oracle_kind(payload: &serde_json::Value) -> Result<OracleKind, String> {
+    let kind = require_str(payload, "oracle_kind")?;
+    match kind.as_str() {
+        "deterministic" => Ok(OracleKind::Deterministic),
+        "test" => Ok(OracleKind::Test),
+        "runtime" => Ok(OracleKind::Runtime),
+        "human" => Ok(OracleKind::Human),
+        "model" => Ok(OracleKind::Model),
+        "external_authority" => Ok(OracleKind::ExternalAuthority),
+        other => Err(format!(
+            "evidence_recorded: unknown oracle_kind '{other}' (deterministic | test | \
+             runtime | human | model | external_authority)"
         )),
     }
 }
@@ -1466,16 +1574,76 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 source,
                 status: UncertaintyStatus::Open,
                 evidence_ref: None,
+                evidence_id: None,
+                oracle_kind: None,
                 reason: None,
+            });
+        }
+        // ── Oracle V1: record a first-class, oracle-typed evidence object ──
+        "evidence_recorded" => {
+            check_trust_level(&event.payload)?;
+            let id = require_str(&event.payload, "evidence_id")?;
+            let oracle_kind = decode_oracle_kind(&event.payload)?;
+            let artifact_ref =
+                decode_artifact(&event.payload, "artifact_path", "artifact_hash", true)?
+                    .ok_or_else(|| {
+                        "evidence_recorded: artifact_path and artifact_hash are required"
+                            .to_string()
+                    })?;
+            let source_ref = optional_str(&event.payload, "source_ref");
+            if state.evidences.iter().any(|e| e.id == id) {
+                return Err(format!(
+                    "evidence_recorded: evidence '{id}' already recorded"
+                ));
+            }
+            state.evidences.push(Evidence {
+                id,
+                oracle_kind,
+                source_ref,
+                artifact_ref,
+                // recorded_by is the envelope actor — an unattested principal, never
+                // a separate forgeable payload field that could contradict the actor.
+                recorded_by: event.actor.clone(),
             });
         }
         "uncertainty_disposition_recorded" => {
             let id = require_str(&event.payload, "uncertainty_id")?;
             check_trust_level(&event.payload)?;
             let disposition = require_str(&event.payload, "disposition")?;
-            let evidence =
+            // Two evidence shapes: the legacy inline (path+hash) and the Oracle-V1
+            // reference (evidence_ref → a recorded evidence id). They are mutually
+            // exclusive on a resolve and resolved against state BEFORE the uncertainty
+            // is borrowed mutably.
+            let inline_evidence =
                 decode_artifact(&event.payload, "evidence_path", "evidence_hash", false)?;
+            let evidence_id = optional_str(&event.payload, "evidence_ref");
             let reason = optional_str(&event.payload, "reason");
+            let has_any_evidence = inline_evidence.is_some() || evidence_id.is_some();
+            // Resolve a referenced evidence to owned values up front (disjoint from the
+            // mutable uncertainty borrow). Mutual exclusion enforced here.
+            let resolved_via_ref = match &evidence_id {
+                Some(eid) => {
+                    if inline_evidence.is_some() {
+                        return Err(
+                            "uncertainty_disposition_recorded: a 'resolved' must carry \
+                             EITHER evidence_ref OR inline evidence_path/evidence_hash, never both"
+                                .to_string(),
+                        );
+                    }
+                    let ev = state
+                        .evidences
+                        .iter()
+                        .find(|e| &e.id == eid)
+                        .ok_or_else(|| {
+                            format!(
+                                "uncertainty_disposition_recorded: evidence_ref '{eid}' does not \
+                             reference a recorded evidence in this task"
+                            )
+                        })?;
+                    Some((eid.clone(), ev.artifact_ref.clone(), ev.oracle_kind))
+                }
+                None => None,
+            };
             let uncertainty = state
                 .uncertainties
                 .iter_mut()
@@ -1494,19 +1662,30 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
             match disposition.as_str() {
                 "resolved" => {
-                    // resolved is the only disposition closed by external evidence.
-                    let evidence_ref = evidence.ok_or_else(|| {
-                        "uncertainty_disposition_recorded: 'resolved' requires evidence_path + \
-                         evidence_hash (an unknown closed without external evidence is not resolved)"
-                            .to_string()
-                    })?;
-                    uncertainty.status = UncertaintyStatus::Resolved;
-                    uncertainty.evidence_ref = Some(evidence_ref);
-                    uncertainty.reason = reason;
+                    // resolved is the only disposition closed by external evidence —
+                    // either a recorded oracle-typed evidence (preferred) or legacy inline.
+                    if let Some((eid, artifact_ref, oracle_kind)) = resolved_via_ref {
+                        uncertainty.status = UncertaintyStatus::Resolved;
+                        uncertainty.evidence_ref = Some(artifact_ref);
+                        uncertainty.evidence_id = Some(eid);
+                        uncertainty.oracle_kind = Some(oracle_kind);
+                        uncertainty.reason = reason;
+                    } else if let Some(artifact_ref) = inline_evidence {
+                        // Legacy inline evidence: oracle kind is unknown (predates Oracle V1).
+                        uncertainty.status = UncertaintyStatus::Resolved;
+                        uncertainty.evidence_ref = Some(artifact_ref);
+                        uncertainty.reason = reason;
+                    } else {
+                        return Err("uncertainty_disposition_recorded: 'resolved' requires \
+                             evidence — an evidence_ref to a recorded evidence, or legacy inline \
+                             evidence_path + evidence_hash (an unknown closed without external \
+                             evidence is not resolved)"
+                            .to_string());
+                    }
                 }
                 "accepted_as_assumption" => {
                     // An assumption must remain visibly unresolved by external evidence.
-                    if evidence.is_some() {
+                    if has_any_evidence {
                         return Err("uncertainty_disposition_recorded: \
                              'accepted_as_assumption' must not carry evidence (it remains \
                              unresolved by external evidence); use reason"
@@ -1518,7 +1697,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 "invalidated" => {
                     // "I was wrong / it no longer applies" has no oracle: a reason,
                     // never evidence, so it cannot masquerade as a proof.
-                    if evidence.is_some() {
+                    if has_any_evidence {
                         return Err("uncertainty_disposition_recorded: 'invalidated' must not \
                              carry evidence; record why in reason"
                             .to_string());

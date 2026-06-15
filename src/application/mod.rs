@@ -956,8 +956,16 @@ impl ControlApp {
         uncertainty_id: &str,
         disposition: &str,
         evidence_path: Option<&str>,
+        evidence_ref: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Event> {
+        // Mutual exclusion is also enforced by the reducer + schema; reject early
+        // here for a clear CLI message before any file hashing happens.
+        if evidence_path.is_some() && evidence_ref.is_some() {
+            return Err(anyhow!(
+                "a 'resolved' must carry either --evidence-ref or --evidence (inline), never both"
+            ));
+        }
         let mut payload = serde_json::json!({
             "uncertainty_id": uncertainty_id,
             "disposition": disposition,
@@ -968,10 +976,44 @@ impl ControlApp {
             payload["evidence_path"] = serde_json::json!(rel);
             payload["evidence_hash"] = serde_json::json!(hash);
         }
+        if let Some(eref) = evidence_ref {
+            payload["evidence_ref"] = serde_json::json!(eref);
+        }
         if let Some(reason) = reason {
             payload["reason"] = serde_json::json!(reason);
         }
         let event = self.build_event(task_id, "uncertainty_disposition_recorded", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Record a first-class, oracle-typed evidence object (Oracle V1). ctl computes
+    /// the artifact hash from a normalized path (the caller never supplies it);
+    /// `recorded_by` is the envelope actor, captured by the reducer — not a payload
+    /// field. The evidence can later be referenced by a `resolved` disposition.
+    pub fn record_evidence(
+        &self,
+        task_id: &str,
+        evidence_id: &str,
+        oracle_kind: &str,
+        source_ref: Option<&str>,
+        artifact_path: &str,
+    ) -> Result<Event> {
+        let (rel, hash) = self.hash_evidence(artifact_path)?;
+        let mut payload = serde_json::json!({
+            "evidence_id": evidence_id,
+            "oracle_kind": oracle_kind,
+            "artifact_path": rel,
+            "artifact_hash": hash,
+            "trust_level": crate::domain::task::EVIDENCE_TRUST_LEVEL,
+        });
+        if let Some(source) = source_ref {
+            payload["source_ref"] = serde_json::json!(source);
+        }
+        let event = self.build_event(task_id, "evidence_recorded", payload)?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
             self.rebuild_task_view(task_id)?;
@@ -1017,8 +1059,30 @@ impl ControlApp {
             status: u.status.as_str().to_string(),
             source: u.source.clone(),
             evidence,
+            evidence_id: u.evidence_id.clone(),
+            oracle_kind: u.oracle_kind.map(|k| k.as_str().to_string()),
+            advisory: u.oracle_kind.map(|k| k.is_advisory()).unwrap_or(false),
             reason: u.reason.clone(),
         }
+    }
+
+    /// Aggregate the task's recorded evidence into per-oracle-kind counts. Raw counts
+    /// only; `model` is kept on its own `model_advisory` line so it can never be summed
+    /// into "external proof".
+    fn oracle_sources_view(&self, state: &TaskState) -> crate::domain::task::OracleSourcesView {
+        use crate::domain::task::{OracleKind, OracleSourcesView};
+        let mut view = OracleSourcesView::default();
+        for e in &state.evidences {
+            match e.oracle_kind {
+                OracleKind::Deterministic => view.deterministic += 1,
+                OracleKind::Test => view.test += 1,
+                OracleKind::Runtime => view.runtime += 1,
+                OracleKind::Human => view.human += 1,
+                OracleKind::Model => view.model_advisory += 1,
+                OracleKind::ExternalAuthority => view.external_authority += 1,
+            }
+        }
+        view
     }
 
     /// Build a fact-only uncertainty-ledger view, resolving evidence freshness
@@ -1053,6 +1117,7 @@ impl ControlApp {
             resolved,
             invalidated,
             trust_level: UNCERTAINTY_TRUST_LEVEL.to_string(),
+            oracle_sources: self.oracle_sources_view(state),
             items,
         })
     }
@@ -5284,10 +5349,10 @@ mod tests {
         app.record_uncertainty("t", "U-1", "needs proof", None)
             .unwrap();
         let err = app
-            .record_uncertainty_disposition("t", "U-1", "resolved", None, None)
+            .record_uncertainty_disposition("t", "U-1", "resolved", None, None, None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("requires evidence_path"), "got: {err}");
+        assert!(err.contains("'resolved' requires evidence"), "got: {err}");
     }
 
     #[test]
@@ -5298,7 +5363,7 @@ mod tests {
         app.record_uncertainty("t", "U-1", "proven?", None).unwrap();
         let ev = app.project_root.join("src").join("ev.txt");
         std::fs::write(&ev, b"PASS exit=0").unwrap();
-        app.record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None)
+        app.record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None, None)
             .unwrap();
         let state = app.get_status("t").unwrap();
         let u = &state.uncertainties[0];
@@ -5353,6 +5418,7 @@ mod tests {
                 "accepted_as_assumption",
                 Some("src/ev.txt"),
                 None,
+                None,
             )
             .unwrap_err()
             .to_string();
@@ -5362,6 +5428,7 @@ mod tests {
             "t",
             "U-1",
             "accepted_as_assumption",
+            None,
             None,
             Some("ship"),
         )
@@ -5381,12 +5448,19 @@ mod tests {
         seed_uncertainty_task(&app, "t");
         app.record_uncertainty("t", "U-1", "moot?", None).unwrap();
         let no_reason = app
-            .record_uncertainty_disposition("t", "U-1", "invalidated", None, None)
+            .record_uncertainty_disposition("t", "U-1", "invalidated", None, None, None)
             .unwrap_err()
             .to_string();
         assert!(no_reason.contains("requires a reason"), "got: {no_reason}");
-        app.record_uncertainty_disposition("t", "U-1", "invalidated", None, Some("premise gone"))
-            .unwrap();
+        app.record_uncertainty_disposition(
+            "t",
+            "U-1",
+            "invalidated",
+            None,
+            None,
+            Some("premise gone"),
+        )
+        .unwrap();
         let state = app.get_status("t").unwrap();
         assert_eq!(state.uncertainties[0].status.as_str(), "invalidated");
         assert_eq!(
@@ -5402,12 +5476,12 @@ mod tests {
         seed_uncertainty_task(&app, "t");
         app.record_uncertainty("t", "U-1", "assume then upgrade?", None)
             .unwrap();
-        app.record_uncertainty_disposition("t", "U-1", "accepted_as_assumption", None, None)
+        app.record_uncertainty_disposition("t", "U-1", "accepted_as_assumption", None, None, None)
             .unwrap();
         std::fs::write(app.project_root.join("src").join("ev.txt"), b"x").unwrap();
         // Silent upgrade assumption → resolved is impossible: terminal-is-terminal.
         let err = app
-            .record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None)
+            .record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("is terminal"), "got: {err}");
@@ -5419,10 +5493,249 @@ mod tests {
         let app = ControlApp::init(dir.path()).unwrap();
         seed_uncertainty_task(&app, "t");
         let err = app
-            .record_uncertainty_disposition("t", "U-X", "accepted_as_assumption", None, None)
+            .record_uncertainty_disposition("t", "U-X", "accepted_as_assumption", None, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown uncertainty"), "got: {err}");
+    }
+
+    // ── Oracle V1: first-class, oracle-typed evidence ──
+    // Evidence becomes a recorded object carrying oracle_kind; a `resolved` can
+    // reference it by id. The control layer discloses the oracle kind; it never
+    // vouches for the claim. `model` is advisory; legacy inline replay is preserved.
+
+    #[test]
+    fn evidence_recorded_then_resolve_via_ref_binds_oracle_kind() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "proven by a test?", None)
+            .unwrap();
+        let ev = app.project_root.join("src").join("test-log.txt");
+        std::fs::write(&ev, b"running 1 test ... ok").unwrap();
+        app.record_evidence(
+            "t",
+            "E-1",
+            "test",
+            Some("cargo test oracle"),
+            "src/test-log.txt",
+        )
+        .unwrap();
+        app.record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-1"), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let u = &state.uncertainties[0];
+        assert_eq!(u.status.as_str(), "resolved");
+        assert_eq!(u.evidence_id.as_deref(), Some("E-1"));
+        assert_eq!(u.oracle_kind.unwrap().as_str(), "test");
+        // The evidence's artifact is copied onto the uncertainty so freshness resolves
+        // uniformly with the legacy inline path.
+        assert_eq!(
+            u.evidence_ref.as_ref().unwrap().hash,
+            hash_file(&ev).unwrap()
+        );
+        // recorded_by is the envelope actor, never a separate forgeable field.
+        assert_eq!(state.evidences[0].recorded_by, app.actor);
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!(view.oracle_sources.test, 1);
+        assert_eq!(view.items[0].oracle_kind.as_deref(), Some("test"));
+        assert!(!view.items[0].advisory);
+    }
+
+    #[test]
+    fn resolve_via_unknown_evidence_ref_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "needs proof", None)
+            .unwrap();
+        let err = app
+            .record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-404"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not reference a recorded evidence"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_with_both_evidence_ref_and_inline_rejected() {
+        // Critic C1: a resolve must never carry both evidence shapes. The app-layer
+        // guard rejects before any hashing; the schema and reducer also forbid it.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "double-bound?", None)
+            .unwrap();
+        let ev = app.project_root.join("src").join("ev.txt");
+        std::fs::write(&ev, b"x").unwrap();
+        app.record_evidence("t", "E-1", "deterministic", None, "src/ev.txt")
+            .unwrap();
+        let err = app
+            .record_uncertainty_disposition(
+                "t",
+                "U-1",
+                "resolved",
+                Some("src/ev.txt"),
+                Some("E-1"),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("never both"), "got: {err}");
+    }
+
+    #[test]
+    fn evidence_duplicate_id_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        let ev = app.project_root.join("src").join("ev.txt");
+        std::fs::write(&ev, b"x").unwrap();
+        app.record_evidence("t", "E-1", "deterministic", None, "src/ev.txt")
+            .unwrap();
+        let err = app
+            .record_evidence("t", "E-1", "test", None, "src/ev.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already recorded"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_oracle_kind_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        let ev = app.project_root.join("src").join("ev.txt");
+        std::fs::write(&ev, b"x").unwrap();
+        // Schema rejects a value outside the fixed enum before the reducer runs.
+        let err = app
+            .record_evidence("t", "E-1", "vibes", None, "src/ev.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("oracle_kind") || err.contains("schema"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn model_oracle_disclosed_advisory_never_external_proof() {
+        // EPISTEMIC_CONTROL: a model oracle is advisory. It may back a resolve, but
+        // the disclosure marks it advisory and keeps it on its own ORACLE SOURCES line.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "did a model say so?", None)
+            .unwrap();
+        let ev = app.project_root.join("src").join("model-note.md");
+        std::fs::write(&ev, b"the model believes X").unwrap();
+        app.record_evidence(
+            "t",
+            "E-1",
+            "model",
+            Some("BS-UO1 critic"),
+            "src/model-note.md",
+        )
+        .unwrap();
+        app.record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-1"), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!(view.oracle_sources.model_advisory, 1);
+        assert!(view.items[0].advisory);
+        assert_eq!(view.items[0].oracle_kind.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn research_artifact_usable_as_evidence_source() {
+        // §六: a research/spike artifact can be referenced as the file-backed evidence
+        // an uncertainty is resolved against (oracle_kind labels it; content stays L0).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "what did the spike find?", None)
+            .unwrap();
+        let findings = app.project_root.join("src").join("findings.md");
+        std::fs::write(&findings, b"# findings\nthe API is idempotent").unwrap();
+        app.record_evidence(
+            "t",
+            "E-1",
+            "external_authority",
+            Some("research-spike findings.md"),
+            "src/findings.md",
+        )
+        .unwrap();
+        app.record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-1"), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        assert_eq!(state.uncertainties[0].status.as_str(), "resolved");
+        assert_eq!(
+            state.evidences[0].source_ref.as_deref(),
+            Some("research-spike findings.md")
+        );
+    }
+
+    #[test]
+    fn legacy_inline_resolve_still_replays_after_oracle_v1() {
+        // Backward compatibility: the legacy inline (evidence_path+evidence_hash)
+        // resolve shape — with no evidence_ref and no recorded evidence object — must
+        // still replay unchanged. oracle_kind is unknown (None) for legacy resolves.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "legacy?", None).unwrap();
+        let ev = app.project_root.join("src").join("legacy.txt");
+        std::fs::write(&ev, b"legacy evidence").unwrap();
+        app.record_uncertainty_disposition(
+            "t",
+            "U-1",
+            "resolved",
+            Some("src/legacy.txt"),
+            None,
+            None,
+        )
+        .unwrap();
+        // Replay from canonical events rebuilds the same state.
+        let state = app.replay_task("t").unwrap();
+        let u = &state.uncertainties[0];
+        assert_eq!(u.status.as_str(), "resolved");
+        assert!(u.evidence_id.is_none());
+        assert!(u.oracle_kind.is_none());
+        assert!(u.evidence_ref.is_some());
+        // No recorded evidence object; ORACLE SOURCES is all-zero.
+        assert!(state.evidences.is_empty());
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!(
+            view.oracle_sources.deterministic + view.oracle_sources.test,
+            0
+        );
+    }
+
+    #[test]
+    fn uncertainty_ledger_json_has_no_epistemic_verdict() {
+        // §七.10: the JSON disclosure carries raw facts only — no verdict / score /
+        // percentage / pass-fail roll-up of the epistemic dimension.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "open one", None)
+            .unwrap();
+        let ev = app.project_root.join("src").join("m.md");
+        std::fs::write(&ev, b"model says").unwrap();
+        app.record_evidence("t", "E-1", "model", None, "src/m.md")
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        let json = serde_json::to_string(&view).unwrap().to_lowercase();
+        assert!(!json.contains("verdict"));
+        assert!(!json.contains("score"));
+        assert!(!json.contains("confidence"));
+        assert!(!json.contains('%'));
+        // It does carry the honest texture: the model oracle and its advisory flag.
+        assert!(json.contains("model_advisory"));
+        assert!(json.contains("\"advisory\""));
     }
 
     // ── Research/Spike V1 ──
