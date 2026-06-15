@@ -79,7 +79,9 @@
         "run_aborted",
         "brainstorm_artifact_recorded",
         "critic_artifact_attached",
-        "brainstorm_skipped"
+        "brainstorm_skipped",
+        "uncertainty_recorded",
+        "uncertainty_disposition_recorded"
       ]
     },
     "payload": {
@@ -1284,6 +1286,96 @@
               },
               "source_run_id": {
                 "description": "Claimed originating run id, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "uncertainty_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Uncertainty Ledger V1: records an open unknown. Record-only; never gates; the statement and source are L0 content the control layer does not vouch for.",
+            "required": ["uncertainty_id", "statement"],
+            "properties": {
+              "uncertainty_id": {
+                "description": "Stable identifier for the uncertainty, unique within its task.",
+                "type": "string",
+                "minLength": 1
+              },
+              "statement": {
+                "description": "The unknown, in plain text. L0 content.",
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "description": "Free-text note on where the uncertainty came from. UNATTESTED — a claim, not verified provenance.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "uncertainty_disposition_recorded" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Uncertainty Ledger V1: terminal disposition of an open uncertainty. resolved requires hash-bound evidence; accepted_as_assumption and invalidated must NOT carry evidence; invalidated requires a reason. Terminal-is-terminal: enforced by the reducer.",
+            "required": ["uncertainty_id", "disposition"],
+            "properties": {
+              "uncertainty_id": {
+                "description": "Identifier of the uncertainty being disposed.",
+                "type": "string",
+                "minLength": 1
+              },
+              "disposition": {
+                "description": "Terminal disposition. resolved = closed by external evidence; accepted_as_assumption = proceeding on faith, visibly unresolved; invalidated = no longer applies.",
+                "type": "string",
+                "enum": ["resolved", "accepted_as_assumption", "invalidated"]
+              },
+              "evidence_path": {
+                "description": "Normalized repo-relative path to the evidence artifact (resolved only). Computed and hashed by ctl, not the caller.",
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_hash": {
+                "description": "SHA-256 of the evidence artifact at disposition time. Freshness is derived lazily; this never asserts the evidence content is valid.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "description": "Why the disposition was recorded. Required for invalidated; optional context otherwise.",
                 "type": "string",
                 "minLength": 1
               },

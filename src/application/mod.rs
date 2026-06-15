@@ -854,6 +854,148 @@ impl ControlApp {
         })
     }
 
+    // ── Uncertainty Ledger V1: record-and-disclose unknowns ──
+    //
+    // record_uncertainty + record_uncertainty_disposition emit the two canonical
+    // events; the view resolves evidence freshness against the working tree. Never
+    // gates, never scores, never renders an aggregate verdict.
+
+    /// Normalize an evidence path (reject `..`, absolute, UNC, symlink escape),
+    /// then hash the file ctl-side. Returns `(repo-relative path, sha256)`. The
+    /// caller never supplies the hash, so the binding is a faithful record of what
+    /// was on disk — not a claim the caller could forge.
+    fn hash_evidence(&self, path: &str) -> Result<(String, String)> {
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+        let normalized = normalizer
+            .normalize(path)
+            .map_err(|e| anyhow!("invalid evidence path '{}': {}", path, e))?;
+        let rel = path_to_payload_string(&normalized);
+        let resolved = self.project_root.join(&rel);
+        if !resolved.is_file() {
+            return Err(anyhow!("evidence artifact not found: {}", rel));
+        }
+        let hash = hash_file(&resolved)?;
+        Ok((rel, hash))
+    }
+
+    /// Record an open uncertainty (an unknown the task carries).
+    pub fn record_uncertainty(
+        &self,
+        task_id: &str,
+        uncertainty_id: &str,
+        statement: &str,
+        source: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "uncertainty_id": uncertainty_id,
+            "statement": statement,
+            "trust_level": crate::domain::task::UNCERTAINTY_TRUST_LEVEL,
+        });
+        if let Some(source) = source {
+            payload["source"] = serde_json::json!(source);
+        }
+        let event = self.build_event(task_id, "uncertainty_recorded", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Record a terminal disposition for an uncertainty. `resolved` requires an
+    /// evidence artifact (hashed ctl-side); `accepted_as_assumption` and
+    /// `invalidated` must not carry evidence. The reducer enforces terminal-is-
+    /// terminal and the disposition-specific evidence/reason rules.
+    pub fn record_uncertainty_disposition(
+        &self,
+        task_id: &str,
+        uncertainty_id: &str,
+        disposition: &str,
+        evidence_path: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "uncertainty_id": uncertainty_id,
+            "disposition": disposition,
+            "trust_level": crate::domain::task::UNCERTAINTY_TRUST_LEVEL,
+        });
+        if let Some(path) = evidence_path {
+            let (rel, hash) = self.hash_evidence(path)?;
+            payload["evidence_path"] = serde_json::json!(rel);
+            payload["evidence_hash"] = serde_json::json!(hash);
+        }
+        if let Some(reason) = reason {
+            payload["reason"] = serde_json::json!(reason);
+        }
+        let event = self.build_event(task_id, "uncertainty_disposition_recorded", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// Build a fact-only uncertainty-ledger view, resolving evidence freshness
+    /// against the working tree. Returns None when the task records no uncertainty.
+    pub fn uncertainty_ledger_view(
+        &self,
+        state: &TaskState,
+    ) -> Option<crate::domain::task::UncertaintyLedgerView> {
+        use crate::domain::task::{
+            EvidenceFreshness, EvidenceView, UncertaintyItemView, UncertaintyLedgerView,
+            UncertaintyStatus, UNCERTAINTY_TRUST_LEVEL,
+        };
+        if state.uncertainties.is_empty() {
+            return None;
+        }
+        let (mut open, mut accepted_as_assumption, mut resolved, mut invalidated) = (0, 0, 0, 0);
+        let mut items = Vec::with_capacity(state.uncertainties.len());
+        for uncertainty in &state.uncertainties {
+            match uncertainty.status {
+                UncertaintyStatus::Open => open += 1,
+                UncertaintyStatus::AcceptedAsAssumption => accepted_as_assumption += 1,
+                UncertaintyStatus::Resolved => resolved += 1,
+                UncertaintyStatus::Invalidated => invalidated += 1,
+            }
+            let evidence = uncertainty.evidence_ref.as_ref().map(|ev| {
+                let resolved_path = self.project_root.join(&ev.path);
+                // Freshness is whether the file still matches the recorded hash —
+                // it never asserts the evidence content is valid.
+                let freshness = if !resolved_path.is_file() {
+                    EvidenceFreshness::Absent
+                } else if hash_file(&resolved_path).ok().as_deref() == Some(ev.hash.as_str()) {
+                    EvidenceFreshness::Current
+                } else {
+                    EvidenceFreshness::Stale
+                };
+                EvidenceView {
+                    path: ev.path.clone(),
+                    recorded_hash: ev.hash.clone(),
+                    freshness,
+                    attested: false,
+                }
+            });
+            items.push(UncertaintyItemView {
+                id: uncertainty.id.clone(),
+                statement: uncertainty.statement.clone(),
+                status: uncertainty.status.as_str().to_string(),
+                source: uncertainty.source.clone(),
+                evidence,
+                reason: uncertainty.reason.clone(),
+            });
+        }
+        Some(UncertaintyLedgerView {
+            open,
+            accepted_as_assumption,
+            resolved,
+            invalidated,
+            trust_level: UNCERTAINTY_TRUST_LEVEL.to_string(),
+            items,
+        })
+    }
+
     /// Build a context snapshot: hash all files within the task read scope.
     pub fn build_context(&self, task_id: &str) -> Result<serde_json::Value> {
         let state = self.replay_task(task_id)?;
@@ -4856,5 +4998,204 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── Uncertainty Ledger V1 ──
+    // Record-and-disclose unknowns: open lifecycle, resolved-needs-evidence,
+    // terminal-is-terminal, and evidence freshness — without gating or verdict.
+
+    fn seed_uncertainty_task(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "uncertainty ledger",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn uncertainty_recorded_is_open_l0_content() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "does the gate kill the tree?", Some("review"))
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        assert_eq!(state.uncertainties.len(), 1);
+        assert_eq!(state.uncertainties[0].status.as_str(), "open");
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!((view.open, view.resolved), (1, 0));
+        // Recording an unknown never raises trust above bare content.
+        assert_eq!(view.trust_level, "content_l0");
+    }
+
+    #[test]
+    fn uncertainty_duplicate_id_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "first", None).unwrap();
+        let err = app
+            .record_uncertainty("t", "U-1", "again", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already recorded"), "got: {err}");
+    }
+
+    #[test]
+    fn uncertainty_resolved_requires_evidence() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "needs proof", None)
+            .unwrap();
+        let err = app
+            .record_uncertainty_disposition("t", "U-1", "resolved", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires evidence_path"), "got: {err}");
+    }
+
+    #[test]
+    fn uncertainty_resolved_binds_hashed_evidence_and_tracks_freshness() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "proven?", None).unwrap();
+        let ev = app.project_root.join("src").join("ev.txt");
+        std::fs::write(&ev, b"PASS exit=0").unwrap();
+        app.record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None)
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        let u = &state.uncertainties[0];
+        assert_eq!(u.status.as_str(), "resolved");
+        // ctl computes the hash from the path; it equals hashing the file directly.
+        assert_eq!(
+            u.evidence_ref.as_ref().unwrap().hash,
+            hash_file(&ev).unwrap()
+        );
+        // Fresh immediately; never attested.
+        let view = app.uncertainty_ledger_view(&state).unwrap();
+        let evidence = view.items[0].evidence.as_ref().unwrap();
+        assert_eq!(evidence.freshness.as_str(), "CURRENT");
+        assert!(!evidence.attested);
+        // Edited → STALE; deleted → ABSENT.
+        std::fs::write(&ev, b"MUTATED").unwrap();
+        let edited = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!(
+            edited.items[0]
+                .evidence
+                .as_ref()
+                .unwrap()
+                .freshness
+                .as_str(),
+            "STALE"
+        );
+        std::fs::remove_file(&ev).unwrap();
+        let removed = app.uncertainty_ledger_view(&state).unwrap();
+        assert_eq!(
+            removed.items[0]
+                .evidence
+                .as_ref()
+                .unwrap()
+                .freshness
+                .as_str(),
+            "ABSENT"
+        );
+    }
+
+    #[test]
+    fn uncertainty_assumption_rejects_evidence_stays_unresolved() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "assume it", None)
+            .unwrap();
+        std::fs::write(app.project_root.join("src").join("ev.txt"), b"x").unwrap();
+        let err = app
+            .record_uncertainty_disposition(
+                "t",
+                "U-1",
+                "accepted_as_assumption",
+                Some("src/ev.txt"),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not carry evidence"), "got: {err}");
+        // Without evidence it stays visibly unresolved by external evidence.
+        app.record_uncertainty_disposition(
+            "t",
+            "U-1",
+            "accepted_as_assumption",
+            None,
+            Some("ship"),
+        )
+        .unwrap();
+        let state = app.get_status("t").unwrap();
+        assert_eq!(
+            state.uncertainties[0].status.as_str(),
+            "accepted_as_assumption"
+        );
+        assert!(state.uncertainties[0].evidence_ref.is_none());
+    }
+
+    #[test]
+    fn uncertainty_invalidated_requires_reason_rejects_evidence() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "moot?", None).unwrap();
+        let no_reason = app
+            .record_uncertainty_disposition("t", "U-1", "invalidated", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(no_reason.contains("requires a reason"), "got: {no_reason}");
+        app.record_uncertainty_disposition("t", "U-1", "invalidated", None, Some("premise gone"))
+            .unwrap();
+        let state = app.get_status("t").unwrap();
+        assert_eq!(state.uncertainties[0].status.as_str(), "invalidated");
+        assert_eq!(
+            state.uncertainties[0].reason.as_deref(),
+            Some("premise gone")
+        );
+    }
+
+    #[test]
+    fn uncertainty_disposition_is_terminal() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "assume then upgrade?", None)
+            .unwrap();
+        app.record_uncertainty_disposition("t", "U-1", "accepted_as_assumption", None, None)
+            .unwrap();
+        std::fs::write(app.project_root.join("src").join("ev.txt"), b"x").unwrap();
+        // Silent upgrade assumption → resolved is impossible: terminal-is-terminal.
+        let err = app
+            .record_uncertainty_disposition("t", "U-1", "resolved", Some("src/ev.txt"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is terminal"), "got: {err}");
+    }
+
+    #[test]
+    fn uncertainty_disposition_unknown_id_rejected() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        let err = app
+            .record_uncertainty_disposition("t", "U-X", "accepted_as_assumption", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown uncertainty"), "got: {err}");
     }
 }

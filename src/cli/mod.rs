@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -171,6 +171,12 @@ enum Commands {
         #[command(subcommand)]
         command: BrainstormCommands,
     },
+    /// Uncertainty ledger (V1): record-and-disclose the unknowns a task carries.
+    /// Record-only — never gates, never scores, never renders a verdict.
+    Uncertainty {
+        #[command(subcommand)]
+        command: UncertaintyCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +234,74 @@ enum BrainstormCommands {
     },
     /// Show a task's brainstorm provenance (fact-only; staleness resolved).
     Show {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+/// Terminal disposition of an uncertainty (V1). Rendered kebab-case on the CLI;
+/// mapped to the canonical snake_case payload value.
+#[derive(Clone, Copy, ValueEnum)]
+enum DispositionArg {
+    /// Closed by external evidence (requires --evidence).
+    Resolved,
+    /// Proceeding on faith; stays visibly unresolved by external evidence.
+    AcceptedAsAssumption,
+    /// No longer applies (requires --reason; never carries evidence).
+    Invalidated,
+}
+
+impl DispositionArg {
+    fn as_payload(&self) -> &'static str {
+        match self {
+            DispositionArg::Resolved => "resolved",
+            DispositionArg::AcceptedAsAssumption => "accepted_as_assumption",
+            DispositionArg::Invalidated => "invalidated",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum UncertaintyCommands {
+    /// Record an open uncertainty (an unknown the task carries).
+    Record {
+        /// Task identifier to bind the uncertainty to
+        #[arg(long)]
+        id: String,
+        /// Stable uncertainty identifier (e.g. U-001), unique within the task
+        #[arg(long = "uncertainty")]
+        uncertainty: String,
+        /// The unknown, in plain text
+        #[arg(long)]
+        statement: String,
+        /// Free-text note on where it came from (unattested)
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Record a terminal disposition for an uncertainty.
+    Dispose {
+        #[arg(long)]
+        id: String,
+        #[arg(long = "uncertainty")]
+        uncertainty: String,
+        /// How the uncertainty was disposed
+        #[arg(long, value_enum)]
+        disposition: DispositionArg,
+        /// Path to the evidence artifact (resolved only; hashed by ctl)
+        #[arg(long)]
+        evidence: Option<String>,
+        /// Why it was disposed (required for invalidated)
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show a task's uncertainty ledger (fact-only; freshness resolved).
+    Status {
         #[arg(long)]
         id: String,
         #[arg(long, default_value_t = false)]
@@ -773,6 +847,7 @@ pub fn run() -> Result<()> {
         Commands::Drift { command } => cmd_drift(command),
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
+        Commands::Uncertainty { command } => cmd_uncertainty(command),
     }
 }
 
@@ -1847,6 +1922,103 @@ fn cmd_brainstorm(command: &BrainstormCommands) -> Result<()> {
                 Some(view) => print_brainstorm_provenance(&view),
                 None if *json => println!("null"),
                 None => println!("No brainstorm provenance recorded for task '{}'.", id),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render an uncertainty ledger as fact-only disclosure: raw per-status counts
+/// and the items, each with source and (for resolved) evidence freshness. NEVER
+/// emits an aggregate verdict, score, ratio, percentage, or green marker — and
+/// always discloses that the content is unverified and evidence unattested.
+fn format_uncertainty_ledger(view: &crate::domain::task::UncertaintyLedgerView) -> String {
+    let mut out = String::new();
+    out.push_str("UNCERTAINTIES  (content: unverified; evidence: unattested)\n");
+    out.push_str(&format!("  open: {}\n", view.open));
+    out.push_str(&format!(
+        "  accepted as assumptions: {}\n",
+        view.accepted_as_assumption
+    ));
+    out.push_str(&format!("  resolved with evidence: {}\n", view.resolved));
+    out.push_str(&format!("  invalidated: {}\n", view.invalidated));
+    out.push_str(&format!(
+        "  trust level: {} (untrusted content)\n",
+        view.trust_level
+    ));
+    for item in &view.items {
+        out.push('\n');
+        out.push_str(&format!("  {}  {}\n", item.id, item.status.to_uppercase()));
+        out.push_str(&format!("    statement: {}\n", item.statement));
+        if let Some(source) = &item.source {
+            out.push_str(&format!("    source: {source} (unattested)\n"));
+        }
+        if let Some(evidence) = &item.evidence {
+            out.push_str(&format!(
+                "    evidence: {} @ {}\n",
+                evidence.path, evidence.recorded_hash
+            ));
+            out.push_str(&format!(
+                "    freshness: {} (file consistency only; attestation: unavailable)\n",
+                evidence.freshness.as_str()
+            ));
+        }
+        if let Some(reason) = &item.reason {
+            out.push_str(&format!("    reason: {reason}\n"));
+        }
+    }
+    out
+}
+
+fn cmd_uncertainty(command: &UncertaintyCommands) -> Result<()> {
+    match command {
+        UncertaintyCommands::Record {
+            id,
+            uncertainty,
+            statement,
+            source,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_uncertainty(id, uncertainty, statement, source.as_deref())?;
+            println!(
+                "Recorded uncertainty '{}' on task '{}' at seq {}.",
+                uncertainty, id, event.seq
+            );
+        }
+        UncertaintyCommands::Dispose {
+            id,
+            uncertainty,
+            disposition,
+            evidence,
+            reason,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_uncertainty_disposition(
+                id,
+                uncertainty,
+                disposition.as_payload(),
+                evidence.as_deref(),
+                reason.as_deref(),
+            )?;
+            println!(
+                "Recorded disposition '{}' for uncertainty '{}' on task '{}' at seq {}.",
+                disposition.as_payload(),
+                uncertainty,
+                id,
+                event.seq
+            );
+        }
+        UncertaintyCommands::Status { id, json } => {
+            let app = app_open(false)?;
+            let state = app.get_status(id)?;
+            let ledger = app.uncertainty_ledger_view(&state);
+            match ledger {
+                Some(view) if *json => println!("{}", serde_json::to_string_pretty(&view)?),
+                Some(view) => print!("{}", format_uncertainty_ledger(&view)),
+                None if *json => println!("null"),
+                None => println!("No uncertainties recorded for task '{}'.", id),
             }
         }
     }
@@ -4106,8 +4278,8 @@ fn cmd_hook_spec_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bash, format_brainstorm_provenance, resolve_active_governance, ActiveTask,
-        GovState,
+        classify_bash, format_brainstorm_provenance, format_uncertainty_ledger,
+        resolve_active_governance, ActiveTask, GovState,
     };
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
@@ -4304,5 +4476,48 @@ mod tests {
         assert!(out.contains("attestation: unavailable"));
         // L0 content trust disclosed, never elevated.
         assert!(out.contains("trust level: content_l0"));
+    }
+
+    #[test]
+    fn uncertainty_ledger_discloses_facts_never_a_verdict() {
+        // The ledger shows raw per-status counts and freshness, never a roll-up
+        // verdict, score, percentage, or green marker.
+        use crate::domain::task::{
+            EvidenceFreshness, EvidenceView, UncertaintyItemView, UncertaintyLedgerView,
+        };
+        let view = UncertaintyLedgerView {
+            open: 2,
+            accepted_as_assumption: 1,
+            resolved: 1,
+            invalidated: 1,
+            trust_level: "content_l0".into(),
+            items: vec![UncertaintyItemView {
+                id: "U-1".into(),
+                statement: "is the evidence external?".into(),
+                status: "resolved".into(),
+                source: Some("review".into()),
+                evidence: Some(EvidenceView {
+                    path: "tests/x.rs".into(),
+                    recorded_hash: "abc123".into(),
+                    freshness: EvidenceFreshness::Stale,
+                    attested: false,
+                }),
+                reason: None,
+            }],
+        };
+        let out = format_uncertainty_ledger(&view);
+        // Raw counts disclosed verbatim...
+        assert!(out.contains("open: 2"));
+        assert!(out.contains("resolved with evidence: 1"));
+        // ...freshness is file-consistency only, attestation unavailable...
+        assert!(out.contains("freshness: STALE"));
+        assert!(out.contains("attestation: unavailable"));
+        assert!(out.contains("evidence: unattested"));
+        assert!(out.contains("trust level: content_l0"));
+        // ...and never a verdict, score, percentage, or green marker.
+        assert!(!out.contains('✅'));
+        assert!(!out.contains('%'));
+        assert!(!out.to_uppercase().contains("PASS"));
+        assert!(!out.to_lowercase().contains("verdict"));
     }
 }

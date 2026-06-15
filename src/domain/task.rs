@@ -214,6 +214,123 @@ pub struct BrainstormProvenanceView {
     pub skip_decided_by: Option<String>,
 }
 
+// ── Uncertainty Ledger V1 ───────────────────────────────────────────────────
+//
+// A single record-and-disclose object for the unknowns a task carries. It never
+// gates create/finish and never renders an aggregate verdict — it makes the
+// remaining uncertainty visible and sourced. Two invariants are enforced by the
+// reducer (not merely by convention):
+//   - trust_level is always `content_l0` — the statement/source are unverified
+//     content; recording them never raises trust.
+//   - a disposition is terminal — once an uncertainty is resolved / accepted as
+//     an assumption / invalidated, a second disposition is rejected, so an
+//     assumption can never be silently upgraded to resolved.
+// `resolved` requires hash-bound evidence; `accepted_as_assumption` and
+// `invalidated` must NOT carry evidence (they remain unresolved by external
+// evidence). `evidence_ref` reuses `ArtifactRef`: ctl computes its hash, so the
+// control layer can derive freshness without ever asserting the content is true.
+
+/// Pinned trust level for every uncertainty event. Bare L0 content.
+pub const UNCERTAINTY_TRUST_LEVEL: &str = "content_l0";
+
+/// Lifecycle status of a single uncertainty. `Open` is the only non-terminal
+/// state; the three terminal states are reached via a disposition and never left
+/// in V1 (terminal-is-terminal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UncertaintyStatus {
+    Open,
+    Resolved,
+    AcceptedAsAssumption,
+    Invalidated,
+}
+
+impl UncertaintyStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UncertaintyStatus::Open => "open",
+            UncertaintyStatus::Resolved => "resolved",
+            UncertaintyStatus::AcceptedAsAssumption => "accepted_as_assumption",
+            UncertaintyStatus::Invalidated => "invalidated",
+        }
+    }
+}
+
+/// A single recorded unknown. `evidence_ref` is set only when `Resolved`;
+/// `reason` carries the "why" for `Invalidated` (and optional context otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Uncertainty {
+    pub id: String,
+    pub statement: String,
+    /// Free-text note on where it came from. UNATTESTED — a claim, not provenance.
+    pub source: Option<String>,
+    pub status: UncertaintyStatus,
+    /// Hash-bound evidence, present only when status is `Resolved`.
+    pub evidence_ref: Option<ArtifactRef>,
+    /// Why it was invalidated, or optional context on another disposition.
+    pub reason: Option<String>,
+}
+
+/// Freshness of a recorded evidence artifact, derived against the working tree.
+/// Discloses only whether the file still matches what was recorded — never
+/// whether the evidence content is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvidenceFreshness {
+    /// File present and hash matches what was recorded.
+    Current,
+    /// File present but its hash drifted from what was recorded.
+    Stale,
+    /// File no longer exists on disk.
+    Absent,
+}
+
+impl EvidenceFreshness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvidenceFreshness::Current => "CURRENT",
+            EvidenceFreshness::Stale => "STALE",
+            EvidenceFreshness::Absent => "ABSENT",
+        }
+    }
+}
+
+/// Fact-only view of one resolved uncertainty's evidence. `attested` is always
+/// `false` in V1 — a recorded hash is a binding, never an attestation of content.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EvidenceView {
+    pub path: String,
+    pub recorded_hash: String,
+    pub freshness: EvidenceFreshness,
+    /// Always `false` in V1.
+    pub attested: bool,
+}
+
+/// Fact-only view of one uncertainty for disclosure.
+#[derive(Debug, Clone, Serialize)]
+pub struct UncertaintyItemView {
+    pub id: String,
+    pub statement: String,
+    pub status: String,
+    pub source: Option<String>,
+    pub evidence: Option<EvidenceView>,
+    pub reason: Option<String>,
+}
+
+/// A fact-only rendering of a task's uncertainty ledger: raw per-status counts
+/// and the items, each with its source and (for resolved) evidence freshness.
+/// Deliberately carries NO aggregate verdict, score, ratio, or progress signal.
+#[derive(Debug, Clone, Serialize)]
+pub struct UncertaintyLedgerView {
+    pub open: usize,
+    pub accepted_as_assumption: usize,
+    pub resolved: usize,
+    pub invalidated: usize,
+    /// Always `content_l0` in V1.
+    pub trust_level: String,
+    pub items: Vec<UncertaintyItemView>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
     pub id: String,
@@ -245,6 +362,10 @@ pub struct TaskState {
     /// task created before this feature existed) — old streams replay unchanged.
     #[serde(default)]
     pub brainstorm_ref: Option<BrainstormRef>,
+    /// Uncertainty Ledger V1: the unknowns this task carries, in record order.
+    /// Default empty; absent in old streams, which replay unchanged.
+    #[serde(default)]
+    pub uncertainties: Vec<Uncertainty>,
     /// M4: Capability leases keyed by lease_id.
     pub leases: HashMap<String, LeaseState>,
     /// M4: Pending/approved/denied approval requests keyed by request_id.
@@ -274,6 +395,7 @@ impl TaskState {
             active_runs: Vec::new(),
             schedule_plan_id: None,
             brainstorm_ref: None,
+            uncertainties: Vec::new(),
             leases: HashMap::new(),
             pending_approvals: HashMap::new(),
             history: Vec::new(),
@@ -393,7 +515,7 @@ fn check_trust_level(payload: &serde_json::Value) -> Result<(), String> {
     if let Some(level) = payload.get("trust_level").and_then(|v| v.as_str()) {
         if level != BRAINSTORM_TRUST_LEVEL {
             return Err(format!(
-                "trust_level '{level}' cannot be recorded; brainstorm provenance is always \
+                "trust_level '{level}' cannot be recorded; provenance trust is always pinned to \
                  '{BRAINSTORM_TRUST_LEVEL}' (recording a reference never raises trust)"
             ));
         }
@@ -1180,6 +1302,94 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             reference.critic_independence = CRITIC_INDEPENDENCE_UNATTESTED.to_string();
             reference.skip_reason = Some(skip_reason);
             reference.skip_decided_by = Some(decided_by);
+        }
+        // ── Uncertainty Ledger V1: record-and-disclose unknowns ──
+        "uncertainty_recorded" => {
+            let id = require_str(&event.payload, "uncertainty_id")?;
+            let statement = require_str(&event.payload, "statement")?;
+            check_trust_level(&event.payload)?;
+            let source = optional_str(&event.payload, "source");
+            if state.uncertainties.iter().any(|u| u.id == id) {
+                return Err(format!(
+                    "uncertainty_recorded: uncertainty '{id}' already recorded"
+                ));
+            }
+            state.uncertainties.push(Uncertainty {
+                id,
+                statement,
+                source,
+                status: UncertaintyStatus::Open,
+                evidence_ref: None,
+                reason: None,
+            });
+        }
+        "uncertainty_disposition_recorded" => {
+            let id = require_str(&event.payload, "uncertainty_id")?;
+            check_trust_level(&event.payload)?;
+            let disposition = require_str(&event.payload, "disposition")?;
+            let evidence =
+                decode_artifact(&event.payload, "evidence_path", "evidence_hash", false)?;
+            let reason = optional_str(&event.payload, "reason");
+            let uncertainty = state
+                .uncertainties
+                .iter_mut()
+                .find(|u| u.id == id)
+                .ok_or_else(|| {
+                    format!("uncertainty_disposition_recorded: unknown uncertainty '{id}'")
+                })?;
+            // Terminal-is-terminal: a disposed uncertainty cannot be disposed
+            // again, so an assumption can never be silently upgraded to resolved.
+            if uncertainty.status != UncertaintyStatus::Open {
+                return Err(format!(
+                    "uncertainty_disposition_recorded: uncertainty '{id}' is already '{}'; \
+                     a disposition is terminal in V1",
+                    uncertainty.status.as_str()
+                ));
+            }
+            match disposition.as_str() {
+                "resolved" => {
+                    // resolved is the only disposition closed by external evidence.
+                    let evidence_ref = evidence.ok_or_else(|| {
+                        "uncertainty_disposition_recorded: 'resolved' requires evidence_path + \
+                         evidence_hash (an unknown closed without external evidence is not resolved)"
+                            .to_string()
+                    })?;
+                    uncertainty.status = UncertaintyStatus::Resolved;
+                    uncertainty.evidence_ref = Some(evidence_ref);
+                    uncertainty.reason = reason;
+                }
+                "accepted_as_assumption" => {
+                    // An assumption must remain visibly unresolved by external evidence.
+                    if evidence.is_some() {
+                        return Err("uncertainty_disposition_recorded: \
+                             'accepted_as_assumption' must not carry evidence (it remains \
+                             unresolved by external evidence); use reason"
+                            .to_string());
+                    }
+                    uncertainty.status = UncertaintyStatus::AcceptedAsAssumption;
+                    uncertainty.reason = reason;
+                }
+                "invalidated" => {
+                    // "I was wrong / it no longer applies" has no oracle: a reason,
+                    // never evidence, so it cannot masquerade as a proof.
+                    if evidence.is_some() {
+                        return Err("uncertainty_disposition_recorded: 'invalidated' must not \
+                             carry evidence; record why in reason"
+                            .to_string());
+                    }
+                    let reason = reason.ok_or_else(|| {
+                        "uncertainty_disposition_recorded: 'invalidated' requires a reason"
+                            .to_string()
+                    })?;
+                    uncertainty.status = UncertaintyStatus::Invalidated;
+                    uncertainty.reason = Some(reason);
+                }
+                other => {
+                    return Err(format!(
+                        "uncertainty_disposition_recorded: unknown disposition '{other}'"
+                    ));
+                }
+            }
         }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }
