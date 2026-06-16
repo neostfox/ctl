@@ -1,0 +1,58 @@
+name: ci
+
+# Fast correctness gate for every push and pull request: formatting, type
+# check, lints, tests, and the project's own architecture guardrail. Kept
+# separate from `release.yml` (which only runs on tags) so a regression is
+# caught before it can be tagged. The release job depends on this passing.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: fmt + check + clippy + test + architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # --locked: the committed Cargo.lock must already be in sync. CI must fail
+      # if a dependency change was not committed alongside it.
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --locked --all-targets
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Architecture check
+        run: cargo run --locked --quiet -- architecture check

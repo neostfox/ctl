@@ -1,6 +1,6 @@
 # Epistemic Control — ctl 的认识状态控制边界
 
-> 状态:设计冻结(design-frozen),尚未实现。本文件定义 `ctl` 在"执行控制"之上要补的一层——**认识状态控制(epistemic state control)**——的问题、边界、原则与最小本体。它描述目标状态,不描述当前已实现的能力。
+> 状态:本体设计冻结(design-frozen)。**V1 的 record-and-disclose 层已实现**——brainstorm 来源(`ctl brainstorm`)、不确定性账本(`ctl uncertainty`)、oracle-typed evidence、研究/spike 任务(`ctl research`)。但本文件描述的是**完整目标状态**:防篡改证据(L3)、需求/设计绑定的 gating、能 attest attestor 的独立信任根仍未实现。读时请按每一节标注的层级区分"已落地的记录与披露"与"仍是目标的验证保证"。本文件定义 `ctl` 在"执行控制"之上要补的一层——**认识状态控制(epistemic state control)**——的问题、边界、原则与最小本体。
 
 本文件是五轮设计评审的收敛产物。它的职责是把一组分散的评审意见,固化成一条 `ctl` 必须长期遵守的产品边界,防止后续开发在错误的抽象上扩张(尤其防止把 `control plane / audit / sandbox` 等词理解为当前实现能提供的安全保证)。
 

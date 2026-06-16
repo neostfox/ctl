@@ -31,7 +31,7 @@
 | **写入边界** | agent 可以改任何文件 | 每个任务声明 `write_allow`；越界写入由 hook **fail-closed 拦截** |
 | **事实源** | 散落的 Markdown 进度 | `events.jsonl` 追加式唯一事实源，`task.json` 由 replay 重建 |
 | **验收** | 「我觉得做完了」 | 机器可执行 gate（`cargo_check/test/fmt/clippy` …）通过才能推进状态 |
-| **可审计** | 全靠聊天记录回溯 | 每次状态变化都是一条带 hash / 来源 / 身份的 canonical event |
+| **可审计** | 全靠聊天记录回溯 | 每次状态变化都是一条带内容 hash、来源与 actor 标签的 canonical event |
 | **多工具治理** | 每个 CLI 一套规则 | 单一来源治理，OMP + Claude Code 共用同一套边界 |
 
 ---
@@ -70,14 +70,14 @@ irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | 
 
 ```bash
 # bash
-curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.1 --dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.2 --dir ~/.local/bin
 # 或用环境变量
-CTL_VERSION=v0.0.1 CTL_INSTALL_DIR=~/.local/bin sh install.sh
+CTL_VERSION=v0.0.2 CTL_INSTALL_DIR=~/.local/bin sh install.sh
 ```
 
 ```powershell
 # PowerShell
-$env:CTL_VERSION="v0.0.1"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
+$env:CTL_VERSION="v0.0.2"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
 ```
 
 **从源码构建：**
@@ -147,7 +147,26 @@ proposal → approval → scoped lease → implement → audit_hold
 - **确定性验收**：gate 是固定模板（无任意 shell），通过才允许 `in_progress → review → completed`。
 - **审计是权限状态，不是提示**：命中 schema / scope / 受保护路径 / 批量变更触发器后立即进入只读 `audit_hold`，由控制层独立核对，而非靠实现者自述「我做完了」。
 
+> **边界的诚实声明（这是机制护栏，不是密码学安全边界）：**
+> - **写入边界是 agent 工具 hook 层的 fail-closed 拦截，不是 OS 沙箱。** 它治理经 OMP / Claude Code hook 路由的写操作；一个不经 hook 的进程不受此边界约束。它是「可执行、可审计的边界」，不是内核级隔离。
+> - **`hash` 是内容/制品 hash（`tree_hash` / `policy_hash` / `evidence_hash`），保证的是信封完整性，不是内部声明的可信度。** 事件未做密码学签名；`actor` 是来源标签，不是被验证的身份主体。
+> - **并发多-run orchestration 仍是 experimental。** 单写者保证对每个 task / run 账本成立，但跨账本（task ↔ run）写入不是事务化的：崩溃可能留下不一致，由 `ctl doctor` 检出并给出手工恢复指引（控制层不自动改写状态）。
+
 > 完整的控制论映射、drift 计算、子智能体调度协议、schema 设计等详见 [DESIGN.md](./DESIGN.md)。
+
+---
+
+## 认识状态层（V1）
+
+执行控制环（scope → implement → gate → review → complete）照不到一个盲区：当使用者只给方向、由 AI 推演需求与设计时，一个全绿、全绑定的任务仍可能建在 AI 幻觉出的 spec 上。0.0.1 之后引入的**认识状态层**处理的就是这层不可观测性——但它的边界被刻意画死：
+
+> **这是 record-and-disclose，不是验证。** `ctl` 不证明思考发生过，也不证明结论正确；它只如实记录哪些运行与产物发生过、来自谁 / 什么、是否经过独立挑战，以及哪些未知被何种证据关闭。**产物存在 ≠ 思考质量存在；独立调用存在 ≠ 正确性存在。**
+
+- **Brainstorm 来源**（`ctl brainstorm`）：把一次思考的发散 / 挑战（critic）/ 收敛产物按 path+hash 绑定到任务。记录-only——从不门禁 create/finish，也从不声称「思考有质量」或「评审是独立的」。`source_run` 等字段是自报的，V1 不做证明。产物本身（L0）放在受 git 跟踪的顶层 `brainstorms/<id>/`，不进 `.ctl/`。
+- **不确定性账本**（`ctl uncertainty`）：把任务携带的未知显式记下来，并以 `resolved / accepted_as_assumption / invalidated` 了结。`resolved` 必须引用一条 oracle-typed evidence，其来源（确定性 / 测试 / 运行时 / 外部权威 / human / model）被如实披露。**`model` oracle 是顾问性的，不能 resolve 一个未知**——控制层在命令层拒绝以 model 证据 resolve；该约束只对新写入生效，规则之前已 resolve 的历史按 append-only 原样回放，披露时标为 ADVISORY。
+- **研究 / Spike 任务**（`ctl task create --kind research` + `ctl research`）：一类以证据 + 未知了结为产出、而非代码的任务。
+
+> 完整本体、四级信任（L0–L3）与披露模型见 [EPISTEMIC_CONTROL.md](./EPISTEMIC_CONTROL.md)。
 
 ---
 
@@ -157,15 +176,24 @@ proposal → approval → scoped lease → implement → audit_hold
 ctl init                              初始化 .ctl/ 账本与治理 hook
 ctl task create|ready|start|submit|finish|archive|status
                                       任务生命周期
+ctl task quick --write-allow <p>      create+ready+start 一步到位（边界仍显式）
 ctl context build                     生成 implement / check 上下文 manifest
 ctl gate run|record                   执行 / 记录验收闸门
-ctl assignment create|export          导出结构化任务包（manual adapter）
+ctl assignment export                 导出结构化任务包（manual adapter）
 ctl run ingest                        回填执行结果为 evidence
 ctl boundary check                    校验某次写入是否越界
 ctl replay | reconcile | validate     重建投影 / 校验事件流
 ctl audit | report | board            审计报告 / 任务总览 / 跨任务控制板
 ctl architecture check                架构合规（依赖方向、domain 纯度）
-ctl doctor                            诊断账本健康
+ctl doctor                            诊断账本健康（含跨账本一致性检测）
+ctl repair --task <id> [--apply]      截断崩溃残留的尾部坏记录（显式、先备份）
+
+# 认识状态层（V1）：只记录与披露，从不门禁 / 评分 / 裁决
+ctl brainstorm record|attach-critic|skip-critic|show
+                                      记录任务的思考产物来源与挑战痕迹
+ctl uncertainty record|evidence|dispose|status
+                                      记录并披露任务携带的未知与其了结证据
+ctl research record|status            研究 / spike 任务：以证据 + 未知了结产出，而非代码
 ```
 
 完整子命令见 `ctl --help`。
@@ -177,6 +205,7 @@ ctl doctor                            诊断账本健康
 | 文档 | 内容 |
 |---|---|
 | [DESIGN.md](./DESIGN.md) | 设计与愿景：控制论闭环、drift、子智能体、schema 冻结 |
+| [EPISTEMIC_CONTROL.md](./EPISTEMIC_CONTROL.md) | 认识状态层：record-and-disclose 边界、四级信任、不确定性本体 |
 | [ROADMAP.md](./ROADMAP.md) | 里程碑 M0–M6+ 与退出条件 |
 | [ARCHITECTURE_GUARDRAILS.md](./ARCHITECTURE_GUARDRAILS.md) | 必须遵守的架构约束 |
 | [GLOB_WORKFLOW.md](./GLOB_WORKFLOW.md) | 用 OMP `/glob` 分阶段推进实现 |

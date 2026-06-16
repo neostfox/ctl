@@ -945,6 +945,22 @@ impl ControlApp {
         statement: &str,
         source: Option<&str>,
     ) -> Result<Event> {
+        // Terminal-is-terminal: a completed/cancelled task's disclosed unknowns
+        // must not change after the fact (mirrors research_artifact_recorded).
+        // Enforced here at the command layer — the sole canonical-append path —
+        // and deliberately NOT in the reducer, so committed pre-rule streams that
+        // recorded an uncertainty post-terminal still replay byte-identically.
+        let state = self.replay_task(task_id)?;
+        if matches!(
+            state.phase,
+            crate::domain::task::Phase::Completed | crate::domain::task::Phase::Cancelled
+        ) {
+            return Err(anyhow!(
+                "task is '{}'; a terminal task cannot record further uncertainties — \
+                 the unknown set of a completed/cancelled task is fixed",
+                state.phase.as_str()
+            ));
+        }
         let mut payload = serde_json::json!({
             "uncertainty_id": uncertainty_id,
             "statement": statement,
@@ -1771,17 +1787,22 @@ impl ControlApp {
     }
 
     pub fn doctor(&self) -> Result<Vec<String>> {
+        use crate::domain::run::RunPhase;
+        use crate::domain::task::Phase;
+
         let mut results = Vec::new();
         let mut score: i32 = 100;
         let mut task_count = 0u32;
         let mut replay_errors = 0u32;
+        let mut inconsistencies = 0u32;
 
-        // Check events.jsonl readable
+        // ── Task ledgers ──
+        // Map of replayed task phases, used for the cross-ledger checks below.
+        let mut task_phases: std::collections::HashMap<String, Phase> =
+            std::collections::HashMap::new();
         match self.store.read_all() {
             Ok(events) => {
                 results.push(format!("events.jsonl: OK ({} events)", events.len()));
-
-                // Try to replay each task
                 let task_ids = self.store.task_ids()?;
                 task_count = task_ids.len() as u32;
                 for tid in &task_ids {
@@ -1791,6 +1812,7 @@ impl ControlApp {
                                 "Task '{}': {:?} (seq {})",
                                 tid, state.phase, state.last_seq
                             ));
+                            task_phases.insert(tid.clone(), state.phase);
                         }
                         Err(e) => {
                             replay_errors += 1;
@@ -1806,6 +1828,73 @@ impl ControlApp {
             }
         }
 
+        // ── Run ledgers + cross-ledger consistency ──
+        //
+        // Concurrent task/run orchestration is EXPERIMENTAL: a task transition and
+        // its run-ledger counterpart are two separate appends (each a single-writer
+        // append, but with no transaction spanning both). A crash between them can
+        // leave the ledgers disagreeing. ctl never auto-repairs this — doctor only
+        // surfaces the facts and the manual recovery step.
+        let run_store = self.run_store()?;
+        let run_ids = run_store.run_ids()?;
+        if !run_ids.is_empty() {
+            results.push(String::new());
+            results.push(format!("Runs: {} total (orchestration)", run_ids.len()));
+            for rid in &run_ids {
+                match self.replay_run(rid) {
+                    Ok(run) => {
+                        results.push(format!(
+                            "Run '{}': {:?} (task '{}', seq {})",
+                            rid, run.phase, run.task_id, run.last_seq
+                        ));
+                        // Cross-ledger: the run names a task with no ledger.
+                        if !run.task_id.is_empty() && !task_phases.contains_key(&run.task_id) {
+                            inconsistencies += 1;
+                            score -= 10;
+                            results.push(format!(
+                                "  INCONSISTENCY: run '{}' references task '{}', which has no \
+                                 ledger. Recover by replaying the run's events to confirm intent, \
+                                 then cancel the orphan run.",
+                                rid, run.task_id
+                            ));
+                        }
+                        // Cross-ledger: a live run whose task is already terminal —
+                        // the classic non-atomic window (task closed, run not).
+                        if run.phase == RunPhase::Running {
+                            if let Some(phase) = task_phases.get(&run.task_id) {
+                                if matches!(phase, Phase::Completed | Phase::Cancelled) {
+                                    inconsistencies += 1;
+                                    score -= 10;
+                                    results.push(format!(
+                                        "  INCONSISTENCY: run '{}' is Running but its task '{}' is \
+                                         {:?}. Recover by aborting the run (ctl run abort).",
+                                        rid, run.task_id, phase
+                                    ));
+                                }
+                            }
+                            // Worktree: a Running run must have its worktree on disk.
+                            if let Some(wt) = &run.worktree_path {
+                                if !std::path::Path::new(wt).exists() {
+                                    inconsistencies += 1;
+                                    score -= 10;
+                                    results.push(format!(
+                                        "  INCONSISTENCY: run '{}' is Running but its worktree '{}' \
+                                         is missing. Recover by aborting the run (ctl run abort).",
+                                        rid, wt
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        replay_errors += 1;
+                        score -= 15;
+                        results.push(format!("Run '{}': REPLAY ERROR: {}", rid, e));
+                    }
+                }
+            }
+        }
+
         // Health Score deductions
         if score < 0 {
             score = 0;
@@ -1816,8 +1905,62 @@ impl ControlApp {
             "Tasks: {} total, {} replay errors",
             task_count, replay_errors
         ));
+        results.push(format!(
+            "Runs: {} total, {} cross-ledger inconsistencies",
+            run_ids.len(),
+            inconsistencies
+        ));
+        if replay_errors > 0 {
+            results.push(
+                "A REPLAY ERROR may be a torn trailing record — run `ctl repair --task <id>` \
+                 (or --run <id>) to inspect and truncate it."
+                    .to_string(),
+            );
+        }
 
         Ok(results)
+    }
+
+    // ── Ledger torn-tail repair (explicit, opt-in) ──
+
+    /// Detect (and, when `apply`, truncate) a torn trailing record on one task's
+    /// event ledger. Read-only when `apply` is false.
+    pub fn repair_task_ledger(
+        &self,
+        task_id: &str,
+        apply: bool,
+    ) -> Result<crate::infrastructure::store::TailRepair> {
+        self.store.repair_task_ledger(task_id, apply)
+    }
+
+    /// Detect (and, when `apply`, truncate) a torn trailing record on one run's
+    /// event ledger. Read-only when `apply` is false.
+    pub fn repair_run_ledger(
+        &self,
+        run_id: &str,
+        apply: bool,
+    ) -> Result<crate::infrastructure::store::TailRepair> {
+        self.run_store()?.repair_run_ledger(run_id, apply)
+    }
+
+    /// Scan every task and run ledger for a torn trailing record, repairing when
+    /// `apply`. Returns `(label, outcome)` per ledger.
+    pub fn repair_all_ledgers(
+        &self,
+        apply: bool,
+    ) -> Result<Vec<(String, crate::infrastructure::store::TailRepair)>> {
+        let mut out = Vec::new();
+        for tid in self.store.task_ids()? {
+            out.push((
+                format!("task {tid}"),
+                self.store.repair_task_ledger(&tid, apply)?,
+            ));
+        }
+        let rs = self.run_store()?;
+        for rid in rs.run_ids()? {
+            out.push((format!("run {rid}"), rs.repair_run_ledger(&rid, apply)?));
+        }
+        Ok(out)
     }
 
     // ── Audit & Reports (M3) ──
@@ -5395,6 +5538,40 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn uncertainty_cannot_be_recorded_after_terminal() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        // Allowed while the task is live.
+        app.record_uncertainty("t", "U-1", "open question", None)
+            .unwrap();
+        // Drive to a terminal phase.
+        app.cancel_task("t").unwrap();
+        // The command layer refuses to grow a terminal task's unknown set.
+        let err = app
+            .record_uncertainty("t", "U-2", "too late", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("terminal task cannot record"), "got: {err}");
+        // Reducer stays permissive: a directly-appended post-terminal event still
+        // replays (append-only history is never re-rejected on replay).
+        let event = app
+            .build_event(
+                "t",
+                "uncertainty_recorded",
+                serde_json::json!({
+                    "uncertainty_id": "U-3",
+                    "statement": "committed pre-rule post-terminal record",
+                    "trust_level": crate::domain::task::UNCERTAINTY_TRUST_LEVEL,
+                }),
+            )
+            .unwrap();
+        app.validate_and_append(&event).unwrap();
+        let state = app.replay_task("t").unwrap();
+        assert!(state.uncertainties.iter().any(|u| u.id == "U-3"));
     }
 
     #[test]

@@ -17,8 +17,33 @@ permissions:
   contents: write
 
 jobs:
+  # A release must never ship code that fails the correctness gate. This mirrors
+  # ci.yml (fmt/check/clippy/test/architecture) so a tag build is self-contained
+  # and does not depend on a separate workflow's status.
+  verify:
+    name: verify (fmt + check + clippy + test + architecture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Architecture check
+        run: cargo run --locked --quiet -- architecture check
+
   build:
     name: build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,12 +71,20 @@ jobs:
           REF="${{ github.event.inputs.tag || github.ref_name }}"
           echo "VERSION=${REF#v}" >> "$GITHUB_ENV"
 
-      - name: Stamp version into Cargo.toml
+      - name: Verify tag matches Cargo.toml
         shell: bash
         run: |
-          # Ephemeral (runner-only): make `ctl --version` match the release tag.
-          perl -i -pe 'if (!$done && /^version = /) { s/^version = ".*"/version = "'"$VERSION"'"/; $done=1 }' Cargo.toml
-          grep -m1 '^version' Cargo.toml
+          # Release integrity: the committed Cargo.toml version is the source of
+          # truth and must equal the tag. This replaces the old runner-only
+          # version stamp, which desynced Cargo.lock and blocked --locked builds.
+          # `ctl --version` reads CARGO_PKG_VERSION, so a matching commit is what
+          # makes the shipped binary report the released version.
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "Cargo.toml: $CARGO_VERSION    tag: $VERSION"
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::tag v$VERSION does not match Cargo.toml version $CARGO_VERSION — bump Cargo.toml and commit before tagging"
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         shell: bash
@@ -70,9 +103,10 @@ jobs:
         shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        # No --locked: the version-stamp step above edits Cargo.toml, which
-        # would otherwise put Cargo.lock out of sync and fail --locked.
-        run: cargo build --release --target ${{ matrix.target }}
+        # --locked: build from the exact committed Cargo.lock. Cargo.toml is no
+        # longer edited on the runner (the tag now matches the committed version),
+        # so the lock stays in sync and a drifted lock fails the release.
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -101,7 +135,7 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
       - name: Resolve release tag

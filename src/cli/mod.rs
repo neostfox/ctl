@@ -13,7 +13,8 @@ use crate::infrastructure::boundary::normalizer::PathNormalizer;
 use crate::infrastructure::schema_validator::SchemaValidator;
 
 #[derive(Parser)]
-#[command(name = "control")]
+#[command(name = "ctl")]
+#[command(version)]
 #[command(about = "AI Dev Control Plane CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -44,6 +45,21 @@ enum Commands {
     Validate,
     /// Diagnose local task ledger health
     Doctor,
+    /// Truncate a torn trailing record from a ledger (explicit crash-recovery)
+    Repair {
+        /// Repair this task's event ledger
+        #[arg(long)]
+        task: Option<String>,
+        /// Repair this run's event ledger
+        #[arg(long)]
+        run: Option<String>,
+        /// Scan every task and run ledger
+        #[arg(long)]
+        all: bool,
+        /// Actually truncate the torn record; without this it only reports (dry-run)
+        #[arg(long)]
+        apply: bool,
+    },
     /// Schema validation commands
     Schema {
         #[command(subcommand)]
@@ -947,6 +963,12 @@ pub fn run() -> Result<()> {
         Commands::Reconcile => cmd_reconcile(),
         Commands::Validate => cmd_validate(),
         Commands::Doctor => cmd_doctor(),
+        Commands::Repair {
+            task,
+            run,
+            all,
+            apply,
+        } => cmd_repair(task.as_deref(), run.as_deref(), *all, *apply),
         Commands::Schema { command } => cmd_schema(command),
         Commands::Boundary { command } => cmd_boundary(command),
         Commands::Gate { command } => cmd_gate(command, dry_run),
@@ -1276,6 +1298,56 @@ fn cmd_doctor() -> Result<()> {
     }
     if has_error {
         return Err(anyhow::anyhow!("Doctor found task ledger errors"));
+    }
+    Ok(())
+}
+
+fn cmd_repair(task: Option<&str>, run: Option<&str>, all: bool, apply: bool) -> Result<()> {
+    let selectors = task.is_some() as u8 + run.is_some() as u8 + all as u8;
+    if selectors != 1 {
+        return Err(anyhow::anyhow!(
+            "specify exactly one of --task <id>, --run <id>, or --all"
+        ));
+    }
+    let app = app_open(false)?;
+    let outcomes = if let Some(t) = task {
+        vec![(format!("task {t}"), app.repair_task_ledger(t, apply)?)]
+    } else if let Some(r) = run {
+        vec![(format!("run {r}"), app.repair_run_ledger(r, apply)?)]
+    } else {
+        app.repair_all_ledgers(apply)?
+    };
+
+    let mut repaired = 0u32;
+    for (label, outcome) in &outcomes {
+        if outcome.repaired {
+            repaired += 1;
+            if apply {
+                let backup = outcome
+                    .backup
+                    .as_ref()
+                    .map(|p| format!(" (backed up to {})", p.display()))
+                    .unwrap_or_default();
+                println!(
+                    "{label}: REPAIRED — removed {} bytes{backup}",
+                    outcome.removed_bytes
+                );
+            } else {
+                println!(
+                    "{label}: torn trailing record found ({} bytes) — re-run with --apply to truncate",
+                    outcome.removed_bytes
+                );
+            }
+        } else {
+            println!("{label}: {}", outcome.detail);
+        }
+    }
+    if repaired == 0 {
+        println!("No torn trailing records found.");
+    } else if !apply {
+        println!(
+            "\n{repaired} ledger(s) have a torn tail. This is a dry run — re-run with --apply to repair."
+        );
     }
     Ok(())
 }
@@ -2904,6 +2976,7 @@ fn check_milestone_scope() -> Result<()> {
             "audit",
             "board",
             "boundary",
+            "brainstorm",
             "context",
             "doctor",
             "drift",
@@ -2912,14 +2985,17 @@ fn check_milestone_scope() -> Result<()> {
             "init",
             "next-action",
             "reconcile",
+            "repair",
             "replay",
             "report",
+            "research",
             "review",
             "run",
             "schedule",
             "schema",
             "task",
             "telemetry",
+            "uncertainty",
             "validate",
             "workspace",
         ],

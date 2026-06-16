@@ -78,9 +78,14 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
 /// - Environment: full inherit with proxy/auth denylist (EXEC-003: no network deps)
 /// - Output cap: 64KB per stream, truncated if exceeded
 /// - Explicit working directory
-/// - On timeout, the ENTIRE spawned process tree is terminated and reaped before
-///   this returns; if the tree cannot be confirmed dead, returns `Err`
-///   (execution containment failure) rather than an ordinary failed gate.
+/// - On timeout, the spawned process tree is terminated before this returns, but
+///   the strength of that guarantee is platform-dependent. On Unix the child's
+///   whole process group is signalled (TERM→KILL) and confirmed gone. On Windows
+///   `taskkill /T` makes a BEST-EFFORT sweep of descendants and ctl confirms only
+///   the ROOT it manages is dead — a grandchild spawned during the sweep is not
+///   guaranteed reaped (there is no Windows Job Object). When the managed root
+///   cannot be confirmed dead, returns `Err` (execution containment failure)
+///   rather than an ordinary failed gate.
 pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
     let template =
         find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
@@ -212,8 +217,10 @@ fn supervise(
     }
 }
 
-/// Terminate the process tree rooted at `pid` and confirm it is gone. Returns
-/// `true` when no managed process from the tree remains running.
+/// Best-effort terminate the process tree rooted at `pid`, then confirm the
+/// managed ROOT is gone. Returns `true` once the root is no longer running.
+/// Descendants are swept by `taskkill /T` but not individually confirmed (no Job
+/// Object), so a grandchild spawned mid-sweep may briefly outlive this call.
 #[cfg(windows)]
 fn terminate_process_tree(pid: u32) -> bool {
     use std::process::{Command, Stdio};

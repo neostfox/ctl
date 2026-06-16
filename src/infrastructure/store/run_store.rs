@@ -4,12 +4,14 @@
 //! Each run has its own directory with `events.jsonl` and `run.json`.
 
 use anyhow::{anyhow, Result};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{lock_dir, DirLock, LOCK_ACQUIRE_TIMEOUT};
+use super::{
+    append_jsonl_line, lock_dir, repair_torn_tail, torn_tail_or_parse_error, DirLock, TailRepair,
+    LOCK_ACQUIRE_TIMEOUT,
+};
 use crate::domain::event::Event;
 use crate::domain::run::AgentRunState;
 pub struct RunEventStore {
@@ -49,14 +51,14 @@ impl RunEventStore {
         let run_dir = self.run_dir(run_id);
         fs::create_dir_all(&run_dir)?;
         let events_path = run_dir.join("events.jsonl");
-        let line = serde_json::to_string(event)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path)?;
-        writeln!(file, "{}", line)?;
-        file.flush()?;
-        Ok(())
+        append_jsonl_line(&events_path, &serde_json::to_string(event)?)
+    }
+
+    /// Detect (and, when `apply`, truncate) a torn trailing record on this run's
+    /// event ledger. Read-only when `apply` is false. See [`repair_torn_tail`].
+    pub fn repair_run_ledger(&self, run_id: &str, apply: bool) -> Result<TailRepair> {
+        validate_run_id(run_id)?;
+        repair_torn_tail(&self.events_path(run_id), apply)
     }
 
     /// Read all events for a specific run.
@@ -68,20 +70,24 @@ impl RunEventStore {
             return Ok(Vec::new());
         }
 
-        let file = fs::File::open(&events_path)?;
-        let reader = BufReader::new(file);
+        let content = fs::read_to_string(&events_path)?;
+        let ends_with_newline = content.ends_with('\n');
+        let lines: Vec<&str> = content.lines().collect();
+        let last_idx = lines.len().saturating_sub(1);
         let mut events = Vec::new();
-        for (i, line) in reader.lines().enumerate() {
-            let line = line?;
+        for (i, line) in lines.iter().enumerate() {
+            let line = *line;
             if line.trim().is_empty() {
                 continue;
             }
-            let event: Event = serde_json::from_str(&line).map_err(|e| {
-                anyhow!(
-                    "{} line {}: parse error: {}",
-                    events_path.display(),
-                    i + 1,
-                    e
+            let event: Event = serde_json::from_str(line).map_err(|e| {
+                torn_tail_or_parse_error(
+                    &events_path,
+                    i,
+                    last_idx,
+                    ends_with_newline,
+                    e,
+                    &format!("--run {run_id}"),
                 )
             })?;
             if !event.is_valid() {

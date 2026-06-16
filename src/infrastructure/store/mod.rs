@@ -165,14 +165,7 @@ impl FileEventStore {
         let task_dir = self.task_dir(&event.task_id)?;
         fs::create_dir_all(&task_dir)?;
         let events_path = task_dir.join("events.jsonl");
-        let line = serde_json::to_string(event)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path)?;
-        writeln!(file, "{}", line)?;
-        file.flush()?;
-        Ok(())
+        append_jsonl_line(&events_path, &serde_json::to_string(event)?)
     }
 
     /// Read all task events from `.ctl/tasks/*/events.jsonl`.
@@ -192,20 +185,24 @@ impl FileEventStore {
             return Ok(Vec::new());
         }
 
-        let file = fs::File::open(&events_path)?;
-        let reader = BufReader::new(file);
+        let content = fs::read_to_string(&events_path)?;
+        let ends_with_newline = content.ends_with('\n');
+        let lines: Vec<&str> = content.lines().collect();
+        let last_idx = lines.len().saturating_sub(1);
         let mut events = Vec::new();
-        for (i, line) in reader.lines().enumerate() {
-            let line = line?;
+        for (i, line) in lines.iter().enumerate() {
+            let line = *line;
             if line.trim().is_empty() {
                 continue;
             }
-            let event: Event = serde_json::from_str(&line).map_err(|e| {
-                anyhow!(
-                    "{} line {}: parse error: {}",
-                    events_path.display(),
-                    i + 1,
-                    e
+            let event: Event = serde_json::from_str(line).map_err(|e| {
+                torn_tail_or_parse_error(
+                    &events_path,
+                    i,
+                    last_idx,
+                    ends_with_newline,
+                    e,
+                    &format!("--task {task_id}"),
                 )
             })?;
             if event.task_id != task_id {
@@ -302,17 +299,17 @@ impl FileEventStore {
         self.ctl_dir.join("telemetry.jsonl")
     }
 
-    /// Append one telemetry evidence record. Append-only, flushed.
+    /// Append one telemetry evidence record. Append-only, durably synced.
     pub fn append_telemetry(&self, entry: &TelemetryEntry) -> Result<()> {
         fs::create_dir_all(&self.ctl_dir)?;
-        let line = serde_json::to_string(entry)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.telemetry_path())?;
-        writeln!(file, "{}", line)?;
-        file.flush()?;
-        Ok(())
+        append_jsonl_line(&self.telemetry_path(), &serde_json::to_string(entry)?)
+    }
+
+    /// Detect (and, when `apply`, truncate) a torn trailing record on this task's
+    /// event ledger. See [`repair_torn_tail`] for the exact recoverable shape.
+    /// Read-only when `apply` is false. Returns the (possibly no-op) outcome.
+    pub fn repair_task_ledger(&self, task_id: &str, apply: bool) -> Result<TailRepair> {
+        repair_torn_tail(&self.events_path(task_id)?, apply)
     }
 
     /// Read all telemetry entries for one task, in append order. Skips blank
@@ -338,6 +335,153 @@ impl FileEventStore {
         }
         Ok(entries)
     }
+}
+
+/// Append one JSON line to a JSONL log and fsync it.
+///
+/// The record and its terminating newline are written in a single `write_all`,
+/// so a concurrent reader never observes a half-written line and a crash cannot
+/// split content from its terminator within this call. The trailing `sync_all`
+/// upgrades the OS-buffer flush to a durable on-disk commit, so an acknowledged
+/// append survives a power loss (crash-consistency for the canonical ledger).
+pub(crate) fn append_jsonl_line(path: &Path, line: &str) -> Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut buf = String::with_capacity(line.len() + 1);
+    buf.push_str(line);
+    buf.push('\n');
+    file.write_all(buf.as_bytes())?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Classify a JSONL parse failure: a *torn trailing record* (recoverable via
+/// `ctl repair`) versus unrecoverable corruption.
+///
+/// A torn tail is the final line of a file that does NOT end in a newline — a
+/// crash between writing a record's bytes and its terminator. That is the only
+/// shape `ctl repair` will truncate; every other parse failure (mid-file, or a
+/// newline-terminated final line) is corruption that must be inspected by hand.
+pub(crate) fn torn_tail_or_parse_error(
+    path: &Path,
+    idx: usize,
+    last_idx: usize,
+    ends_with_newline: bool,
+    err: serde_json::Error,
+    repair_selector: &str,
+) -> anyhow::Error {
+    if idx == last_idx && !ends_with_newline {
+        anyhow!(
+            "{}: torn trailing record at line {} (incomplete append, missing newline \
+             terminator): {}. Run `ctl repair {}` to truncate the partial record \
+             (it backs up the ledger first).",
+            path.display(),
+            idx + 1,
+            err,
+            repair_selector
+        )
+    } else {
+        anyhow!("{} line {}: parse error: {}", path.display(), idx + 1, err)
+    }
+}
+
+/// Outcome of a torn-tail repair check on a JSONL ledger.
+pub struct TailRepair {
+    /// A torn trailing record was found (and truncated when `apply` was true).
+    pub repaired: bool,
+    /// Bytes that were (or, in a dry run, would be) removed.
+    pub removed_bytes: usize,
+    /// Backup written before truncation (only when a repair was applied).
+    pub backup: Option<PathBuf>,
+    /// Human-readable summary of what was found.
+    pub detail: String,
+}
+
+/// Detect and optionally repair a *torn trailing record* — the single crash-
+/// recoverable corruption shape on an append-only JSONL ledger.
+///
+/// A torn tail is the bytes after the last newline that fail to parse as an
+/// `Event`, on a file that does not end in a newline (a crash between a record
+/// and its terminator). Only that exact shape is touched: an empty/absent file,
+/// a file ending in a newline, or a final line that parses (a complete record
+/// missing only its newline) is left intact. Mid-file corruption is NEVER auto-
+/// truncated — it must be reviewed by hand. When `apply` is true, the entire
+/// ledger is first backed up to a `.corrupt[-N]` sibling, then the partial record
+/// is truncated and the file fsynced.
+pub(crate) fn repair_torn_tail(path: &Path, apply: bool) -> Result<TailRepair> {
+    let noop = |detail: &str| TailRepair {
+        repaired: false,
+        removed_bytes: 0,
+        backup: None,
+        detail: detail.to_string(),
+    };
+    if !path.exists() {
+        return Ok(noop("no ledger file"));
+    }
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(noop("empty ledger"));
+    }
+    if *bytes.last().unwrap() == b'\n' {
+        return Ok(noop("ledger ends with a newline — no torn trailing record"));
+    }
+    // No terminating newline: everything after the last newline is the final,
+    // possibly-incomplete record.
+    let cut = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let tail = &bytes[cut..];
+    // A final record that still parses is a complete write missing only its
+    // newline — harmless (reads tolerate it). Leave it intact.
+    if let Ok(s) = std::str::from_utf8(tail) {
+        if !s.trim().is_empty() && serde_json::from_str::<Event>(s).is_ok() {
+            return Ok(noop(
+                "final record parses (missing only a newline) — left intact",
+            ));
+        }
+    }
+    let removed_bytes = tail.len();
+    let mut backup = None;
+    if apply {
+        let bp = backup_path(path);
+        fs::write(&bp, &bytes)?;
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(cut as u64)?;
+        file.sync_all()?;
+        backup = Some(bp);
+    }
+    Ok(TailRepair {
+        repaired: true,
+        removed_bytes,
+        backup,
+        detail: format!("torn trailing record of {removed_bytes} bytes"),
+    })
+}
+
+/// First free `<file>.corrupt`, `<file>.corrupt-1`, … sibling, so a repair never
+/// clobbers an earlier backup.
+fn backup_path(path: &Path) -> PathBuf {
+    let suffixed = |suffix: &str| {
+        let mut name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(suffix);
+        path.with_file_name(name)
+    };
+    let base = suffixed(".corrupt");
+    if !base.exists() {
+        return base;
+    }
+    for n in 1.. {
+        let cand = suffixed(&format!(".corrupt-{n}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    unreachable!()
 }
 
 fn validate_task_id(task_id: &str) -> Result<()> {
@@ -615,5 +759,81 @@ mod tests {
         // Explicit recovery:
         std::fs::remove_file(&lock_path).unwrap();
         assert!(store.lock_task("t").is_ok());
+    }
+
+    // ── torn-tail crash recovery ──
+
+    #[test]
+    fn torn_trailing_record_detected_and_repaired() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        store.append(&make_create_event("t1", 1)).unwrap();
+        store.append(&make_create_event("t1", 2)).unwrap();
+        // Simulate a crash mid-append: a partial record with no trailing newline.
+        let path = store.events_path("t1").unwrap();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"schema\":\"control.event-envelope.v1\",\"seq\":3")
+            .unwrap();
+        drop(f);
+
+        // Read surfaces it as a *torn trailing record* (recoverable), pointing at
+        // `ctl repair` — not an opaque parse error.
+        let err = store.read_for_task("t1").unwrap_err().to_string();
+        assert!(err.contains("torn trailing record"), "got: {err}");
+        assert!(err.contains("ctl repair"), "got: {err}");
+
+        // Dry run detects without mutating.
+        let dry = store.repair_task_ledger("t1", false).unwrap();
+        assert!(dry.repaired && dry.removed_bytes > 0 && dry.backup.is_none());
+        assert!(
+            store.read_for_task("t1").is_err(),
+            "dry run must not mutate"
+        );
+
+        // Apply truncates the partial record (after backing up the ledger).
+        let done = store.repair_task_ledger("t1", true).unwrap();
+        assert!(done.repaired);
+        assert!(done.backup.as_ref().unwrap().exists());
+        let events = store.read_for_task("t1").unwrap();
+        assert_eq!(events.len(), 2, "the two intact records survive");
+    }
+
+    #[test]
+    fn complete_final_record_missing_newline_is_left_intact() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        store.append(&make_create_event("t1", 1)).unwrap();
+        // A COMPLETE record written without its terminator (crash after content,
+        // before the newline) — harmless, not a torn tail.
+        let path = store.events_path("t1").unwrap();
+        let line = serde_json::to_string(&make_create_event("t1", 2)).unwrap();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(line.as_bytes()).unwrap();
+        drop(f);
+        // Reads fine, and repair recognizes it as intact (no truncation).
+        assert_eq!(store.read_for_task("t1").unwrap().len(), 2);
+        let r = store.repair_task_ledger("t1", true).unwrap();
+        assert!(!r.repaired, "{}", r.detail);
+    }
+
+    #[test]
+    fn mid_file_corruption_is_not_treated_as_torn_tail() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        let good = serde_json::to_string(&make_create_event("t1", 1)).unwrap();
+        let path = store.task_dir("t1").unwrap().join("events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Broken FIRST line, good last line, file terminated by a newline.
+        fs::write(&path, format!("{{not valid json\n{good}\n")).unwrap();
+        // Read fails as an ordinary parse error — NOT a recoverable torn tail.
+        let err = store.read_for_task("t1").unwrap_err().to_string();
+        assert!(err.contains("parse error"), "got: {err}");
+        assert!(!err.contains("torn trailing record"), "got: {err}");
+        // Repair refuses: the file ends with a newline, so there is no torn tail.
+        let r = store.repair_task_ledger("t1", true).unwrap();
+        assert!(
+            !r.repaired,
+            "mid-file corruption must never be auto-truncated"
+        );
     }
 }
