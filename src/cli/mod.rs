@@ -2683,8 +2683,7 @@ fn check_dependencies() -> Result<()> {
         // lives, for process-group signalling). Scanning the target table too
         // keeps the whitelist from being bypassed via a `[target.*]` section.
         if trimmed.starts_with('[') {
-            in_deps =
-                trimmed == "[dependencies]" || trimmed == "[target.'cfg(unix)'.dependencies]";
+            in_deps = trimmed == "[dependencies]" || trimmed == "[target.'cfg(unix)'.dependencies]";
             continue;
         }
         // Skip blank lines and comments so rationale comments inside a deps
