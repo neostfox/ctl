@@ -2678,24 +2678,29 @@ fn check_dependencies() -> Result<()> {
     let mut found_deps: Vec<String> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
-            in_deps = true;
+        // A section header toggles collection: we govern the portable
+        // `[dependencies]` table AND the unix-only target table (where `libc`
+        // lives, for process-group signalling). Scanning the target table too
+        // keeps the whitelist from being bypassed via a `[target.*]` section.
+        if trimmed.starts_with('[') {
+            in_deps =
+                trimmed == "[dependencies]" || trimmed == "[target.'cfg(unix)'.dependencies]";
             continue;
         }
-        if in_deps && trimmed.starts_with('[') {
-            break;
+        // Skip blank lines and comments so rationale comments inside a deps
+        // table are not mistaken for dependency entries.
+        if !in_deps || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
         }
-        if in_deps {
-            if let Some(name) = trimmed.split('=').next() {
-                let name = name.trim().to_string();
-                if !name.is_empty() {
-                    found_deps.push(name);
-                }
+        if let Some(name) = trimmed.split('=').next() {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                found_deps.push(name);
             }
         }
     }
     found_deps.sort();
-    let mut expected: Vec<&str> = vec!["anyhow", "clap", "serde", "serde_json", "sha2"];
+    let mut expected: Vec<&str> = vec!["anyhow", "clap", "libc", "serde", "serde_json", "sha2"];
     expected.sort();
     if found_deps != expected {
         return Err(anyhow::anyhow!(

@@ -21,6 +21,9 @@ jobs:
   verify:
     name: fmt + check + clippy + test + architecture
     runs-on: ubuntu-latest
+    # Fail fast on a hang (e.g. a stuck gate-supervision test) instead of
+    # burning the 6-hour default job timeout.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

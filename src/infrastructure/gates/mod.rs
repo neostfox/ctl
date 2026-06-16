@@ -79,13 +79,14 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
 /// - Output cap: 64KB per stream, truncated if exceeded
 /// - Explicit working directory
 /// - On timeout, the spawned process tree is terminated before this returns, but
-///   the strength of that guarantee is platform-dependent. On Unix the child's
-///   whole process group is signalled (TERM→KILL) and confirmed gone. On Windows
-///   `taskkill /T` makes a BEST-EFFORT sweep of descendants and ctl confirms only
-///   the ROOT it manages is dead — a grandchild spawned during the sweep is not
-///   guaranteed reaped (there is no Windows Job Object). When the managed root
-///   cannot be confirmed dead, returns `Err` (execution containment failure)
-///   rather than an ordinary failed gate.
+///   the strength of that guarantee is platform-dependent. On Unix the child
+///   leads its own process group, so `kill(-pgid)` signals the whole tree
+///   (TERM→KILL); on Windows `taskkill /T` makes a BEST-EFFORT sweep of
+///   descendants (no Job Object, so a grandchild spawned during the sweep is not
+///   guaranteed reaped). On BOTH platforms ctl confirms containment by reaping
+///   the ROOT it manages — never by a blocking wait or a group probe. When the
+///   managed root cannot be confirmed reaped, returns `Err` (execution
+///   containment failure) rather than an ordinary failed gate.
 pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
     let template =
         find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
@@ -187,12 +188,20 @@ fn supervise(
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let confirmed = terminate_process_tree(pid);
-                    let _ = child.wait(); // reap the direct child
+                    // Terminate the whole tree and CONFIRM by reaping the root.
+                    // Reaping the managed child is authoritative; it does not
+                    // depend on a process-group probe that a mis-grouped child
+                    // could fool. Crucially we never call a blocking
+                    // `child.wait()` here: if the root cannot be reaped, a
+                    // surviving child would hang the supervisor forever (this is
+                    // exactly what stalled CI before).
+                    let confirmed = terminate_and_reap(&mut child, pid);
                     if !confirmed {
-                        // Surviving descendants may hold the pipes open and block
+                        // Root could not be confirmed reaped. Surviving
+                        // descendants may hold the pipes open and block
                         // read_to_end forever — do NOT join the drain threads on
-                        // this error path; leaking them is acceptable here.
+                        // this error path; leaking them (and a possible zombie)
+                        // is the acceptable cost of never hanging.
                         return Err(anyhow!(
                             "execution containment failure: gate timed out after {}s, but \
                              process-tree termination could not be confirmed",
@@ -217,79 +226,72 @@ fn supervise(
     }
 }
 
-/// Best-effort terminate the process tree rooted at `pid`, then confirm the
-/// managed ROOT is gone. Returns `true` once the root is no longer running.
-/// Descendants are swept by `taskkill /T` but not individually confirmed (no Job
-/// Object), so a grandchild spawned mid-sweep may briefly outlive this call.
+/// Poll-reap the managed direct child until it exits or `budget` elapses.
+/// Reaping the ROOT is the authoritative confirmation that the process ctl
+/// manages is gone — unlike a process-group probe, it cannot be fooled by a
+/// child that never joined the expected group, and unlike `Child::wait` it never
+/// blocks indefinitely. Returns `true` once the child is reaped.
+fn reaped_within(child: &mut std::process::Child, budget: Duration) -> bool {
+    use std::time::Instant;
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Terminate the timed-out process tree, then confirm the managed ROOT is reaped.
+/// `taskkill /T /F` force-terminates the process AND its descendants (best
+/// effort: no Job Object, so a grandchild spawned mid-sweep may briefly outlive
+/// this). Its exit code is unreliable when descendants are a moving target, so we
+/// confirm by reaping the ROOT — the process ctl manages — not by trusting
+/// taskkill or polling a reuse-prone PID listing.
 #[cfg(windows)]
-fn terminate_process_tree(pid: u32) -> bool {
+fn terminate_and_reap(child: &mut std::process::Child, pid: u32) -> bool {
     use std::process::{Command, Stdio};
-    // `taskkill /T` force-terminates the process AND its descendants. Its exit
-    // code is unreliable when descendants are a moving target (a build tool
-    // spawning/exiting children), so we do not trust it — we confirm by polling
-    // the ROOT (the process ctl manages) until it is gone. taskkill /T has made
-    // a best-effort sweep of descendants (which is what kills build grandchildren
-    // like rustc/build.rs); confirming the root is the reliable managed signal.
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    for _ in 0..20 {
-        if !root_alive_windows(pid) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    false
+    reaped_within(child, Duration::from_millis(500))
 }
 
-/// Whether a process with `pid` is still listed (Windows). Query failure is
-/// treated as "not alive" (best effort).
-#[cfg(windows)]
-fn root_alive_windows(pid: u32) -> bool {
-    match std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
-        .output()
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&format!("\"{}\"", pid)),
-        Err(_) => false,
-    }
-}
-
+/// Terminate the timed-out process tree, then confirm the managed ROOT is reaped.
+/// The child leads its own process group (pgid == pid, via `process_group(0)`),
+/// so `kill(-pid, sig)` signals the whole tree at once — TERM for a grace window,
+/// then KILL. We signal the group AND the child directly (belt-and-suspenders, in
+/// case the child somehow never joined the group), and confirm by reaping the
+/// root rather than probing the group. The syscall is used directly because the
+/// external `kill` binary's parsing of a bare negative pid is not portable.
 #[cfg(unix)]
-fn terminate_process_tree(pid: u32) -> bool {
-    use std::process::{Command, Stdio};
-    // The child leads its own process group (pgid == pid). Signal the whole group
-    // via the negative pid: SIGTERM, grace, then SIGKILL. `kill -0 -<pgid>`
-    // probes whether any group member remains.
-    let group = format!("-{}", pid);
-    let probe = |grp: &str| {
-        Command::new("kill")
-            .args(["-0", grp])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
-
-    let _ = Command::new("kill")
-        .args(["-TERM", &group])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(GRACE_MS));
-    if !probe(&group) {
-        return true; // exited on TERM
+fn terminate_and_reap(child: &mut std::process::Child, pid: u32) -> bool {
+    let p = pid as libc::pid_t;
+    // SAFETY: `kill(2)` only delivers a signal; it has no memory-safety effects.
+    unsafe {
+        libc::kill(-p, libc::SIGTERM);
+        libc::kill(p, libc::SIGTERM);
     }
-    let _ = Command::new("kill")
-        .args(["-KILL", &group])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(100));
-    !probe(&group)
+    if reaped_within(child, Duration::from_millis(GRACE_MS)) {
+        // Root exited on TERM; KILL the group so no descendant lingers.
+        unsafe {
+            libc::kill(-p, libc::SIGKILL);
+        }
+        return true;
+    }
+    unsafe {
+        libc::kill(-p, libc::SIGKILL);
+        libc::kill(p, libc::SIGKILL);
+    }
+    reaped_within(child, Duration::from_millis(500))
 }
 
 /// Build the execution environment with a denylist approach (EXEC-002, EXEC-003).
