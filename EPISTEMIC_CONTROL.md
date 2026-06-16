@@ -70,6 +70,7 @@ open → resolved(evidence_ref) | accepted_as_assumption | invalidated
 最小字段:`id`、`statement`、`source_run_id`、`resolution`(可空)。`impact` 四级、`blocking`、`confidence`、各种关联,都留作后续 schema 演进,**第一版不做**。
 
 - `resolved` **必须** 带 `evidence_ref`,且要可区分"被断言关闭"与"被外部 oracle 关闭"。无外部证据就 resolved 的未知,只比 open 好一点点。
+- `model` oracle 是 **advisory**(顾问性),不是外部证据,**不能 resolve 一个 unknown**——它本质是"被断言关闭"。控制层在命令层拒绝以 model 证据 resolve;它仍可作为上下文被记录并在 `ORACLE SOURCES` 里如实披露。该约束只对新写入生效;已提交的历史流(在该规则之前以 model 证据 resolve 的 unknown)仍按 append-only 原样回放,披露时标记为 ADVISORY。
 
 ### 5.2 两种 Binding(+ 一个查询)
 

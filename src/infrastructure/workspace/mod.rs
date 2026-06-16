@@ -622,7 +622,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!proj.join("src/old.rs").exists(), "old path must be removed");
+        assert!(
+            !proj.join("src/old.rs").exists(),
+            "old path must be removed"
+        );
         assert_eq!(
             std::fs::read_to_string(proj.join("src/new.rs")).unwrap(),
             "moved\n"

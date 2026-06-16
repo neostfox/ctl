@@ -981,6 +981,29 @@ impl ControlApp {
                 "a 'resolved' must carry either --evidence-ref or --evidence (inline), never both"
             ));
         }
+        // Oracle-resolution semantics: a `model` oracle is ADVISORY — never external
+        // proof (EPISTEMIC_CONTROL §5.1: a resolve must distinguish "closed by
+        // assertion" from "closed by external oracle"). A model-backed evidence may be
+        // recorded and disclosed, but it must not *resolve* an uncertainty. This is
+        // enforced here at the command layer — the only path that appends canonical
+        // events — and deliberately NOT in the reducer, so committed pre-rule streams
+        // that already resolved via a model oracle still replay byte-identically.
+        if disposition == "resolved" {
+            if let Some(eid) = evidence_ref {
+                let state = self.replay_task(task_id)?;
+                if let Some(ev) = state.evidences.iter().find(|e| e.id == eid) {
+                    if ev.oracle_kind.is_advisory() {
+                        return Err(anyhow!(
+                            "evidence '{}' is a 'model' oracle (advisory, not external proof); \
+                             a model oracle cannot resolve an uncertainty — record it as context, \
+                             or resolve with a deterministic/test/runtime/human/external_authority \
+                             oracle",
+                            eid
+                        ));
+                    }
+                }
+            }
+        }
         let mut payload = serde_json::json!({
             "uncertainty_id": uncertainty_id,
             "disposition": disposition,
@@ -5683,9 +5706,10 @@ mod tests {
     }
 
     #[test]
-    fn model_oracle_disclosed_advisory_never_external_proof() {
-        // EPISTEMIC_CONTROL: a model oracle is advisory. It may back a resolve, but
-        // the disclosure marks it advisory and keeps it on its own ORACLE SOURCES line.
+    fn model_oracle_cannot_resolve_but_is_disclosed_advisory() {
+        // EPISTEMIC_CONTROL §5.1: a model oracle is advisory — never external proof, so
+        // it must not RESOLVE an uncertainty. It may still be recorded and discloses on
+        // its own ORACLE SOURCES line. The command layer rejects a model-backed resolve.
         let dir = TempDir::new();
         let app = ControlApp::init(dir.path()).unwrap();
         seed_uncertainty_task(&app, "t");
@@ -5701,11 +5725,60 @@ mod tests {
             "src/model-note.md",
         )
         .unwrap();
-        app.record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-1"), None)
-            .unwrap();
+        // The model-backed resolve is rejected at the command layer.
+        let err = app
+            .record_uncertainty_disposition("t", "U-1", "resolved", None, Some("E-1"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("model"), "unexpected error: {err}");
+        assert!(
+            err.contains("advisory") || err.contains("external proof"),
+            "unexpected error: {err}"
+        );
+        // The uncertainty stays open; the model evidence is still recorded + disclosed.
         let state = app.get_status("t").unwrap();
+        assert_eq!(state.uncertainties[0].status.as_str(), "open");
         let view = app.uncertainty_ledger_view(&state).unwrap();
         assert_eq!(view.oracle_sources.model_advisory, 1);
+        assert!(!view.items[0].advisory);
+    }
+
+    #[test]
+    fn legacy_model_backed_resolve_still_replays_advisory() {
+        // Preserve legacy replay: a pre-rule stream that resolved an uncertainty via a
+        // model evidence_ref must still replay byte-identically (the reducer stays
+        // permissive). Only the command layer forbids NEW model resolves, so this test
+        // appends the resolve directly to simulate a committed pre-rule event. Replay
+        // keeps it Resolved and the disclosure marks it ADVISORY (honest, never proof).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_uncertainty_task(&app, "t");
+        app.record_uncertainty("t", "U-1", "model-resolved long ago", None)
+            .unwrap();
+        let ev = app.project_root.join("src").join("model-note.md");
+        std::fs::write(&ev, b"the model believes X").unwrap();
+        app.record_evidence("t", "E-1", "model", None, "src/model-note.md")
+            .unwrap();
+        // Bypass the command-layer guard to mimic a stream written before the rule.
+        let event = app
+            .build_event(
+                "t",
+                "uncertainty_disposition_recorded",
+                serde_json::json!({
+                    "uncertainty_id": "U-1",
+                    "disposition": "resolved",
+                    "evidence_ref": "E-1",
+                    "trust_level": crate::domain::task::UNCERTAINTY_TRUST_LEVEL,
+                }),
+            )
+            .unwrap();
+        app.validate_and_append(&event).unwrap();
+        // The reducer accepted it on append AND on full replay.
+        let state = app.replay_task("t").unwrap();
+        let u = &state.uncertainties[0];
+        assert_eq!(u.status.as_str(), "resolved");
+        assert_eq!(u.oracle_kind, Some(crate::domain::task::OracleKind::Model));
+        let view = app.uncertainty_ledger_view(&state).unwrap();
         assert!(view.items[0].advisory);
         assert_eq!(view.items[0].oracle_kind.as_deref(), Some("model"));
     }

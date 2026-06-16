@@ -314,8 +314,9 @@ impl OracleKind {
         }
     }
 
-    /// True only for `Model`: a model oracle is advisory and must never be rendered
-    /// as external proof.
+    /// True only for `Model`: a model oracle is advisory. It must never be rendered as
+    /// external proof, and (oracle-resolution semantics) must not resolve an
+    /// uncertainty — the command layer rejects a model-backed `resolved`.
     pub fn is_advisory(&self) -> bool {
         matches!(self, OracleKind::Model)
     }
@@ -382,6 +383,8 @@ pub struct UncertaintyItemView {
     /// Oracle V1: the resolving evidence's oracle kind (None for legacy inline).
     pub oracle_kind: Option<String>,
     /// Oracle V1: true iff `oracle_kind` is `model` — advisory, NOT external proof.
+    /// Oracle-resolution semantics forbids new model-backed resolves at the command
+    /// layer, so on current streams this flags only a legacy (pre-rule) model resolve.
     pub advisory: bool,
     pub reason: Option<String>,
 }
@@ -1681,6 +1684,15 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 "resolved" => {
                     // resolved is the only disposition closed by external evidence —
                     // either a recorded oracle-typed evidence (preferred) or legacy inline.
+                    //
+                    // Oracle-resolution semantics: a `model` oracle is advisory and must
+                    // not resolve an uncertainty (EPISTEMIC_CONTROL §5.1). That rule is
+                    // enforced at the command layer (record_uncertainty_disposition), the
+                    // sole path that appends canonical events — NOT here. The reducer stays
+                    // permissive on purpose: a committed pre-rule stream already resolved an
+                    // uncertainty via a model evidence_ref, and re-rejecting it on replay
+                    // would break the append-only ledger. The disclosure keeps such a
+                    // resolve honest by carrying oracle_kind=model (rendered ADVISORY) below.
                     if let Some((eid, artifact_ref, oracle_kind)) = resolved_via_ref {
                         uncertainty.status = UncertaintyStatus::Resolved;
                         uncertainty.evidence_ref = Some(artifact_ref);
