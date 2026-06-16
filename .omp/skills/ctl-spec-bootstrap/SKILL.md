@@ -1,19 +1,340 @@
 ---
 name: ctl-spec-bootstrap
-description: "Analyze the current project source code and generate .ctl/spec/ documentation with architecture diagrams, directory trees, and layer conventions. Supports Rust, TypeScript/JavaScript, Java, Go, Python, and frontend projects. Run once when introducing ctl to a new project, or to refresh specs after significant refactoring."
+description: "First-run migration of an existing agent workflow into ctl, then generate .ctl/spec/ documentation from source. Migration: detect & inventory existing CLAUDE.md / AGENTS.md / .trellis / .ctl/spec without overwriting user content, install the ctl-managed CLAUDE.md block, and handle a legacy .trellis/ workspace (keep / import-then-archive / ignore) with safe rename-only archiving and L0 hash-verified imports. Generation: architecture diagrams, directory trees, and layer conventions for Rust, TypeScript/JavaScript, Java, Go, Python, and frontend projects. Run once when introducing ctl to a project, or to refresh specs after significant refactoring."
 ---
 
-# /ctl-spec-bootstrap — Generate Project Specs from Source
+# /ctl-spec-bootstrap — Migrate Existing Workflow, then Generate Project Specs
 
-Analyzes the real codebase and produces `.ctl/spec/` documentation with concrete patterns, architecture diagrams (Mermaid), directory trees, file paths, conventions, and anti-patterns extracted from source.
+This skill has two parts, run in order:
+
+- **Part 1 — Migration** (first run only): detect and inventory an existing agent workflow (`CLAUDE.md`, `AGENTS.md`, `.trellis/`, prior `.ctl/spec/`), install the ctl-managed `CLAUDE.md` block without overwriting user content, and safely handle a legacy `.trellis/` workspace (keep / import-then-archive / ignore). Makes `ctl` the single active control plane without destroying what the user already has.
+- **Part 2 — Generation**: analyze the real codebase and produce `.ctl/spec/` documentation with concrete patterns, architecture diagrams (Mermaid), directory trees, file paths, conventions, and anti-patterns extracted from source.
 
 **Run when**:
-- Introducing `ctl` to a new project (`ctl init` already ran)
-- After significant refactoring that invalidates existing specs
+- Introducing `ctl` to a project (`ctl init` already ran) — do Part 1, then Part 2
+- After significant refactoring that invalidates existing specs — Part 2 (Part 1 is idempotent / a no-op once migrated)
 - User explicitly requests `/ctl-spec-bootstrap`
-- Hook detects spec drift (specs stale relative to code changes)
+- Hook detects spec drift (specs stale relative to code changes) — Part 2
 
 **Supports**: Rust, TypeScript/JavaScript (frontend + Node), Java (Maven/Gradle), Go, Python, and mixed-language projects.
+
+> Scope: this skill writes only under `.ctl/`, `.trellis(.bak)/`, `.omp/`, `CLAUDE.md`, `AGENTS.md`. It never edits project source. See "Operating boundary" below.
+
+---
+
+## Operating boundary (read this first)
+
+This skill may **create, modify, rename, or archive files ONLY** under:
+
+- `.ctl/` — canonical ctl state and imports
+- `.trellis/` and its archive `.trellis.bak*` — legacy workspace
+- `.omp/` — control-plane skills, hooks, settings
+- `CLAUDE.md` and `AGENTS.md` — agent entry / rule files
+
+**Never modify project source code, build manifests, CI config, or anything else** during bootstrap or migration. Reading any file is fine; writing is restricted to the paths above. If a step appears to need a source edit, stop and report it instead — do not do it.
+
+---
+
+# Part 1 — First-run migration of an existing agent workflow
+
+Run Part 1 **before** generating specs, the first time `ctl` is introduced to a repo that already has agent tooling: an existing `CLAUDE.md`, `AGENTS.md`, `.trellis/`, or a pre-existing `.ctl/spec/`. If none of those exist (a clean repo), skip directly to Part 2.
+
+Goal: make `ctl` the single active control plane **without** destroying or silently overriding what the user already has.
+
+### Enforcement level
+
+This migration workflow is implemented as agent-readable guidance.
+
+The skill instructs the agent to inventory first, request explicit user
+confirmation, preserve existing content, and avoid destructive migration.
+These rules are not independently enforced by the ctl binary in v0.0.2.
+
+Any claim such as "refuse", "must not", or "fail closed" in this section
+describes required agent behavior, not a machine-enforced security boundary.
+
+## Migration principles (do not violate)
+
+```
+existing content is user-owned       -> never overwrite a whole user file
+managed content is ctl-owned         -> only edit inside ctl markers
+files may coexist                    -> keeping/copying both is fine
+authority may not coexist            -> exactly one ACTIVE control plane (ctl)
+importing does not grant trust       -> imported content stays L0
+```
+
+Operational consequences — each is mandatory:
+
+- Never overwrite `CLAUDE.md` / `AGENTS.md` wholesale; edit only the ctl-managed block.
+- Never delete `.trellis/`; archive it by **rename only**.
+- Never silently pick a winner when two rules conflict; report the conflict.
+- Never convert Trellis tasks / history into ctl canonical events.
+- Never claim imported Trellis specs are source-verified facts (they are L0).
+- Always proceed **inventory → plan → confirm → execute**, in that order.
+- Never change control-plane authority without explicit user confirmation.
+
+## M1 — Inventory (read-only; make NO writes in this step)
+
+Detect and record what exists. Do not modify anything yet.
+
+| Target | What to inventory |
+|---|---|
+| `CLAUDE.md` | present? contains a `ctl:managed` block? are its markers well-formed? |
+| `AGENTS.md` | present? foreign managed blocks (e.g. `<!-- TRELLIS:START -->`)? rules that duplicate or contradict the ctl block? |
+| `.trellis/` | spec files, task dirs, workspace/memory, workflow/config, hooks/scripts; git tracked / modified / untracked / ignored; hard-coded `.trellis/` references elsewhere |
+| `.ctl/spec/` | already present? If so, this run is a **refresh** — never overwrite existing files. |
+
+Commands (PowerShell first; POSIX equivalents in comments):
+
+```powershell
+Test-Path CLAUDE.md, AGENTS.md, .trellis, .ctl\spec
+
+# Trellis git state (what would be lost if someone deleted it):
+git ls-files .trellis                       # tracked
+git status --porcelain --ignored .trellis   # modified / untracked / ignored
+
+# Hard-coded references to .trellis across surfaces we may touch + common config:
+git grep -n -- ".trellis" -- CLAUDE.md AGENTS.md .omp .claude README.md CONTRIBUTING.md package.json .github
+#   POSIX: grep -rn ".trellis" CLAUDE.md AGENTS.md .omp .claude README.md CONTRIBUTING.md package.json .github
+```
+
+Classify every rule/spec you read by **source** — do not treat all text as equal fact:
+
+```
+observed_fact        Cargo.toml, CI workflow, source layout, real test commands, deps
+declared_rule        CLAUDE.md, AGENTS.md, .trellis/spec, README, workflow docs
+generated_synthesis  .ctl/spec/index.md and other bootstrap output
+legacy_history       .trellis/tasks, task state, execution / gate history
+```
+
+If a `declared_rule` contradicts an `observed_fact`, do **not** silently resolve it. List it under `DECLARED / OBSERVED CONFLICT` in the final report. V1 only **reports** conflicts; do not create new uncertainty/epistemic records for the migration.
+
+## M2 — CLAUDE.md: the ctl managed block
+
+`ctl` owns exactly one block, delimited by these exact markers:
+
+```
+<!-- ctl:managed:start -->
+... ctl-owned content ...
+<!-- ctl:managed:end -->
+```
+
+Decision rules (apply in order):
+
+1. **Exactly one well-formed pair exists** (one start, one end, start before end): replace only the text between and including the markers with the fresh managed content. Everything outside is preserved byte-for-byte. This is the idempotent refresh path.
+2. **No block, but the file exists**: append one managed block at the end, separated by a blank line. Preserve all existing content. Never add a second block.
+3. **No file**: create a thin `CLAUDE.md` whose body is only the managed block. **Never** paste full `.ctl/spec` content into `CLAUDE.md`.
+4. **Idempotent**: re-running must not add a second block or alter user content.
+5. **Corrupt markers** — any of: a start with no end, an end with no start, end-before-start, or more than one of either — **refuse to modify**. Print a precise error naming the defect and stop. **Never guess a repair.**
+
+Managed block content (paste verbatim; you may substitute the project name in prose, keep it thin):
+
+```markdown
+<!-- ctl:managed:start -->
+## ctl workflow
+
+This repository uses `ctl` as its canonical task and evidence control plane.
+
+Before modifying files:
+
+1. Read `AGENTS.md` when present and the relevant documents under `.ctl/spec/`.
+2. Inspect the current ctl task and write scope.
+3. If no suitable task exists:
+   - use brainstorm for ambiguous or multi-option work;
+   - create a scoped ctl task;
+   - move it through ready/start before writing.
+4. Only modify paths allowed by the active task.
+5. Protected-path changes must use ctl apply/approval.
+6. Do not manually edit canonical ctl event ledgers or bypass enforcement hooks.
+
+During work:
+
+- Use OMP todos for temporary implementation steps.
+- Use ctl tasks for durable scope, gates and lifecycle.
+- Record brainstorm, research, uncertainty and evidence provenance when applicable.
+- Treat model and critic claims as advisory unless supported by an appropriate oracle.
+
+Before completion:
+
+1. Commit the final changes.
+2. Run all required gates against the committed tree.
+3. Submit for review.
+4. Record a fresh completion audit.
+5. Run `ctl task finish`.
+6. Do not modify the repository after finish without opening or revising a task.
+
+Canonical control state lives under `.ctl/`.
+Legacy workflow directories such as `.trellis/` are not canonical ctl state.
+<!-- ctl:managed:end -->
+```
+
+If `AGENTS.md` exists, keep **general** project rules there and let the `CLAUDE.md` managed block stay a thin Claude-Code + ctl entry pointer. V1 does **not** auto-refactor `AGENTS.md`; instead, report any duplicated/conflicting rules — including a foreign `TRELLIS`-managed block — in the final report so the user can reconcile them.
+
+## M3 — `.trellis/`: ask, never assume
+
+If `.trellis/` exists, present the M1 inventory, then ask the user (recommend option 2, but **never auto-select**):
+
+```
+Existing Trellis workspace detected.
+
+1. Keep .trellis as legacy read-only
+2. Import useful assets, then archive .trellis as .trellis.bak   (recommended)
+3. Leave untouched and do not import
+4. Cancel bootstrap
+```
+
+**Fail closed when non-interactive.** If you are running unattended (no one can answer the prompt) and no mode was supplied out-of-band, **stop**: do not import, do not archive. Print an error requiring an explicit choice. **Never default to archive** in CI or an unattended agent run.
+
+### Mode 1 — Keep as legacy read-only
+- Leave `.trellis/` in place; delete nothing.
+- Write a migration manifest marking `authority: legacy`, `active_control_plane: false`.
+- Detect and report Trellis hooks/workflows that may still be active; do **not** silently disable them unless the user explicitly confirms.
+- The `CLAUDE.md` managed block must state that `.trellis/` is not canonical ctl state.
+
+### Mode 2 — Import then archive (strict order — never reorder)
+```
+inventory
+-> build import plan
+-> import selected content
+-> verify destination hashes
+-> disable/rewrite conflicting ACTIVE references (see M5)
+-> user confirmation
+-> rename .trellis to backup (see M4)
+-> final verification
+```
+**Never rename before importing.**
+
+### Mode 3 — Leave untouched
+- Do not import, do not rename, do not modify Trellis hooks.
+- Only note the potential dual-control-plane risk in the final report.
+
+### Mode 4 — Cancel
+- Produce **zero** file changes. Clean up any temp files already created. The operation must be atomic / safely retryable.
+
+## M4 — Archiving `.trellis` -> `.trellis.bak` (rename = archive, not delete)
+
+Only when the user chose Mode 2 (or explicitly asked to archive `.trellis`). Archiving moves the directory aside by rename; it never deletes data.
+
+Preconditions (ALL required before renaming):
+- `.trellis` exists and is a **directory at the repository root**;
+- `.trellis` is not a symlink/junction, and the archive target stays inside the repo;
+- the chosen target name does **not** already exist.
+
+Collision-safe, deterministic target selection: try `.trellis.bak`, then `.trellis.bak.1`, `.trellis.bak.2`, … and use the first name that does not exist. (A timestamped name is acceptable only where a test can pin the timestamp.) Show the chosen path to the user and record it in the manifest.
+
+Rename only — **never** copy-then-delete, **never** `rm -rf`:
+
+```powershell
+# verify, then rename atomically; on failure .trellis is left untouched
+if (Test-Path .trellis.bak) { throw "target exists; pick .trellis.bak.N" }
+Rename-Item -LiteralPath .trellis -NewName .trellis.bak
+#   POSIX: [ -e .trellis.bak ] && exit 1; mv .trellis .trellis.bak   # mv = rename on same fs
+```
+
+If the rename fails, `.trellis` must remain exactly as it was. Ignored and untracked files are carried into the archive automatically, because a directory rename moves the whole tree.
+
+## M5 — Active-reference handling (before archiving)
+
+Search these surfaces for `.trellis/` references and classify each one:
+
+```
+CLAUDE.md  AGENTS.md  .omp/  .claude/  hooks  scripts  package.json  CI workflows  IDE config  README / CONTRIBUTING
+```
+
+- **active executable reference** (a hook path, an npm script, a CI step, a runnable command): must be **rewritten to the ctl entry point**, or explicitly kept by user choice. Otherwise **block the archive** and report the blocker — do not archive past an unhandled active reference.
+- **documentation reference** (prose in a `.md`): may stay; annotate it with the legacy archive path.
+- **historical reference** (changelog / notes describing past state): leave as-is.
+
+Do not misclassify a prose mention in a doc as an active hook.
+
+## M6 — Importing Trellis content (knowledge only; never control state)
+
+Destinations:
+```
+.ctl/spec/imported/trellis/        <- copied knowledge assets
+.ctl/imports/trellis/manifest.json <- provenance manifest
+```
+
+**Importable (knowledge):** `.trellis/spec/**`, workflow docs, architecture/convention docs, long-term knowledge Markdown in the workspace.
+
+**Legacy-only (reference or copy, never promote):** `.trellis/tasks/**`, task state, execution history, session memory, Trellis completion/gate records. These may be copied or listed in the manifest, but must **never** become ctl canonical events (`task_created`, `task_completed`, `gate_checked`, `evidence_accepted`, …). Do **not** run any `ctl task …` / `ctl gate …` commands to replay imported history.
+
+For every imported file: compute `sha256` of source and destination and assert they are equal; record both in the manifest. Imported content keeps trust level `content_l0` — never present it as source-verified.
+
+```powershell
+(Get-FileHash -Algorithm SHA256 .trellis\spec\backend.md).Hash    # compare to destination
+#   POSIX: sha256sum .trellis/spec/backend.md
+```
+
+Manifest — stable-sorted by `source` so re-running bootstrap produces no spurious diff:
+
+```json
+{
+  "provider": "trellis",
+  "source_root": ".trellis",
+  "archive_path": ".trellis.bak",
+  "mode": "import_then_archive",
+  "trust_level": "content_l0",
+  "canonical_ctl_history": false,
+  "active_control_plane": false,
+  "files": [
+    {
+      "source": ".trellis/spec/backend.md",
+      "destination": ".ctl/spec/imported/trellis/backend.md",
+      "source_hash": "sha256:...",
+      "destination_hash": "sha256:...",
+      "classification": "declared_spec"
+    }
+  ],
+  "legacy_tasks_imported_as_events": false
+}
+```
+
+## M7 — Migration report (facts only — no pass/fail score)
+
+```
+CTL SPEC BOOTSTRAP
+
+CLAUDE.md
+  detected: yes/no
+  ctl managed block: installed / updated / unchanged
+  user-owned content preserved: yes
+
+AGENTS.md
+  detected: yes/no
+  possible duplicated rules: N
+
+TRELLIS
+  detected: yes/no
+  selected mode: keep / import_then_archive / ignore / cancel
+  specs imported: N
+  legacy tasks preserved: N
+  canonical ctl events synthesized: 0
+  active references rewritten: N
+  archived_to: .trellis.bak(.N)
+
+CTL
+  spec root: .ctl/spec/
+  active control plane: ctl
+  manifest: .ctl/imports/trellis/manifest.json
+
+CONFLICTS
+  declared/observed conflicts: N
+```
+
+Emit the same facts as JSON if the caller asked for JSON output.
+
+## Migration — must NOT do
+
+- Convert Trellis tasks / history into ctl events.
+- Bind a full PRD/Design, build a Web UI or project board, add authenticated principals or a hash chain.
+- Auto-delete `.trellis`, or auto-resolve rule conflicts.
+- Run `ctl` and Trellis as two active control planes at once.
+- Promote imported content above L0.
+- Touch project source code, build manifests, or CI config.
+
+---
+
+# Part 2 — Generate / refresh project specs from source
 
 ## Step 0: Verify prerequisites
 
