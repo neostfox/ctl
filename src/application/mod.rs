@@ -2047,20 +2047,26 @@ impl ControlApp {
         let _state = self.replay_task(task_id)?;
         let worktree_path = self.get_worktree_path(task_id)?;
 
-        let diff_files =
+        let changes =
             crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
 
-        let high_risks = crate::infrastructure::workspace::detect_high_risk(&diff_files);
+        let high_risks = crate::infrastructure::workspace::detect_high_risk(&changes);
 
         let mut files_added = Vec::new();
         let mut files_modified = Vec::new();
         let mut files_deleted = Vec::new();
 
-        for (status, path) in &diff_files {
-            match status.as_str() {
-                "A" => files_added.push(path.clone()),
-                "D" => files_deleted.push(path.clone()),
-                _ => files_modified.push(path.clone()),
+        use crate::infrastructure::workspace::Change;
+        for change in &changes {
+            match change {
+                Change::Add(p) => files_added.push(p.clone()),
+                Change::Modify(p) => files_modified.push(p.clone()),
+                Change::Delete(p) => files_deleted.push(p.clone()),
+                // A rename is a delete of the old path + add of the new one.
+                Change::Rename { from, to } => {
+                    files_deleted.push(from.clone());
+                    files_added.push(to.clone());
+                }
             }
         }
 
@@ -2127,24 +2133,23 @@ impl ControlApp {
         self.check_lease_valid(task_id, &state)?;
 
         let worktree_path = self.get_worktree_path(task_id)?;
-        let diff_files =
+        let changes =
             crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
-        let high_risks = crate::infrastructure::workspace::detect_high_risk(&diff_files);
+        let high_risks = crate::infrastructure::workspace::detect_high_risk(&changes);
 
-        // Check all files are within write_allow
+        // Check all touched paths are within write_allow. For a rename this
+        // covers both the removed and the created path.
         let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
             self.project_root.clone(),
         );
-        let mut files_to_apply = Vec::new();
-        for (status, path) in &diff_files {
-            if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
-                return Err(anyhow!(
-                    "File '{}' is out of write scope or in deny list. Rule: scope_enforcement",
-                    path
-                ));
-            }
-            if status != "D" {
-                files_to_apply.push(path.clone());
+        for change in &changes {
+            for path in change.paths() {
+                if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
+                    return Err(anyhow!(
+                        "File '{}' is out of write scope or in deny list. Rule: scope_enforcement",
+                        path
+                    ));
+                }
             }
         }
 
@@ -2196,15 +2201,22 @@ impl ControlApp {
         let lease_used_event = self.build_event(task_id, "lease_used", lease_used_payload)?;
         self.validate_and_append(&lease_used_event)?;
 
-        // Apply files
-        crate::infrastructure::workspace::apply_files(
+        // Apply the changeset: creates/modifies/deletes/renames in the main
+        // workspace per each change's kind (no longer copy-only).
+        crate::infrastructure::workspace::apply_changes(
             &self.project_root,
             &worktree_path,
-            &files_to_apply,
+            &changes,
         )?;
 
+        // Record every path touched in the main workspace (a rename touches the
+        // old and new path; a delete records the removed path).
+        let files_applied: Vec<String> = changes
+            .iter()
+            .flat_map(|c| c.paths().into_iter().map(|s| s.to_string()))
+            .collect();
         let payload = serde_json::json!({
-            "files_applied": files_to_apply,
+            "files_applied": files_applied,
         });
         let event = self.build_event(task_id, "workspace_applied", payload)?;
         self.validate_and_append(&event)?;
@@ -2241,9 +2253,12 @@ impl ControlApp {
     pub fn merge_candidate(&self, task_id: &str) -> Result<serde_json::Value> {
         let state = self.replay_task(task_id)?;
         let worktree_path = self.get_worktree_path(task_id)?;
-        let diff_files =
+        let changes =
             crate::infrastructure::workspace::diff_worktree(&self.project_root, &worktree_path)?;
-        let touched: Vec<String> = diff_files.iter().map(|(_, p)| p.clone()).collect();
+        let touched: Vec<String> = changes
+            .iter()
+            .flat_map(|c| c.paths().into_iter().map(|s| s.to_string()))
+            .collect();
 
         let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
             self.project_root.clone(),
@@ -2251,7 +2266,7 @@ impl ControlApp {
 
         // (1) Every touched file must be inside this task's write scope.
         let mut out_of_scope = Vec::new();
-        for (_status, path) in &diff_files {
+        for path in &touched {
             if !file_in_write_scope(&normalizer, path, &state.write_allow, &state.write_deny)? {
                 out_of_scope.push(path.clone());
             }
@@ -2273,7 +2288,7 @@ impl ControlApp {
                 continue;
             }
             let other = self.replay_task(other_id)?;
-            for (_status, path) in &diff_files {
+            for path in &touched {
                 if file_in_write_scope(&normalizer, path, &other.write_allow, &empty_deny)? {
                     cross_task_conflicts.push(serde_json::json!({
                         "path": path,
@@ -2295,7 +2310,7 @@ impl ControlApp {
 
         // High-risk changes are informational (apply still gates them).
         let requires_approval: Vec<String> =
-            crate::infrastructure::workspace::detect_high_risk(&diff_files)
+            crate::infrastructure::workspace::detect_high_risk(&changes)
                 .iter()
                 .map(|(risk, path)| format!("{}: {}", risk, path))
                 .collect();
@@ -3041,8 +3056,11 @@ impl ControlApp {
             ));
         }
 
-        let diff_files = crate::infrastructure::workspace::diff_worktree(&self.project_root, wt)?;
-        let touched: Vec<String> = diff_files.iter().map(|(_, p)| p.clone()).collect();
+        let changes = crate::infrastructure::workspace::diff_worktree(&self.project_root, wt)?;
+        let touched: Vec<String> = changes
+            .iter()
+            .flat_map(|c| c.paths().into_iter().map(|s| s.to_string()))
+            .collect();
         let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
             self.project_root.clone(),
         );
@@ -3050,7 +3068,7 @@ impl ControlApp {
 
         // (1) Every touched file must be inside this run's write scope.
         let mut out_of_scope = Vec::new();
-        for (_status, path) in &diff_files {
+        for path in &touched {
             if !file_in_write_scope(&normalizer, path, &run.write_allow, &run.write_deny)? {
                 out_of_scope.push(path.clone());
             }
@@ -3065,7 +3083,7 @@ impl ControlApp {
             if other.run_id == run_id {
                 continue;
             }
-            for (_status, path) in &diff_files {
+            for path in &touched {
                 if file_in_write_scope(&normalizer, path, &other.write_allow, &empty_deny)? {
                     cross_run_conflicts.push(serde_json::json!({
                         "path": path,
@@ -3087,7 +3105,7 @@ impl ControlApp {
         };
 
         let requires_approval: Vec<String> =
-            crate::infrastructure::workspace::detect_high_risk(&diff_files)
+            crate::infrastructure::workspace::detect_high_risk(&changes)
                 .iter()
                 .map(|(risk, path)| format!("{}: {}", risk, path))
                 .collect();
