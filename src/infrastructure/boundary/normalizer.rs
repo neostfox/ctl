@@ -271,13 +271,20 @@ mod tests {
     #[test]
     fn accept_carveout_ctl_workflow_md() {
         // Carved out of .ctl protection — the workflow doc is AI-writable config.
-        let norm = PathNormalizer::new(PathBuf::from("."));
+        // Use a temp root that actually contains `.ctl/`: `normalize` canonicalizes
+        // the parent dir, and `.ctl/` is gitignored (absent on a fresh checkout),
+        // so a root of "." only works where ctl has already run.
+        let dir = unique_dir();
+        let norm = PathNormalizer::new(dir.clone());
         assert!(norm.normalize_write(".ctl/workflow.md").is_ok());
+        cleanup(&dir);
     }
     #[test]
     fn accept_carveout_ctl_scripts() {
-        let norm = PathNormalizer::new(PathBuf::from("."));
+        let dir = unique_dir();
+        let norm = PathNormalizer::new(dir.clone());
         assert!(norm.normalize_write(".ctl/scripts").is_ok());
+        cleanup(&dir);
     }
     #[test]
     fn ctl_tasks_still_protected_after_carveout() {
