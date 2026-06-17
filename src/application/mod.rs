@@ -2684,14 +2684,10 @@ impl ControlApp {
                 .map_err(|e| anyhow!("Invalid touched file '{}': {}", file_path, e))?;
             let normalized_str = normalized.to_string_lossy().replace('\\', "/");
             let in_scope = state.write_allow.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
+                crate::domain::task::path_within_scope(&normalized_str, &scope.replace('\\', "/"))
             });
             let in_deny = state.write_deny.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
+                crate::domain::task::path_within_scope(&normalized_str, &scope.replace('\\', "/"))
             });
             if !in_scope || in_deny {
                 let evidence_id = generate_uuid();
@@ -3365,9 +3361,7 @@ impl ControlApp {
                 // Check if the lease's resource_path overlaps with our write_allow
                 let lease_resource = lease.resource_path.replace('\\', "/");
                 let has_overlap = write_allow.iter().any(|scope| {
-                    let scope_norm = scope.replace('\\', "/");
-                    lease_resource.starts_with(scope_norm.as_str())
-                        || scope_norm.starts_with(lease_resource.as_str())
+                    crate::domain::task::scopes_overlap(&lease_resource, &scope.replace('\\', "/"))
                 });
                 if has_overlap {
                     return Err(anyhow!(
@@ -3497,14 +3491,10 @@ impl ControlApp {
                 .map_err(|e| anyhow!("Invalid touched file '{}': {}", file_path, e))?;
             let normalized_str = normalized.to_string_lossy().replace('\\', "/");
             let in_scope = state.write_allow.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
+                crate::domain::task::path_within_scope(&normalized_str, &scope.replace('\\', "/"))
             });
             let in_deny = state.write_deny.iter().any(|scope| {
-                let scope_norm = scope.replace('\\', "/");
-                normalized_str.starts_with(scope_norm.as_str())
-                    || normalized_str == scope_norm.as_str()
+                crate::domain::task::path_within_scope(&normalized_str, &scope.replace('\\', "/"))
             });
             if !in_scope || in_deny {
                 // Reject evidence: file out of scope
@@ -3745,8 +3735,7 @@ fn file_in_write_scope(
         .map_err(|e| anyhow!("Invalid path '{}': {}", path, e))?;
     let normalized_str = normalized.to_string_lossy().replace('\\', "/");
     let matches = |scope: &String| {
-        let scope_norm = scope.replace('\\', "/");
-        normalized_str.starts_with(scope_norm.as_str()) || normalized_str == scope_norm
+        crate::domain::task::path_within_scope(&normalized_str, &scope.replace('\\', "/"))
     };
     Ok(write_allow.iter().any(matches) && !write_deny.iter().any(matches))
 }

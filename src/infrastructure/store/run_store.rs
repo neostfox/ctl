@@ -58,7 +58,16 @@ impl RunEventStore {
     /// event ledger. Read-only when `apply` is false. See [`repair_torn_tail`].
     pub fn repair_run_ledger(&self, run_id: &str, apply: bool) -> Result<TailRepair> {
         validate_run_id(run_id)?;
-        repair_torn_tail(&self.events_path(run_id), apply)
+        let path = self.events_path(run_id);
+        if apply {
+            // Serialize destructive truncation with the single writer (see
+            // `EventStore::repair_task_ledger`): hold the run lock so repair never
+            // races an append. Dry-run stays lock-free (read-only observation).
+            let _lock = self.lock_run(run_id)?;
+            repair_torn_tail(&path, true)
+        } else {
+            repair_torn_tail(&path, false)
+        }
     }
 
     /// Read all events for a specific run.

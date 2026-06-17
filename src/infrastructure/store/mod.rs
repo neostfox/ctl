@@ -309,7 +309,18 @@ impl FileEventStore {
     /// event ledger. See [`repair_torn_tail`] for the exact recoverable shape.
     /// Read-only when `apply` is false. Returns the (possibly no-op) outcome.
     pub fn repair_task_ledger(&self, task_id: &str, apply: bool) -> Result<TailRepair> {
-        repair_torn_tail(&self.events_path(task_id)?, apply)
+        let path = self.events_path(task_id)?;
+        if apply {
+            // Serialize the destructive truncation with the single writer: hold
+            // the same per-task lock appends use, so repair never races an append
+            // (read-bytes → backup → set_len would otherwise truncate on a stale
+            // offset and drop a record committed after the read). Dry-run is a
+            // read-only observation and stays lock-free.
+            let _lock = self.lock_task(task_id)?;
+            repair_torn_tail(&path, true)
+        } else {
+            repair_torn_tail(&path, false)
+        }
     }
 
     /// Read all telemetry entries for one task, in append order. Skips blank
@@ -345,14 +356,43 @@ impl FileEventStore {
 /// upgrades the OS-buffer flush to a durable on-disk commit, so an acknowledged
 /// append survives a power loss (crash-consistency for the canonical ledger).
 pub(crate) fn append_jsonl_line(path: &Path, line: &str) -> Result<()> {
+    // Self-heal a missing trailing newline from a prior torn/partial append. A
+    // crash can persist a complete record's bytes but not its terminating '\n'
+    // (and `repair_torn_tail` deliberately leaves such a record intact, since it
+    // still parses). Without this guard the next append would fuse onto it —
+    // `{..10}{..11}\n` — producing one unparseable line that no longer looks like
+    // a torn tail. Prepending a newline keeps records on separate lines.
+    let needs_leading_newline = file_lacks_trailing_newline(path)?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut buf = String::with_capacity(line.len() + 1);
+    let mut buf = String::with_capacity(line.len() + 2);
+    if needs_leading_newline {
+        buf.push('\n');
+    }
     buf.push_str(line);
     buf.push('\n');
     file.write_all(buf.as_bytes())?;
     file.flush()?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Whether `path` exists, is non-empty, and its final byte is not `\n` — i.e. a
+/// prior append left a record without its terminator. An absent or empty file is
+/// not torn, so returns `false`.
+fn file_lacks_trailing_newline(path: &Path) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
 }
 
 /// Classify a JSONL parse failure: a *torn trailing record* (recoverable via
@@ -835,5 +875,64 @@ mod tests {
             !r.repaired,
             "mid-file corruption must never be auto-truncated"
         );
+    }
+
+    // Regression: a complete record left without its newline (which repair calls
+    // "harmless") must not fuse with the NEXT append into one unparseable line.
+    // `append_jsonl_line` self-heals by inserting the missing newline first.
+    #[test]
+    fn append_after_unterminated_record_self_heals_and_does_not_fuse() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        store.append(&make_create_event("t1", 1)).unwrap();
+        // A COMPLETE record persisted without its terminating newline (a crash
+        // between the bytes and the '\n').
+        let path = store.events_path("t1").unwrap();
+        let line2 = serde_json::to_string(&make_create_event("t1", 2)).unwrap();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(line2.as_bytes()).unwrap();
+        drop(f);
+        // The next append must keep records on separate lines.
+        store.append(&make_create_event("t1", 3)).unwrap();
+        let events = store.read_for_task("t1").unwrap();
+        assert_eq!(
+            events.len(),
+            3,
+            "records fused — missing newline not healed"
+        );
+        assert_eq!(events[2].seq, 3);
+    }
+
+    // Regression: `repair --apply` must serialize with the single writer. It holds
+    // the same per-task lock appends use, so it cannot truncate while a writer is
+    // mid-append.
+    #[test]
+    fn repair_apply_serializes_under_task_lock() {
+        let dir = TempDir::new();
+        let store = FileEventStore::init(dir.path()).unwrap();
+        store.append(&make_create_event("t1", 1)).unwrap();
+        // Leave a torn trailing record for repair to find.
+        let path = store.events_path("t1").unwrap();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"schema\":\"control.event-envelope.v1\",\"seq\":2")
+            .unwrap();
+        drop(f);
+
+        let held = store.lock_task("t1").unwrap();
+        let store2 = FileEventStore::init(dir.path()).unwrap();
+        let worker = std::thread::spawn(move || store2.repair_task_ledger("t1", true));
+        // While the lock is held, repair --apply must block (not truncate).
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !worker.is_finished(),
+            "repair --apply proceeded while the task lock was held"
+        );
+        drop(held); // release; repair should now acquire and finish
+        let outcome = worker.join().unwrap().unwrap();
+        assert!(
+            outcome.repaired,
+            "repair should truncate after acquiring lock"
+        );
+        assert_eq!(store.read_for_task("t1").unwrap().len(), 1);
     }
 }

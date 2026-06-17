@@ -799,20 +799,44 @@ fn decode_research_artifact_kind(
     }
 }
 
+/// True when `path` lies within `scope` on a path-SEGMENT boundary — equal to it,
+/// or strictly beneath it. Both inputs must be normalized, forward-slash and
+/// repo-relative. Segment-boundary matching (rather than a raw string prefix) is
+/// what prevents the prefix-escape where a scope of `src/auth` would otherwise
+/// admit a sibling like `src/authentication`, or `src` would admit `src2`.
+///
+/// This is the single source of truth for "is this path inside this scope?": the
+/// application layer reuses it so the filesystem write gate, evidence audits, and
+/// this pure reducer all agree on exactly the same boundary.
+pub fn path_within_scope(path: &str, scope: &str) -> bool {
+    let scope = scope.trim_end_matches('/');
+    if scope.is_empty() {
+        return false;
+    }
+    path == scope || path.starts_with(&format!("{scope}/"))
+}
+
+/// True when two normalized, forward-slash, repo-relative scopes overlap — one
+/// contains the other on a segment boundary, or they are equal. Used for
+/// mutual-exclusion checks (cross-task lease conflicts, concurrent-schedule write
+/// scopes) where `src` and `src2`, or `src/auth` and `src/authn`, must count as
+/// DISJOINT. Symmetric and free of false negatives: every true containment is
+/// caught by one of the two directions.
+pub fn scopes_overlap(a: &str, b: &str) -> bool {
+    path_within_scope(a, b) || path_within_scope(b, a)
+}
+
 /// Pure write-scope test over an already-normalized, repo-relative path (forward
-/// slashes). Mirrors the application-layer `file_in_write_scope` matcher so a
-/// research artifact is bound by exactly the boundary the write gate enforces —
-/// but without touching the filesystem, keeping the reducer pure for replay.
+/// slashes). Mirrors the application-layer write-scope matcher so a research
+/// artifact is bound by exactly the boundary the write gate enforces — but
+/// without touching the filesystem, keeping the reducer pure for replay.
 fn artifact_within_write_scope(
     path: &str,
     write_allow: &BTreeSet<String>,
     write_deny: &BTreeSet<String>,
 ) -> bool {
     let path = path.replace('\\', "/");
-    let matches = |scope: &String| {
-        let scope = scope.replace('\\', "/");
-        path == scope || path.starts_with(scope.as_str())
-    };
+    let matches = |scope: &String| path_within_scope(&path, &scope.replace('\\', "/"));
     write_allow.iter().any(matches) && !write_deny.iter().any(matches)
 }
 
@@ -1803,4 +1827,47 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
     state.processed_commands.insert(event.command_id.clone());
     state.history.push(event.event_id.clone());
     Ok(())
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::{path_within_scope, scopes_overlap};
+
+    #[test]
+    fn within_scope_exact_and_descendant() {
+        assert!(path_within_scope("src/auth", "src/auth"));
+        assert!(path_within_scope("src/auth/token.rs", "src/auth"));
+        assert!(path_within_scope("src/main.rs", "src"));
+        assert!(path_within_scope("README.md", "README.md"));
+    }
+
+    #[test]
+    fn within_scope_rejects_sibling_prefix_escape() {
+        // The regression: a raw string prefix would wrongly admit these.
+        assert!(!path_within_scope(
+            "src/authentication/token.rs",
+            "src/auth"
+        ));
+        assert!(!path_within_scope("src2/file.rs", "src"));
+        assert!(!path_within_scope("README.md.bak", "README.md"));
+        assert!(!path_within_scope("srcfoo", "src"));
+    }
+
+    #[test]
+    fn within_scope_tolerates_trailing_slash_and_empty() {
+        assert!(path_within_scope("src/auth/x.rs", "src/auth/"));
+        assert!(!path_within_scope("anything", ""));
+        assert!(!path_within_scope("anything", "/"));
+    }
+
+    #[test]
+    fn overlap_is_segment_aware_and_symmetric() {
+        // Disjoint siblings do NOT overlap (raw prefix would say they do).
+        assert!(!scopes_overlap("src", "src2"));
+        assert!(!scopes_overlap("src/auth", "src/authentication"));
+        // Containment overlaps, both directions; equality overlaps.
+        assert!(scopes_overlap("src", "src/auth"));
+        assert!(scopes_overlap("src/auth", "src"));
+        assert!(scopes_overlap("src/auth", "src/auth"));
+    }
 }
