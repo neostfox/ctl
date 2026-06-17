@@ -1593,11 +1593,11 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                     "Ingested manual result for task '{}' at seq {}.",
                     id, event.seq
                 );
-            } else if adapter == "omp" {
-                let event = app.run_ingest_omp(id, std::path::Path::new(result))?;
+            } else if adapter == "omp" || adapter == "opencode" {
+                let event = app.run_ingest(id, std::path::Path::new(result), adapter)?;
                 println!(
-                    "Ingested OMP result for task '{}' at seq {}.",
-                    id, event.seq
+                    "Ingested {} result for task '{}' at seq {}.",
+                    adapter, id, event.seq
                 );
             } else {
                 return Err(anyhow::anyhow!("Unknown adapter: {}", adapter));

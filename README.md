@@ -219,7 +219,7 @@ ctl research record|status            研究 / spike 任务：以证据 + 未知
 它们以 Markdown 流程为主；`ctl` 把任务状态、事件、验收做成 Rust 确定性状态机，边界由机器强制，而不是约定俗成。
 
 **支持哪些 AI 工具？**
-当前激活 OMP（原生 hook）与 Claude Code（PreToolUse hook）。控制层只依赖统一协议，Codex / OpenCode 为规划中的兼容目标。
+当前激活 OMP（原生 hook）、Claude Code（PreToolUse hook）与 opencode（`.opencode/plugins/ctl-gate.ts` 插件：`tool.execute.before` 门禁 + system 上下文注入）。控制层只依赖统一协议；`ctl` 另带 `opencode` 执行器 adapter（`ctl adapter capabilities --adapter opencode`、`ctl run ingest --adapter opencode`）。Codex 仍为规划中的兼容目标。
 
 **会不会限制太死？**
 默认只读、最小权限是刻意设计。需要越界时走 `ctl apply` 申请受审批的路径例外，而不是直接放开。

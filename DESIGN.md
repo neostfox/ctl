@@ -33,7 +33,7 @@
 - `telemetry.jsonl` 证据索引、`control.json` reconcile 决策投影、drift 分数、`audit_hold` 确定性审计。
 - lease / worktree 隔离（部分）、多 agent 并发、Codex / OpenCode adapter。
 
-**当前激活平台**：OMP（原生 hook）+ Claude Code（PreToolUse / SessionStart hook）。`.cursor / .opencode / .pi` 与 Trellis 旧体系已移除；skills 单一来源内嵌于 `ctl` 二进制，经 `ctl init` 注入 `.omp/`。下文凡出现 `telemetry / control.json / drift / audit_hold / Codex / OpenCode / 多 run 并发` 处，均属上面「规划中」一列，阅读时按愿景理解。
+**当前激活平台**：OMP（原生 hook）+ Claude Code（PreToolUse / SessionStart hook）+ opencode（`.opencode/plugins/ctl-gate.ts` 插件：`tool.execute.before` 门禁 + `experimental.chat.system.transform` 上下文注入；另带 `opencode` 执行器 adapter）。`.cursor / .pi` 与 Trellis 旧体系已移除；skills 单一来源内嵌于 `ctl` 二进制，经 `ctl init` 注入 `.omp/`（`.claude/`、`.opencode/` 为随仓库直接维护的集成）。下文凡出现 `telemetry / control.json / drift / audit_hold / Codex / 多 run 并发` 处，均属上面「规划中」一列，阅读时按愿景理解。
 
 ---
 

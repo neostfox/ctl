@@ -1,5 +1,6 @@
 pub mod manual;
 pub mod omp;
+pub mod opencode;
 
 use anyhow::Result;
 use serde_json::Value;

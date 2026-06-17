@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapters::omp::OmpAdapter;
+use crate::adapters::opencode::OpenCodeAdapter;
 use crate::adapters::ExecutorAdapter;
 use crate::domain::event::Event;
 use crate::domain::lease::LeaseStatus;
@@ -21,6 +22,17 @@ use std::collections::BTreeSet;
 /// requires a fresh PASS with this source; using a distinguished source keeps
 /// the canonical event schema unchanged.
 pub const COMPLETION_AUDIT_SOURCE: &str = "completion_audit";
+
+/// Resolve an adapter name to its [`ExecutorAdapter`] implementation.
+/// Single source of truth for the supported-adapter set so adding an adapter
+/// touches one place instead of every run-lifecycle match arm (ADAPTER wiring).
+fn adapter_for(adapter_name: &str) -> Result<Box<dyn ExecutorAdapter>> {
+    match adapter_name {
+        "omp" => Ok(Box::new(OmpAdapter)),
+        "opencode" => Ok(Box::new(OpenCodeAdapter)),
+        other => Err(anyhow!("Unknown adapter: {}", other)),
+    }
+}
 
 pub struct ControlApp {
     pub project_root: PathBuf,
@@ -2601,10 +2613,7 @@ impl ControlApp {
         self.validate_and_append(&lease_event)?;
 
         // Generate run manifest
-        let adapter: Box<dyn ExecutorAdapter> = match adapter_name {
-            "omp" => Box::new(OmpAdapter),
-            _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
-        };
+        let adapter = adapter_for(adapter_name)?;
 
         let write_deny: Vec<String> = state.write_deny.iter().cloned().collect();
         let gates: Vec<String> = state.gates.iter().cloned().collect();
@@ -2650,7 +2659,15 @@ impl ControlApp {
         Ok(event)
     }
 
-    pub fn run_ingest_omp(&self, task_id: &str, result_file: &Path) -> Result<Event> {
+    /// Ingest an agent-output result for `adapter_name` ("omp", "opencode", …).
+    /// The adapter validates the result shape; evidence is tagged with the
+    /// adapter's `source` so the audit trail stays unambiguous across adapters.
+    pub fn run_ingest(
+        &self,
+        task_id: &str,
+        result_file: &Path,
+        adapter_name: &str,
+    ) -> Result<Event> {
         let state = self.replay_task(task_id)?;
         if state.active_run.is_none() {
             return Err(anyhow!("No active run for task '{}'", task_id));
@@ -2660,9 +2677,8 @@ impl ControlApp {
         let result: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| anyhow!("Invalid result file: {}", e))?;
 
-        // Validate via OMP adapter
-        let omp = OmpAdapter;
-        omp.validate_output(&result)?;
+        // Validate via the selected adapter (source/shape contract).
+        adapter_for(adapter_name)?.validate_output(&result)?;
 
         // Validate touched files against write scope
         let touched_files = result
@@ -2693,7 +2709,7 @@ impl ControlApp {
                 let evidence_id = generate_uuid();
                 let payload = serde_json::json!({
                     "evidence_id": evidence_id,
-                    "source": "omp",
+                    "source": adapter_name,
                     "rejection_reason": format!("File '{}' is out of write scope or in deny list", file_path),
                     "touched_file": file_path,
                 });
@@ -2749,7 +2765,7 @@ impl ControlApp {
         // Record evidence_accepted
         let payload = serde_json::json!({
             "evidence_id": evidence_id,
-            "source": "omp",
+            "source": adapter_name,
             "result_file": result_file.to_string_lossy(),
             "touched_files": touched_files,
             "accepted_at": now_iso8601(),
@@ -2763,10 +2779,7 @@ impl ControlApp {
     }
 
     pub fn adapter_capabilities(&self, adapter_name: &str) -> Result<serde_json::Value> {
-        let adapter: Box<dyn ExecutorAdapter> = match adapter_name {
-            "omp" => Box::new(OmpAdapter),
-            _ => return Err(anyhow!("Unknown adapter: {}", adapter_name)),
-        };
+        let adapter = adapter_for(adapter_name)?;
         Ok(adapter.capabilities())
     }
 
@@ -2968,9 +2981,8 @@ impl ControlApp {
                 task_id
             ));
         }
-        if adapter_name != "omp" {
-            return Err(anyhow!("Unknown adapter: {}", adapter_name));
-        }
+        // Validate the adapter is supported (constructs and drops — cheap, ZST).
+        adapter_for(adapter_name)?;
         let run_id = generate_uuid();
         let payload = serde_json::json!({
             "task_id": task_id,
@@ -3040,10 +3052,7 @@ impl ControlApp {
         }
         self.check_run_scope_overlap(run_id, &run.write_allow)?;
 
-        let adapter: Box<dyn ExecutorAdapter> = match run.adapter.as_str() {
-            "omp" => Box::new(OmpAdapter),
-            other => return Err(anyhow!("Unknown adapter: {}", other)),
-        };
+        let adapter = adapter_for(run.adapter.as_str())?;
         let lease_id = generate_uuid();
         let worktree_path =
             crate::infrastructure::workspace::run_worktree_path(&self.project_root, run_id);
