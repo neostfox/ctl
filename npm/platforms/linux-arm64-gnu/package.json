@@ -1,6 +1,6 @@
 {
   "name": "@ai-dev/ctl-linux-arm64-gnu",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "ctl binary for Linux ARM64 (GNU)",
   "files": ["ctl"],
   "os": ["linux"],

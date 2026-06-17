@@ -70,14 +70,14 @@ irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | 
 
 ```bash
 # bash
-curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.2 --dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.3 --dir ~/.local/bin
 # 或用环境变量
-CTL_VERSION=v0.0.2 CTL_INSTALL_DIR=~/.local/bin sh install.sh
+CTL_VERSION=v0.0.3 CTL_INSTALL_DIR=~/.local/bin sh install.sh
 ```
 
 ```powershell
 # PowerShell
-$env:CTL_VERSION="v0.0.2"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
+$env:CTL_VERSION="v0.0.3"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
 ```
 
 **从源码构建：**
