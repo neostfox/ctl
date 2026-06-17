@@ -9,7 +9,7 @@
 //   4. spec drift + unfinished reminders on lifecycle events
 
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
-import { execFile, execFileSync } from "child_process";
+import { execFile } from "child_process";
 
 interface GateResult {
   allowed: boolean;
@@ -30,27 +30,62 @@ const SUBAGENT_TIMEOUT_MS = Number.parseInt(
   10,
 ) || 300_000;
 
-function ctlAsync(subcommand: string): Promise<string | null> {
+// Timeout for `ctl` invocations. Default 15s (was 5s) — the async path below
+// never hangs, but a generous ceiling avoids spurious fail-closed blocks under
+// load. Configurable via env var.
+const CTL_TIMEOUT_MS = Number.parseInt(
+  process.env.CTL_TIMEOUT_MS ?? "",
+  10,
+) || 15_000;
+
+/** Emit a one-line diagnostic so ctl call failures are observable instead of
+ *  being silently swallowed (see issue #2). */
+function logCtlError(
+  stage: string,
+  args: readonly string[],
+  err: NodeJS.ErrnoException & { signal?: string; code?: string | number },
+  stderr?: string,
+): void {
+  if (typeof process.stderr?.write !== "function") return;
+  process.stderr.write(
+    `\n⚠️ ctl hook ${stage} failed: ${JSON.stringify({
+      args,
+      code: err?.code,
+      signal: err?.signal,
+      msg: err?.message,
+      stderr: (stderr ?? "").slice(0, 500),
+    })}\n`,
+  );
+}
+
+/**
+ * Invoke `ctl` via the async libuv spawn path (`execFile`), NOT `execFileSync`.
+ * On Windows, `spawnSync` against the native `ctl.exe` intermittently hangs
+ * with empty stdio until the timeout kills it (issue #2) — the async path does
+ * not. Returns stdout on success, or null on any error (logged, not swallowed).
+ */
+function ctl(args: string[], stage: string): Promise<string | null> {
   const { promise, resolve } = Promise.withResolvers<string | null>();
   execFile(
     "ctl",
-    ["hook", ...subcommand.split(" ")],
-    { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
-    (err, stdout) => { resolve(err ? null : stdout); },
+    args,
+    { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
+    (err, stdout, stderr) => {
+      if (err) {
+        logCtlError(stage, args, err, stderr);
+        resolve(null);
+        return;
+      }
+      resolve(stdout);
+    },
   );
   return promise;
 }
 
-function ctlSync(subcommand: string): string | null {
-  try {
-    return execFileSync("ctl", ["hook", ...subcommand.split(" ")], {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch {
-    return null;
-  }
+/** Run `ctl hook <subcommand>` asynchronously. */
+function ctlHook(subcommand: string): Promise<string | null> {
+  const parts = subcommand.split(" ");
+  return ctl(["hook", ...parts], parts[0] ?? subcommand);
 }
 
 function parseJson(raw: string | null): Record<string, unknown> | null {
@@ -62,24 +97,22 @@ function parseJson(raw: string | null): Record<string, unknown> | null {
   }
 }
 
-/** Query the governance gate for a tool action. */
-function checkGate(
+/** Query the governance gate for a tool action (async — see `ctl` above). */
+async function checkGate(
   tool: string,
   path?: string,
   command?: string,
   agentType?: string,
-): GateResult | null {
+): Promise<GateResult | null> {
   const args = ["hook", "gate", "--tool", tool];
   if (path) args.push("--path", path);
   if (command) args.push("--command", command);
   if (agentType) args.push("--agent-type", agentType);
 
+  const raw = await ctl(args, "gate");
+  if (raw === null) return null; // ctl unavailable / errored (already logged)
+
   try {
-    const raw = execFileSync("ctl", args, {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return {
       allowed: parsed.allowed === true,
@@ -88,8 +121,9 @@ function checkGate(
       task_id: parsed.task_id as string | undefined,
       remedy: parsed.remedy as string | undefined,
     };
-  } catch {
-    return null; // ctl unavailable — don't block
+  } catch (err) {
+    logCtlError("gate-parse", args, err as NodeJS.ErrnoException, raw);
+    return null;
   }
 }
 
@@ -100,7 +134,7 @@ export default function (pi: HookAPI): void {
   // ═══════════════════════════════════════════
   pi.on("session_start", async () => {
     pi.on("context", async (event) => {
-      const raw = ctlSync("context");
+      const raw = await ctlHook("context");
       const ctx = parseJson(raw);
       if (!ctx) return undefined;
 
@@ -213,7 +247,7 @@ export default function (pi: HookAPI): void {
     }
 
     // ── Gate check ──
-    const gate = checkGate(tool, path, command, agentType);
+    const gate = await checkGate(tool, path, command, agentType);
     if (!gate) {
       // ctl unavailable (missing binary, timeout, or crash). Fail CLOSED for
       // mutating tools — an unenforceable boundary must never silently allow
@@ -289,7 +323,7 @@ export default function (pi: HookAPI): void {
   // 4. AGENT END — spec drift detection
   // ═══════════════════════════════════════════
   pi.on("agent_end", async () => {
-    const spec = parseJson(await ctlAsync("spec-status"));
+    const spec = parseJson(await ctlHook("spec-status"));
     if (
       spec?.drift &&
       typeof process.stderr?.write === "function"
@@ -304,7 +338,7 @@ export default function (pi: HookAPI): void {
   // 5. SESSION SHUTDOWN — unfinished task reminder
   // ═══════════════════════════════════════════
   pi.on("session_shutdown", async () => {
-    const raw = ctlSync("context");
+    const raw = await ctlHook("context");
     const ctx = parseJson(raw);
     if (ctx) {
       const tasks = ctx.tasks as {
@@ -324,7 +358,7 @@ export default function (pi: HookAPI): void {
       }
     }
 
-    const spec = parseJson(await ctlAsync("spec-status"));
+    const spec = parseJson(await ctlHook("spec-status"));
     if (
       spec?.drift &&
       typeof process.stderr?.write === "function"
