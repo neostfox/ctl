@@ -22,6 +22,21 @@ opencode-side shims.
   mutating tools (`write`/`edit`/`patch`/`bash`/`task`) are **blocked** until ctl
   responds. Read-only tools are never blocked on ctl errors.
 
+## Tests
+
+The plugin contract is verified with Bun (`.opencode` is a dot-dir, so pass it as cwd):
+
+```bash
+bun test --cwd .opencode
+```
+
+These cover tool classification, gate-arg construction (array form — no shell
+splitting), allow/deny/fail-closed behavior, and context injection — over an
+injected ctl runner, plus one test through the real exported hook. They run as a
+required CI job (`opencode-plugin`). The shared **Rust** adapter conformance
+suite (`cargo test`, in `src/adapters`) covers the executor-adapter side for
+every adapter. Live model-driven E2E is a pre-release dogfood step, not CI.
+
 ## Requirements
 
 - `ctl` must be on `PATH` (`ctl doctor` to verify).

@@ -59,3 +59,24 @@ jobs:
 
       - name: Architecture check
         run: cargo run --locked --quiet -- architecture check
+
+  # The opencode gate plugin is a supported integration surface, so its contract
+  # is a required check — not optional. This covers the plugin's pure logic and
+  # its hooks over an injected ctl runner (deterministic, no model, no network).
+  # Live model-driven E2E is intentionally NOT here: it depends on a provider,
+  # credentials, cost, and is non-deterministic — run it pre-release as dogfood.
+  opencode-plugin:
+    name: opencode gate plugin (bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # .opencode is a dot-dir (bun's default scan skips it), so run with it as cwd.
+      - name: opencode plugin tests
+        run: bun test --cwd .opencode

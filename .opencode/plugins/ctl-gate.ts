@@ -6,24 +6,27 @@
  * `ctl hook context`); this plugin only translates opencode's plugin protocol
  * into `ctl` calls and back.
  *
- *   1. tool.execute.before — gate write/edit/bash/task against the ctl ledger.
- *      Throwing aborts the tool call, so a denied verdict blocks the action.
- *   2. experimental.chat.system.transform — inject active task boundaries into
- *      the system prompt on every call (opencode's analog of SessionStart
- *      context injection).
+ *   1. tool.execute.before — gate write/edit/patch/bash/task against the ctl
+ *      ledger. Throwing aborts the tool call, so a denied verdict blocks it.
+ *   2. experimental.chat.system.transform — inject active task boundaries
+ *      (scope, phase, task id) into the system prompt.
  *
  * Fails CLOSED for mutating tools: if `ctl` is missing, times out, or returns
- * unparseable output, mutating tools are blocked rather than silently allowed —
- * an unenforceable boundary must never wave writes through. Read-only tools are
- * never blocked on ctl errors.
+ * unparseable output, mutating tools are blocked rather than silently allowed.
+ * Read-only tools are never blocked on ctl errors.
  *
- * Auto-loaded by opencode from `.opencode/plugins/*.ts` (the brace glob
- * `{plugin,plugins}` also matches the singular form on current versions).
+ * Structure: the gate/context decision logic is factored into pure, exported
+ * functions (isMutating / extractGateInput / buildGateArgs / buildContextMessage)
+ * and the ctl invocation behind a `CtlRunner` seam, so `bun test` can verify the
+ * contract without spawning processes or a model. `createHooks(runner)` wires
+ * them; the default export injects the real execFile-based runner.
+ *
+ * Auto-loaded by opencode from `.opencode/plugins/*.ts`.
  */
 import type { Plugin } from "@opencode-ai/plugin";
 import { execFile } from "node:child_process";
 
-interface GateResult {
+export interface GateResult {
   allowed: boolean;
   state: string;
   reason: string;
@@ -31,90 +34,36 @@ interface GateResult {
   remedy?: string;
 }
 
+export interface ActiveTask {
+  id: string;
+  objective: string;
+  phase?: string;
+  boundary?: { write_allow?: string[]; write_deny?: string[]; gates?: string[] };
+}
+
+export interface ContextResult {
+  active_tasks?: ActiveTask[];
+}
+
+// opencode tool names whose denial/unavailability must fail CLOSED. `bash` is
+// included (unlike the Claude hook) because opencode surfaces a clean `command`
+// arg, so ctl does not need to parse complex shell on Windows.
+export const MUTATING_TOOLS = new Set(["write", "edit", "patch", "bash", "task"]);
+
+export function isMutating(tool: string): boolean {
+  return MUTATING_TOOLS.has(tool);
+}
+
 // Timeout for `ctl` invocations. Generous ceiling avoids spurious fail-closed
-// blocks under load; the async spawn path below never hangs. Override via env.
+// blocks under load; the async spawn path never hangs. Override via env.
 const CTL_TIMEOUT_MS =
   Number.parseInt(process.env.CTL_TIMEOUT_MS ?? "", 10) || 15_000;
 
-// opencode tool names whose denial/unavailability must fail CLOSED.
-// `bash` is included (unlike the Claude hook) because opencode surfaces a clean
-// `command` arg, so ctl does not need to parse complex shell on Windows.
-const FAIL_CLOSED_TOOLS = new Set(["write", "edit", "patch", "bash", "task"]);
-
-/** Emit a one-line diagnostic so ctl failures are observable, not swallowed. */
-function logCtlError(stage: string, args: readonly string[], detail: string): void {
-  if (typeof process.stderr?.write !== "function") return;
-  process.stderr.write(
-    `\n⚠️ ctl ${stage} failed: ${JSON.stringify({ args, detail: detail.slice(0, 500) })}\n`,
-  );
-}
-
-/**
- * Invoke `ctl` via the async libuv spawn path (`execFile`), NOT a sync spawn:
- * on Windows `spawnSync` against the native `ctl.exe` can hang with empty stdio
- * until the timeout kills it. Returns stdout on success, or null on any error.
- */
-function ctl(args: string[], stage: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(
-      "ctl",
-      args,
-      { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
-      (err, stdout, stderr) => {
-        if (err) {
-          logCtlError(stage, args, `${(err as Error).message}\n${stderr ?? ""}`);
-          resolve(null);
-          return;
-        }
-        resolve(stdout);
-      },
-    );
-  });
-}
-
-/** Query the governance gate for a tool action. */
-async function checkGate(
+/** Map an opencode tool + its args to the ctl gate's logical (tool, path, command, agentType). */
+export function extractGateInput(
   tool: string,
-  path?: string,
-  command?: string,
-  agentType?: string,
-): Promise<GateResult | null> {
-  const args = ["hook", "gate", "--tool", tool];
-  if (path) args.push("--path", path);
-  if (command) args.push("--command", command);
-  if (agentType) args.push("--agent-type", agentType);
-
-  // Forward the dispatch binding so the gate governs this call by the task that
-  // dispatched it (resolves multi-active ambiguity). ctl also reads CTL_TASK_ID
-  // from its own env; this is the explicit, audited seam.
-  const task = (process.env.CTL_TASK_ID ?? "").trim();
-  if (task) args.push("--task", task);
-
-  const raw = await ctl(args, "gate");
-  if (raw === null) return null; // ctl unavailable / errored (already logged)
-
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
-      allowed: parsed.allowed === true,
-      state: (parsed.state as string) ?? "unknown",
-      reason: (parsed.reason as string) ?? "",
-      task_id: parsed.task_id as string | undefined,
-      remedy: parsed.remedy as string | undefined,
-    };
-  } catch {
-    logCtlError("gate-parse", args, raw);
-    return null;
-  }
-}
-
-/** Map an opencode tool + its args to the ctl gate's (tool, path, command, agentType). */
-function extractGateInput(tool: string, args: Record<string, unknown>): {
-  ctlTool: "write" | "bash" | "task" | null;
-  path?: string;
-  command?: string;
-  agentType?: string;
-} {
+  args: Record<string, unknown>,
+): { ctlTool: "write" | "bash" | "task" | null; path?: string; command?: string; agentType?: string } {
   switch (tool) {
     case "write":
     case "edit":
@@ -136,21 +85,140 @@ function extractGateInput(tool: string, args: Record<string, unknown>): {
   }
 }
 
-export const CtlGate: Plugin = async () => {
+/**
+ * Build the `ctl hook gate` argv. Pure, and deliberately the ARRAY form (never a
+ * shell string), so a path or command containing spaces, quotes, or `$`/`&`
+ * stays a single argument and cannot change the command's argument boundaries.
+ */
+export function buildGateArgs(input: {
+  ctlTool: "write" | "bash" | "task";
+  path?: string;
+  command?: string;
+  agentType?: string;
+  taskId?: string;
+}): string[] {
+  const args = ["hook", "gate", "--tool", input.ctlTool];
+  if (input.path) args.push("--path", input.path);
+  if (input.command) args.push("--command", input.command);
+  if (input.agentType) args.push("--agent-type", input.agentType);
+  // Forward the dispatch binding so the gate governs this call by the task that
+  // dispatched it (resolves multi-active ambiguity).
+  if (input.taskId && input.taskId.trim()) args.push("--task", input.taskId.trim());
+  return args;
+}
+
+/**
+ * Render the active-task system context — scope, phase, and task id per active
+ * task. Returns null when there is no active task, so the plugin never
+ * fabricates task context out of an empty ledger.
+ */
+export function buildContextMessage(active: ActiveTask[] | undefined): string | null {
+  if (!active || active.length === 0) return null;
+  const lines = active.map((t) => {
+    const b = t.boundary;
+    const scope = b?.write_allow?.length ? b.write_allow.join(", ") : "(no write scope)";
+    const deny = b?.write_deny?.length ? `\n  🚫 Deny: ${b.write_deny.join(", ")}` : "";
+    const gates = b?.gates?.length ? `\n  🔍 Gates: ${b.gates.join(", ")}` : "";
+    const phase = t.phase ?? "in_progress";
+    return `  📦 ${t.id} [${phase}]: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}`;
+  });
+  return [
+    `📋 Active ctl task boundaries — stay within write scope:`,
+    ...lines,
+    `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
+  ].join("\n");
+}
+
+/** Seam over the `ctl` invocation so tests can inject verdicts without spawning. */
+export interface CtlRunner {
+  gate(args: string[]): Promise<GateResult | null>;
+  context(): Promise<ContextResult | null>;
+}
+
+/** Emit a one-line diagnostic so ctl failures are observable, not swallowed. */
+function logCtlError(stage: string, args: readonly string[], detail: string): void {
+  if (typeof process.stderr?.write !== "function") return;
+  process.stderr.write(
+    `\n⚠️ ctl ${stage} failed: ${JSON.stringify({ args, detail: detail.slice(0, 500) })}\n`,
+  );
+}
+
+/**
+ * Invoke `ctl` via the async libuv spawn path (`execFile`, array argv, no shell):
+ * on Windows a sync spawn against the native `ctl.exe` can hang with empty stdio
+ * until the timeout kills it. Returns stdout on success, or null on any error.
+ */
+function runCtl(args: string[], stage: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "ctl",
+      args,
+      { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          logCtlError(stage, args, `${(err as Error).message}\n${stderr ?? ""}`);
+          resolve(null);
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+function parseJson<T>(raw: string | null, stage: string, args: readonly string[]): T | null {
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    logCtlError(`${stage}-parse`, args, raw);
+    return null;
+  }
+}
+
+/** Default runner: shells out to the real `ctl` binary. */
+export const realCtlRunner: CtlRunner = {
+  async gate(args) {
+    const parsed = parseJson<Record<string, unknown>>(await runCtl(args, "gate"), "gate", args);
+    if (!parsed) return null;
+    return {
+      allowed: parsed.allowed === true,
+      state: (parsed.state as string) ?? "unknown",
+      reason: (parsed.reason as string) ?? "",
+      task_id: parsed.task_id as string | undefined,
+      remedy: parsed.remedy as string | undefined,
+    };
+  },
+  async context() {
+    const args = ["hook", "context"];
+    return parseJson<ContextResult>(await runCtl(args, "context"), "context", args);
+  },
+};
+
+/** Wire the opencode hooks over a [`CtlRunner`]. Exported for testing. */
+export function createHooks(runner: CtlRunner) {
   return {
     // ── Tool gate: state-machine enforcement ──────────────────────────────
-    "tool.execute.before": async (input, output) => {
-      const { ctlTool, path, command, agentType } = extractGateInput(
-        input.tool,
-        (output.args ?? {}) as Record<string, unknown>,
-      );
-      if (!ctlTool) return; // not a gated tool
+    "tool.execute.before": async (
+      input: { tool: string },
+      output: { args?: Record<string, unknown> },
+    ): Promise<void> => {
+      const gi = extractGateInput(input.tool, output.args ?? {});
+      if (!gi.ctlTool) return; // not a gated tool
 
-      const gate = await checkGate(ctlTool, path, command, agentType);
+      const gate = await runner.gate(
+        buildGateArgs({
+          ctlTool: gi.ctlTool,
+          path: gi.path,
+          command: gi.command,
+          agentType: gi.agentType,
+          taskId: process.env.CTL_TASK_ID,
+        }),
+      );
 
       if (!gate) {
         // ctl unavailable. Fail CLOSED for mutating tools; allow read-only.
-        if (FAIL_CLOSED_TOOLS.has(input.tool)) {
+        if (isMutating(input.tool)) {
           throw new Error(
             "ctl gate unavailable (binary missing, timeout, or error) — failing closed. " +
               "Mutating tools are blocked until `ctl` responds. Ensure `ctl` is on PATH.",
@@ -166,40 +234,17 @@ export const CtlGate: Plugin = async () => {
     },
 
     // ── Context injection: active task boundaries on every call ───────────
-    "experimental.chat.system.transform": async (_input, output) => {
-      const raw = await ctl(["hook", "context"], "context");
-      if (!raw) return;
-      let ctx: Record<string, unknown>;
-      try {
-        ctx = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-
-      const active = (ctx.active_tasks ?? []) as Array<{
-        id: string;
-        objective: string;
-        boundary?: { write_allow?: string[]; write_deny?: string[]; gates?: string[] };
-      }>;
-      if (!active.length) return;
-
-      const lines = active.map((t) => {
-        const b = t.boundary;
-        const scope = b?.write_allow?.length ? b.write_allow.join(", ") : "(no write scope)";
-        const deny = b?.write_deny?.length ? `\n  🚫 Deny: ${b.write_deny.join(", ")}` : "";
-        const gates = b?.gates?.length ? `\n  🔍 Gates: ${b.gates.join(", ")}` : "";
-        return `  📦 ${t.id}: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}`;
-      });
-
-      output.system.push(
-        [
-          `📋 Active ctl task boundaries — stay within write scope:`,
-          ...lines,
-          `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
-        ].join("\n"),
-      );
+    "experimental.chat.system.transform": async (
+      _input: unknown,
+      output: { system: string[] },
+    ): Promise<void> => {
+      const ctx = await runner.context();
+      const msg = buildContextMessage(ctx?.active_tasks);
+      if (msg) output.system.push(msg);
     },
   };
-};
+}
+
+export const CtlGate: Plugin = async () => createHooks(realCtlRunner) as never;
 
 export default CtlGate;
