@@ -82,36 +82,6 @@ impl ExecutorAdapter for OpenCodeAdapter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapter_name_is_opencode() {
-        assert_eq!(OpenCodeAdapter.adapter_name(), "opencode");
-    }
-
-    #[test]
-    fn capabilities_report_opencode() {
-        let caps = OpenCodeAdapter.capabilities();
-        assert_eq!(caps["adapter"], "opencode");
-        assert_eq!(caps["output_format"], "agent-output.json");
-    }
-
-    #[test]
-    fn validate_output_requires_opencode_source() {
-        // Wrong source is rejected (e.g. an OMP result fed to the opencode adapter).
-        let omp_shaped = serde_json::json!({ "source": "omp", "touched_files": [] });
-        assert!(OpenCodeAdapter.validate_output(&omp_shaped).is_err());
-
-        // Correct source + touched_files passes.
-        let ok = serde_json::json!({ "source": "opencode", "touched_files": ["src/main.rs"] });
-        assert!(OpenCodeAdapter.validate_output(&ok).is_ok());
-    }
-
-    #[test]
-    fn validate_output_requires_touched_files_array() {
-        let missing = serde_json::json!({ "source": "opencode" });
-        assert!(OpenCodeAdapter.validate_output(&missing).is_err());
-    }
-}
+// Adapter behavior is verified by the shared conformance suite in
+// `crate::adapters::conformance`, which runs the same contract over every
+// registered adapter — see SUPPORTED_ADAPTERS. No per-adapter test copies.

@@ -1593,7 +1593,7 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                     "Ingested manual result for task '{}' at seq {}.",
                     id, event.seq
                 );
-            } else if adapter == "omp" || adapter == "opencode" {
+            } else if crate::adapters::supported_adapters().contains(&adapter.as_str()) {
                 let event = app.run_ingest(id, std::path::Path::new(result), adapter)?;
                 println!(
                     "Ingested {} result for task '{}' at seq {}.",
@@ -3706,6 +3706,7 @@ fn cmd_hook_context() -> Result<()> {
                 .unwrap_or(serde_json::json!({}));
             active.push(serde_json::json!({
                 "id": task_id,
+                "phase": phase,
                 "objective": report.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
                 "boundary": boundary,
             }));

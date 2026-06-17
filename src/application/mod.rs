@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::adapters::omp::OmpAdapter;
-use crate::adapters::opencode::OpenCodeAdapter;
-use crate::adapters::ExecutorAdapter;
+use crate::adapters::adapter_for;
 use crate::domain::event::Event;
 use crate::domain::lease::LeaseStatus;
 use crate::domain::run::{apply_run, AgentRunState, RunPhase};
@@ -22,17 +20,6 @@ use std::collections::BTreeSet;
 /// requires a fresh PASS with this source; using a distinguished source keeps
 /// the canonical event schema unchanged.
 pub const COMPLETION_AUDIT_SOURCE: &str = "completion_audit";
-
-/// Resolve an adapter name to its [`ExecutorAdapter`] implementation.
-/// Single source of truth for the supported-adapter set so adding an adapter
-/// touches one place instead of every run-lifecycle match arm (ADAPTER wiring).
-fn adapter_for(adapter_name: &str) -> Result<Box<dyn ExecutorAdapter>> {
-    match adapter_name {
-        "omp" => Ok(Box::new(OmpAdapter)),
-        "opencode" => Ok(Box::new(OpenCodeAdapter)),
-        other => Err(anyhow!("Unknown adapter: {}", other)),
-    }
-}
 
 pub struct ControlApp {
     pub project_root: PathBuf,
@@ -4492,6 +4479,59 @@ mod tests {
         app.workspace_create(id).unwrap();
         let wt = dir.join(".ctl/tasks").join(id).join("worktree");
         (app, wt)
+    }
+
+    /// Conformance (cross-adapter): ingesting an in-scope result tags the
+    /// accepted evidence with the *adapter's own* source — for every supported
+    /// adapter, driven off the registry so a new adapter is covered for free.
+    #[test]
+    fn ingest_tags_evidence_source_for_every_adapter() {
+        for adapter in crate::adapters::supported_adapters() {
+            let dir = TempDir::new();
+            git(dir.path(), &["init", "-q"]);
+            git(dir.path(), &["config", "user.email", "t@t"]);
+            git(dir.path(), &["config", "user.name", "t"]);
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}\n").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "-qm", "init"]);
+
+            let app = ControlApp::init(dir.path()).unwrap();
+            let scope = vec!["src".to_string()];
+            app.create_task(
+                "t",
+                CreateTaskInput {
+                    objective: "ingest source",
+                    read_scope: &scope,
+                    write_allow: &scope,
+                    write_deny: &[],
+                    risk_triggers: &[],
+                    gates: &["cargo_check".to_string()],
+                    depends_on: &[],
+                },
+            )
+            .unwrap();
+            app.mark_ready("t").unwrap();
+            app.start_task("t").unwrap();
+            app.run_start("t", adapter).unwrap();
+
+            let result_file = dir.path().join("agent-output.json");
+            std::fs::write(
+                &result_file,
+                format!(r#"{{"source":"{adapter}","touched_files":["src/lib.rs"]}}"#),
+            )
+            .unwrap();
+            let evidence = app.run_ingest("t", &result_file, adapter).unwrap();
+
+            assert_eq!(
+                evidence.event_type, "evidence_accepted",
+                "{adapter}: in-scope ingest should be accepted"
+            );
+            assert_eq!(
+                evidence.payload["source"], *adapter,
+                "{adapter}: accepted evidence must be tagged source={adapter}"
+            );
+        }
     }
 
     #[test]
