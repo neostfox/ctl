@@ -1,16 +1,3 @@
----
-name: control-guard
-description: "Control plane entry point (opencode). Proactively routes ctl task lifecycle — scope, gates, audit, finish — while the .opencode/plugins/ctl-gate.ts plugin enforces boundaries and injects context. Findings follow the Iron Law: Symptom → Source → Consequence → Remedy."
----
-
-# Control Guard (opencode)
-
-The **managed core** below is the platform-neutral control-guard protocol,
-byte-checked by CI against `.agent/protocols/control-guard.md` and the OMP skill.
-Do not edit it here in isolation. opencode-specific mechanics live in "opencode
-Integration" after the core.
-
-<!-- ctl:control-guard-core:start version=1 -->
 # Control Guard — Core Protocol
 
 CONTROL_GUARD_PROTOCOL_VERSION = 1
@@ -163,20 +150,3 @@ Suggestion.
 - Recording your own passing completion audit (reviewer must ≠ implementer).
 - Suggesting a fix without diagnosing the root cause.
 - Treating model/evidence output as authoritative state.
-<!-- ctl:control-guard-core:end -->
-
-## opencode Integration (platform-specific)
-
-`.opencode/plugins/ctl-gate.ts` does the enforcement — you do not replicate it:
-
-- **experimental.chat.system.transform**: injects the active task boundaries
-  (scope, phase, task id) into the system prompt every call.
-- **tool.execute.before**: gates the mutating tools `write` / `edit` / `patch` /
-  `bash` / `task` via `ctl hook gate`; it **throws** (blocking the tool) on an
-  out-of-scope or wrong-phase verdict, and **fails closed** for mutating tools
-  when `ctl` is unavailable. Read-only tools are never blocked.
-
-Subtasks: use opencode's native task/todo tracking within the parent's
-`write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
-var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The
-plugin contract is covered by `bun test --cwd .opencode`.
