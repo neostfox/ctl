@@ -219,6 +219,16 @@ pub struct RepairOutcome {
     pub result: String,
 }
 
+/// GO / NO-GO verdict for the ralph unattended-supervisor loop
+/// (ralph-safe-run-v1). `go == true` means it is still safe to continue without
+/// a human; otherwise `blockers` lists every reason attention is due. Purely
+/// advisory and read-only — it never mutates and never spawns.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RalphVerdict {
+    pub go: bool,
+    pub blockers: Vec<String>,
+}
+
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
@@ -1975,6 +1985,58 @@ impl ControlApp {
             "uncommitted_in_scope": uncommitted,
             "recent_events": recent_events,
         }))
+    }
+
+    /// Read-only GO / NO-GO safety evaluation for an unattended (ralph)
+    /// supervisor loop: is it still safe to continue without a human? Composes
+    /// this session's guards — task hold/terminality, cross-ledger consistency,
+    /// shared-`.git` locks, and drift (next-action) — into one verdict. Appends
+    /// nothing; spawns nothing. The supervisor halts the moment this returns a
+    /// NO-GO; it is the envelope around an external run, never the executor.
+    pub fn ralph_safety_check(&self, task_id: &str) -> Result<RalphVerdict> {
+        let mut blockers = Vec::new();
+
+        let state = self.replay_task(task_id)?;
+        if state.is_held {
+            blockers.push("task is held — resolve the hold before resuming".to_string());
+        }
+        if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
+            blockers.push(format!(
+                "task is terminal ({:?}) — nothing left to supervise",
+                state.phase
+            ));
+        }
+
+        let cross_ledger = self.cross_ledger_findings()?;
+        if !cross_ledger.is_empty() {
+            blockers.push(format!(
+                "{} cross-ledger inconsistency(ies) — run `ctl repair --cross-ledger`",
+                cross_ledger.len()
+            ));
+        }
+
+        let risk = crate::infrastructure::workspace::scan_shared_git_risk(&self.project_root);
+        if risk.any() {
+            blockers.push(format!(
+                "shared .git lock present: {}",
+                risk.descriptions().join("; ")
+            ));
+        }
+
+        // Drift: anything other than Pass means a human decision is due.
+        let na = self.next_action(task_id)?;
+        if !matches!(na.action, crate::domain::drift::NextActionKind::Pass) {
+            blockers.push(format!(
+                "drift next-action is {} ({})",
+                na.action.as_str(),
+                na.rationale
+            ));
+        }
+
+        Ok(RalphVerdict {
+            go: blockers.is_empty(),
+            blockers,
+        })
     }
 
     // ── Queries ──
@@ -6071,6 +6133,52 @@ mod tests {
             app.replay_task("t1").unwrap().last_seq,
             before,
             "handoff export must not append events"
+        );
+    }
+
+    // ── ralph safety supervisor (ralph-safe-run-v1) ──
+
+    #[test]
+    fn ralph_safety_go_on_clean_active_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(v.go, "clean active task is GO, blockers: {:?}", v.blockers);
+    }
+
+    #[test]
+    fn ralph_safety_nogo_on_terminal_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.cancel_task("t1").unwrap();
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(!v.go);
+        assert!(
+            v.blockers.iter().any(|b| b.contains("terminal")),
+            "blockers: {:?}",
+            v.blockers
+        );
+    }
+
+    #[test]
+    fn ralph_safety_nogo_on_cross_ledger_drift() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        // A stranded/orphan run anywhere is a global cross-ledger inconsistency.
+        seed_running_run(&app, "ghost-task", &["other"]);
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(!v.go);
+        assert!(
+            v.blockers.iter().any(|b| b.contains("cross-ledger")),
+            "blockers: {:?}",
+            v.blockers
         );
     }
 

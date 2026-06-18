@@ -202,6 +202,13 @@ enum Commands {
         #[command(subcommand)]
         command: PrdCommands,
     },
+    /// Bounded safety supervisor for unattended runs (ralph-safe-run-v1). A
+    /// read-only dead-man's-switch around an external run — it NEVER spawns an
+    /// executor or writes code; it halts the moment human attention is due.
+    Ralph {
+        #[command(subcommand)]
+        command: RalphCommands,
+    },
     /// Brainstorm provenance (V1): record which cognitive artifacts a task
     /// derived from. Record-only — never gates create/finish, never claims
     /// thinking quality or review independence.
@@ -756,6 +763,29 @@ enum PrdCommands {
 }
 
 #[derive(Subcommand)]
+enum RalphCommands {
+    /// Supervise an unattended run: loop a read-only safety check (GO/NO-GO)
+    /// with hard stops, halting the instant a human is needed. Spawns nothing.
+    Run {
+        /// Task to supervise
+        #[arg(long)]
+        id: String,
+        /// Maximum safety cycles before stopping (hard bound)
+        #[arg(long, default_value_t = 100)]
+        max_iters: u64,
+        /// Wall-clock deadline in seconds (0 = no deadline)
+        #[arg(long, default_value_t = 0)]
+        max_secs: u64,
+        /// Seconds to sleep between cycles (0 = no sleep)
+        #[arg(long, default_value_t = 0)]
+        interval_secs: u64,
+        /// Kill-switch file: if it exists, stop immediately
+        #[arg(long, default_value = ".ctl/STOP")]
+        kill_switch: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ArchitectureCommands {
     /// Run compliance checks, failing fast on the first violation (CI gate)
     Check,
@@ -1095,6 +1125,7 @@ pub fn run() -> Result<()> {
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
         Commands::Handoff { command } => cmd_handoff(command),
         Commands::Prd { command } => cmd_prd(command),
+        Commands::Ralph { command } => cmd_ralph(command),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
@@ -1784,6 +1815,74 @@ fn cmd_prd(command: &PrdCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_ralph(command: &RalphCommands) -> Result<()> {
+    match command {
+        RalphCommands::Run {
+            id,
+            max_iters,
+            max_secs,
+            interval_secs,
+            kill_switch,
+        } => cmd_ralph_run(id, *max_iters, *max_secs, *interval_secs, kill_switch),
+    }
+}
+
+/// Bounded, read-only safety supervisor (ralph-safe-run-v1). Loops a GO/NO-GO
+/// safety check around an unattended run with three independent hard stops —
+/// kill-switch file, wall-clock deadline, and a max-cycle cap — and halts the
+/// instant the check reports NO-GO. This is the governance envelope, NOT an
+/// executor: it spawns nothing and writes no code (ctl never spawns).
+fn cmd_ralph_run(
+    id: &str,
+    max_iters: u64,
+    max_secs: u64,
+    interval_secs: u64,
+    kill_switch: &str,
+) -> Result<()> {
+    let app = app_open(false)?;
+    let kill = std::path::Path::new(kill_switch);
+    let start = std::time::Instant::now();
+
+    println!(
+        "ralph supervisor for '{id}' — max_iters={max_iters}, max_secs={}, interval={interval_secs}s, kill-switch={kill_switch}",
+        if max_secs == 0 { "none".to_string() } else { max_secs.to_string() }
+    );
+    println!("(read-only watchdog — spawns no executor, writes no code)");
+
+    let mut iter: u64 = 0;
+    let stop_reason = loop {
+        // Hard stops, checked before each cycle.
+        if kill.exists() {
+            break format!("kill-switch present ({kill_switch})");
+        }
+        if max_secs > 0 && start.elapsed().as_secs() >= max_secs {
+            break format!("deadline reached ({max_secs}s)");
+        }
+        if iter >= max_iters {
+            break format!("max iterations reached ({max_iters})");
+        }
+        iter += 1;
+
+        let verdict = app.ralph_safety_check(id)?;
+        if verdict.go {
+            println!("  cycle {iter}: GO — safe to continue");
+        } else {
+            println!("  cycle {iter}: NO-GO — human attention needed:");
+            for b in &verdict.blockers {
+                println!("      - {b}");
+            }
+            break format!("safety NO-GO at cycle {iter}");
+        }
+
+        if interval_secs > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+        }
+    };
+
+    println!("STOP: {stop_reason}. Supervised {iter} cycle(s).");
+    Ok(())
 }
 
 fn cmd_handoff(command: &HandoffCommands) -> Result<()> {
