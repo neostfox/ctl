@@ -149,7 +149,8 @@ proposal → approval → scoped lease → implement → audit_hold
 
 > **边界的诚实声明（这是机制护栏，不是密码学安全边界）：**
 > - **写入边界是 agent 工具 hook 层的 fail-closed 拦截，不是 OS 沙箱。** 它治理经 OMP / Claude Code hook 路由的写操作；一个不经 hook 的进程不受此边界约束。它是「可执行、可审计的边界」，不是内核级隔离。
-> - **`hash` 是内容/制品 hash（`tree_hash` / `policy_hash` / `evidence_hash`），保证的是信封完整性，不是内部声明的可信度。** 事件未做密码学签名；`actor` 是来源标签，不是被验证的身份主体。
+> - **`hash` 是内容/制品 hash（`tree_hash` / `policy_hash` / `evidence_hash`），保证的是信封完整性，不是内部声明的可信度。** 事件未做密码学签名；`actor` 是来源标签，不是被验证的身份主体。事件日志**不是 L3 防篡改证据**（无 hash chain / 签名 / 外部锚定）；它保证的是单写者顺序与信封完整性，不是抗对手篡改。
+> - **尚无 authenticated principal。** 「reviewer ≠ implementer」靠 `actor` 标签区分：审计 / 审批由不同的 `CTL_ACTOR` 标签（如 `ctl-review`）记录在账本上，但这只是**审阅者角色标签，不是被证明的独立身份主体**。不要把它读作「已证明的独立审批」。
 > - **并发多-run orchestration 仍是 experimental。** 单写者保证对每个 task / run 账本成立，但跨账本（task ↔ run）写入不是事务化的：崩溃可能留下不一致，由 `ctl doctor` 检出并给出手工恢复指引（控制层不自动改写状态）。
 
 > 完整的控制论映射、drift 计算、子智能体调度协议、schema 设计等详见 [DESIGN.md](./DESIGN.md)。

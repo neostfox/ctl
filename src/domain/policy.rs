@@ -17,6 +17,17 @@ use sha2::{Digest, Sha256};
 /// collide across an encoding revision.
 const POLICY_SCHEMA_VERSION: u32 = 1;
 
+/// Version of the **executor governance policy** — the rules under which a run
+/// executes and its output is admitted: the run-manifest contract
+/// (`control.run-manifest.v1`), the ingest scope check (SCOPE-001), and
+/// `validate_output` (evidence `source` + `touched_files`). It is folded into
+/// every `policy_hash` so that gate/audit evidence is bound to the executor
+/// policy generation in force when it was produced: bump this and all prior
+/// evidence goes stale (its `policy_hash` no longer matches), forcing re-run
+/// under the new policy. It is deliberately separate from
+/// [`POLICY_SCHEMA_VERSION`] (which only tracks the byte *encoding*).
+pub const EXECUTOR_POLICY_VERSION: u32 = 1;
+
 /// The policy-relevant definition of a single required gate. Carries the gate's
 /// *actual* command + args, not just its id — renaming `cargo check` to
 /// `cargo check --all-targets` behind the same id must change the hash.
@@ -59,8 +70,33 @@ pub fn compute_policy_hash(
     risk_triggers: &[String],
     required_gates: &[CanonicalGateDefinition],
 ) -> String {
+    // Bind the current executor policy generation into every hash. Kept as an
+    // inner fn taking the version explicitly so the binding is unit-testable
+    // without a runtime-mutable const, while the public signature is unchanged.
+    compute_policy_hash_inner(
+        read_scope,
+        write_allow,
+        write_deny,
+        risk_triggers,
+        required_gates,
+        EXECUTOR_POLICY_VERSION,
+    )
+}
+
+fn compute_policy_hash_inner(
+    read_scope: &[String],
+    write_allow: &[String],
+    write_deny: &[String],
+    risk_triggers: &[String],
+    required_gates: &[CanonicalGateDefinition],
+    executor_policy_version: u32,
+) -> String {
     let mut buf = Vec::new();
     buf.extend_from_slice(&POLICY_SCHEMA_VERSION.to_le_bytes());
+
+    // Executor governance policy generation (see EXECUTOR_POLICY_VERSION).
+    push_str(&mut buf, "executor_policy_version");
+    buf.extend_from_slice(&executor_policy_version.to_le_bytes());
 
     push_set(&mut buf, "read_scope", read_scope);
     push_set(&mut buf, "write_allow", write_allow);
@@ -183,5 +219,37 @@ mod tests {
         let a = compute_policy_hash(&s(&["ab"]), &[], &[], &[], &[]);
         let b = compute_policy_hash(&s(&["a", "b"]), &[], &[], &[], &[]);
         assert_ne!(a, b);
+    }
+
+    /// Bumping the executor policy generation must change the hash, so all prior
+    /// gate/audit evidence goes stale and must be re-produced under the new
+    /// executor policy.
+    #[test]
+    fn executor_policy_version_change_changes_hash() {
+        let g = vec![gate("cargo_check", "cargo", &["check"])];
+        let v1 = compute_policy_hash_inner(&s(&["src"]), &s(&["src"]), &[], &[], &g, 1);
+        let v2 = compute_policy_hash_inner(&s(&["src"]), &s(&["src"]), &[], &[], &g, 2);
+        assert_ne!(
+            v1, v2,
+            "bumping the executor policy version must change the policy hash"
+        );
+    }
+
+    /// The public hash binds the current `EXECUTOR_POLICY_VERSION`.
+    #[test]
+    fn public_hash_binds_executor_policy_version_constant() {
+        let g = vec![gate("cargo_check", "cargo", &["check"])];
+        assert_eq!(
+            compute_policy_hash(&s(&["src"]), &s(&["src"]), &[], &[], &g),
+            compute_policy_hash_inner(
+                &s(&["src"]),
+                &s(&["src"]),
+                &[],
+                &[],
+                &g,
+                EXECUTOR_POLICY_VERSION
+            ),
+            "public compute_policy_hash must fold in EXECUTOR_POLICY_VERSION"
+        );
     }
 }
