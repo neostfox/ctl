@@ -1916,6 +1916,25 @@ impl ControlApp {
             }
         }
 
+        // ── Shared-.git hazards (M6 shared-state hardening) ──
+        // git worktrees share one object store + packed-refs, so a stuck lock
+        // blocks or corrupts ref/index operations across every worktree. Facts
+        // only — doctor never removes a lock (it may be a legitimately in-flight
+        // git op); it flags the hazard and points at recovery.
+        let shared_git = crate::infrastructure::workspace::scan_shared_git_risk(&self.project_root);
+        if shared_git.any() {
+            results.push(String::new());
+            for d in shared_git.descriptions() {
+                score -= 5;
+                results.push(format!("WARNING: shared .git — {}", d));
+            }
+            results.push(
+                "Remove a stale lock only when no git process is running; if an active run \
+                 holds it, recover via `ctl run recover`."
+                    .to_string(),
+            );
+        }
+
         // Health Score deductions
         if score < 0 {
             score = 0;

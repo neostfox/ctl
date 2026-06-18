@@ -396,6 +396,117 @@ fn protected_risks(path: &str, risks: &mut Vec<(String, String)>) {
     }
 }
 
+/// A snapshot of shared-`.git` hazards (M6 shared-state hardening).
+///
+/// git worktrees share one object store and `packed-refs`, so a stuck lock — or
+/// a destructive op mid-flight — in one worktree can corrupt or block every
+/// other. This is a *facts* scan: it reports, it never repairs. Surfaced by
+/// `ctl doctor` and `ctl run recover`. (The gate decides whether to deny a
+/// destructive git command from the active-run count, not from these locks — a
+/// lock can be a legitimately transient in-flight op.)
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SharedGitRisk {
+    /// `<git-common-dir>/index.lock` — the main index is locked. A git process
+    /// is mid-operation, or crashed leaving a stale lock.
+    pub index_lock: bool,
+    /// `<git-common-dir>/packed-refs.lock` — `packed-refs` is shared by every
+    /// worktree, so this lock blocks ref updates repo-wide.
+    pub packed_refs_lock: bool,
+    /// Linked worktrees holding a lock: either an explicit `git worktree lock`
+    /// marker (`locked`) or a stuck `index.lock` inside that worktree.
+    pub locked_worktrees: Vec<String>,
+}
+
+impl SharedGitRisk {
+    /// True when any shared-`.git` hazard is present.
+    pub fn any(&self) -> bool {
+        self.index_lock || self.packed_refs_lock || !self.locked_worktrees.is_empty()
+    }
+
+    /// One-line human summaries of each detected hazard (empty when clean).
+    pub fn descriptions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.index_lock {
+            out.push(
+                ".git/index.lock present — the index is locked (a stale lock if no \
+                 git process is running; remove it only when sure none is)"
+                    .to_string(),
+            );
+        }
+        if self.packed_refs_lock {
+            out.push(
+                ".git/packed-refs.lock present — packed-refs is locked repo-wide, \
+                 blocking ref updates in every worktree"
+                    .to_string(),
+            );
+        }
+        for w in &self.locked_worktrees {
+            out.push(format!(
+                "worktree '{}' is locked (git worktree lock marker or a stuck index.lock)",
+                w
+            ));
+        }
+        out
+    }
+}
+
+/// Scan for shared-`.git` hazards (locks) under the repo's common git dir.
+///
+/// Resolves the *common* git dir via `git rev-parse --git-common-dir`, so the
+/// scan is correct whether `project_root` is the main checkout or a linked
+/// worktree. Returns an all-clear [`SharedGitRisk`] when the project is not a
+/// git repo or `git` is unavailable — an unverifiable repo asserts no risk
+/// (callers already treat the non-git case as "nothing to disclose").
+pub fn scan_shared_git_risk(project_root: &Path) -> SharedGitRisk {
+    let common = match git_common_dir(project_root) {
+        Some(d) => d,
+        None => return SharedGitRisk::default(),
+    };
+    let mut risk = SharedGitRisk {
+        index_lock: common.join("index.lock").exists(),
+        packed_refs_lock: common.join("packed-refs.lock").exists(),
+        locked_worktrees: Vec::new(),
+    };
+    if let Ok(entries) = std::fs::read_dir(common.join("worktrees")) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir = entry.path();
+            if dir.join("locked").exists() || dir.join("index.lock").exists() {
+                risk.locked_worktrees
+                    .push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    risk.locked_worktrees.sort();
+    risk
+}
+
+/// Resolve the repo's common git dir (absolute). `None` when not a git repo or
+/// `git` is unavailable. Relative output (e.g. `.git`) is anchored at
+/// `project_root`.
+fn git_common_dir(project_root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(&raw);
+    Some(if p.is_absolute() {
+        p
+    } else {
+        project_root.join(p)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +782,48 @@ mod tests {
         };
         assert_eq!(r.paths(), vec!["a", "b"]);
         assert_eq!(Change::Add("x".to_string()).paths(), vec!["x"]);
+    }
+
+    #[test]
+    fn shared_git_risk_none_outside_git_repo() {
+        let d = TmpDir::new("sg-nogit");
+        let risk = scan_shared_git_risk(d.path());
+        assert!(!risk.any(), "non-git dir asserts no shared-git risk");
+        assert!(risk.descriptions().is_empty());
+    }
+
+    #[test]
+    fn shared_git_risk_clean_repo() {
+        let d = TmpDir::new("sg-clean");
+        git_init(d.path());
+        let risk = scan_shared_git_risk(d.path());
+        assert!(!risk.any(), "freshly-init repo has no locks: {:?}", risk);
+    }
+
+    #[test]
+    fn shared_git_risk_detects_index_and_packed_refs_locks() {
+        let d = TmpDir::new("sg-locks");
+        git_init(d.path());
+        std::fs::write(d.path().join(".git/index.lock"), "").unwrap();
+        std::fs::write(d.path().join(".git/packed-refs.lock"), "").unwrap();
+        let risk = scan_shared_git_risk(d.path());
+        assert!(risk.index_lock, "index.lock detected");
+        assert!(risk.packed_refs_lock, "packed-refs.lock detected");
+        assert!(risk.any());
+        assert_eq!(risk.descriptions().len(), 2);
+    }
+
+    #[test]
+    fn shared_git_risk_detects_locked_worktree() {
+        let d = TmpDir::new("sg-wt");
+        git_init(d.path());
+        // Simulate a linked-worktree lock without a real `git worktree add`:
+        // the scan keys off `<git-common-dir>/worktrees/<name>/{locked,index.lock}`.
+        let wt = d.path().join(".git/worktrees/runfoo");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("locked"), "held by run").unwrap();
+        let risk = scan_shared_git_risk(d.path());
+        assert_eq!(risk.locked_worktrees, vec!["runfoo".to_string()]);
+        assert!(risk.any());
     }
 }

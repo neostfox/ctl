@@ -1695,11 +1695,16 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
             let report = app.recover_report()?;
             let orphans = app.orphaned_run_worktrees()?;
             let partial_starts = app.partial_start_runs()?;
+            // M6 shared-.git hardening: disclose any shared-state lock alongside
+            // the run recovery view (facts only — recover never clears a lock).
+            let shared_git =
+                crate::infrastructure::workspace::scan_shared_git_risk(&std::env::current_dir()?);
             if *json {
                 let out = serde_json::json!({
                     "running": report,
                     "orphaned_worktrees": orphans,
                     "partial_starts": partial_starts,
+                    "shared_git_risk": shared_git,
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
@@ -1786,6 +1791,15 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                 println!("\nOrphaned worktrees (run terminal/absent — safe to remove):");
                 for o in &orphans {
                     println!("  {}", o);
+                }
+            }
+            if shared_git.any() {
+                println!(
+                    "\nShared .git risk (reported only — not auto-cleared; remove a lock \
+                     only when no git process is running):"
+                );
+                for d in shared_git.descriptions() {
+                    println!("  - {}", d);
                 }
             }
         }
@@ -4360,6 +4374,57 @@ fn classify_bash(command: &str) -> &'static str {
     }
 }
 
+/// M6 shared-`.git` hardening: detect a destructive git verb in a (possibly
+/// compound) command. Returns the offending verb for disclosure, or `None`.
+///
+/// These verbs rewrite refs/HEAD/the index or delete working-tree files — run
+/// against a repository whose `.git` is shared by a live agent run's worktree,
+/// they can corrupt or strand that run (e.g. `git branch -D` removes a ref a
+/// run's worktree is on; `git clean -x` can delete the `.ctl/runs/*/worktree`
+/// directories themselves). Detected independently of [`classify_bash`] so the
+/// caller can apply it as an *overlay* — deny only when a run is active,
+/// otherwise fall through to normal gating (so `git reset && git push` is still
+/// push-gated when nothing is running).
+///
+/// Split on the same shell operators as [`classify_bash`] so a verb buried in a
+/// compound/substitution (`x && git reset`, `$(git clean)`) is still caught;
+/// best-effort, not a hard boundary (eval/indirection can still obscure intent).
+/// `switch` is included as the modern synonym of `checkout`. Deliberately NOT
+/// gated yet (each needs its own analysis): `merge`, `stash`, `cherry-pick`,
+/// `gc`, `worktree` mutation.
+fn detect_shared_git_op(command: &str) -> Option<&'static str> {
+    command
+        .split([';', '\n', '&', '|', '(', ')', '`'])
+        .find_map(shared_git_segment)
+}
+
+/// Classify one (non-compound) segment as a destructive git op, if it is one.
+fn shared_git_segment(segment: &str) -> Option<&'static str> {
+    let rest = segment.trim().strip_prefix("git ")?.trim_start();
+    let sub = rest.split_whitespace().next().unwrap_or("");
+    match sub {
+        "checkout" => Some("git checkout"),
+        "switch" => Some("git switch"),
+        "reset" => Some("git reset"),
+        "rebase" => Some("git rebase"),
+        "clean" => Some("git clean"),
+        // Plain `git branch` (list) and `git branch <name>` (create) are safe;
+        // only delete/move/force flags rewrite or remove refs other worktrees
+        // may track.
+        "branch"
+            if rest.split_whitespace().skip(1).any(|t| {
+                matches!(
+                    t,
+                    "-d" | "-D" | "--delete" | "-m" | "-M" | "--move" | "-f" | "--force"
+                )
+            }) =>
+        {
+            Some("git branch -D")
+        }
+        _ => None,
+    }
+}
+
 /// Check if a path is within any of the allowed scopes.
 fn path_in_scope(project_root: &Path, path: &str, scopes: &[String]) -> bool {
     let resolved = if Path::new(path).is_relative() {
@@ -4576,6 +4641,44 @@ fn cmd_hook_gate(
         }
         "bash" => {
             let cmd_str = command.unwrap_or("");
+
+            // M6 shared-.git hardening: a destructive git op is denied while any
+            // agent run is Running — it could rewrite shared refs/objects or
+            // delete a run's worktree, stranding concurrent work. Overlay check:
+            // when no run is active the command falls through to normal gating
+            // below. If the run store can't be read we fall through too (the
+            // shell is never locked out on a transient ctl/store error — same
+            // philosophy as the python hook excluding Bash from fail-closed).
+            if let Some(op) = detect_shared_git_op(cmd_str) {
+                let active = ControlApp::open(&project_root, false)
+                    .and_then(|app| app.active_runs())
+                    .unwrap_or_default();
+                if !active.is_empty() {
+                    let run_ids: Vec<&str> = active.iter().map(|r| r.run_id.as_str()).collect();
+                    let mut reason = format!(
+                        "'{}' is a destructive git operation and {} agent run(s) are active ({}) — \
+                         it could rewrite shared refs/objects or delete a run's worktree",
+                        op,
+                        active.len(),
+                        run_ids.join(", ")
+                    );
+                    let risk =
+                        crate::infrastructure::workspace::scan_shared_git_risk(&project_root);
+                    if risk.any() {
+                        reason.push_str("; a shared .git lock is already present: ");
+                        reason.push_str(&risk.descriptions().join("; "));
+                    }
+                    let output = serde_json::json!({
+                        "allowed": false,
+                        "state": gov_state_str(&state),
+                        "reason": reason,
+                        "remedy": "let the run(s) finish, or abort first (ctl run recover --abort <run_id>); inspect with ctl run recover / ctl doctor"
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    return Ok(());
+                }
+            }
+
             let action = classify_bash(cmd_str);
 
             match action {
@@ -4892,7 +4995,7 @@ fn cmd_hook_spec_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bash, format_brainstorm_provenance, format_research_output,
+        classify_bash, detect_shared_git_op, format_brainstorm_provenance, format_research_output,
         format_uncertainty_ledger, resolve_active_governance, ActiveTask, GovState,
     };
 
@@ -5047,6 +5150,75 @@ mod tests {
     fn subshell_and_backtick_segments_are_scanned() {
         assert_eq!(classify_bash("echo $(git push)"), "git_push");
         assert_eq!(classify_bash("x=`git push`"), "git_push");
+    }
+
+    #[test]
+    fn detect_shared_git_op_flags_destructive_verbs() {
+        assert_eq!(
+            detect_shared_git_op("git checkout main"),
+            Some("git checkout")
+        );
+        assert_eq!(
+            detect_shared_git_op("git switch feature"),
+            Some("git switch")
+        );
+        assert_eq!(
+            detect_shared_git_op("git reset --hard HEAD~1"),
+            Some("git reset")
+        );
+        assert_eq!(detect_shared_git_op("git rebase main"), Some("git rebase"));
+        assert_eq!(detect_shared_git_op("git clean -dfx"), Some("git clean"));
+    }
+
+    #[test]
+    fn detect_shared_git_op_branch_only_on_destructive_flags() {
+        // List / create are safe; delete / move / force rewrite shared refs.
+        assert_eq!(detect_shared_git_op("git branch"), None);
+        assert_eq!(detect_shared_git_op("git branch new-feature"), None);
+        assert_eq!(
+            detect_shared_git_op("git branch -D old"),
+            Some("git branch -D")
+        );
+        assert_eq!(
+            detect_shared_git_op("git branch --delete old"),
+            Some("git branch -D")
+        );
+        assert_eq!(
+            detect_shared_git_op("git branch -M renamed"),
+            Some("git branch -D")
+        );
+    }
+
+    #[test]
+    fn detect_shared_git_op_ignores_safe_git_and_non_git() {
+        assert_eq!(detect_shared_git_op("git status"), None);
+        assert_eq!(detect_shared_git_op("git log --oneline"), None);
+        assert_eq!(detect_shared_git_op("git commit -m x"), None);
+        assert_eq!(detect_shared_git_op("git push origin main"), None);
+        assert_eq!(detect_shared_git_op("ls -la"), None);
+        // A substring is not a verb: `checkout` must be the git subcommand.
+        assert_eq!(detect_shared_git_op("echo git checkout is dangerous"), None);
+    }
+
+    #[test]
+    fn detect_shared_git_op_scans_compound_and_substitution() {
+        // A destructive verb buried in a compound / substitution is still caught.
+        assert_eq!(
+            detect_shared_git_op("cp a b && git reset --hard"),
+            Some("git reset")
+        );
+        assert_eq!(
+            detect_shared_git_op("echo hi; git clean -f"),
+            Some("git clean")
+        );
+        assert_eq!(
+            detect_shared_git_op("x=$(git checkout main)"),
+            Some("git checkout")
+        );
+        assert_eq!(
+            detect_shared_git_op("y=`git rebase main`"),
+            Some("git rebase")
+        );
     }
 
     #[test]
