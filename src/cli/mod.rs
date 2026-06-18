@@ -716,7 +716,16 @@ enum AssignmentCommands {
 
 #[derive(Subcommand)]
 enum ArchitectureCommands {
+    /// Run compliance checks, failing fast on the first violation (CI gate)
     Check,
+    /// Run every compliance check and report each pass/fail — a full
+    /// architecture health snapshot for periodic/scheduled checkups. Exits
+    /// non-zero if any check fails; `--json` for machine consumption.
+    Review {
+        /// Emit a structured JSON report
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2873,21 +2882,89 @@ fn cmd_assignment(command: &AssignmentCommands, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// The full architecture compliance suite, as a named registry so `check`
+/// (fail-fast CI gate) and `review` (full health snapshot) run the exact same
+/// set in the exact same order — they can never silently diverge.
+type ArchCheck = (&'static str, fn() -> Result<()>);
+
+fn architecture_checks() -> Vec<ArchCheck> {
+    vec![
+        ("schemas", check_schemas),
+        ("dependencies", check_dependencies),
+        ("modules", check_modules),
+        ("baseline_manifest", check_baseline_manifest),
+        ("state_transitions", check_state_transitions),
+        ("milestone_scope", check_milestone_scope),
+        (
+            "canonical_task_ledger_contract",
+            check_canonical_task_ledger_contract,
+        ),
+        (
+            "schema_payload_completeness",
+            check_schema_payload_completeness,
+        ),
+        ("schema_counter_examples", check_schema_counter_examples),
+        ("fixture_paths_gates", check_fixture_paths_gates),
+    ]
+}
+
 fn cmd_architecture(command: &ArchitectureCommands) -> Result<()> {
     match command {
         ArchitectureCommands::Check => {
-            check_schemas()?;
-            check_dependencies()?;
-            check_modules()?;
-            check_baseline_manifest()?;
-            check_state_transitions()?;
-            check_milestone_scope()?;
-            check_canonical_task_ledger_contract()?;
-            check_schema_payload_completeness()?;
-            check_schema_counter_examples()?;
-            check_fixture_paths_gates()?;
+            // Fail-fast: stop at the first violation (unchanged CI-gate behavior).
+            for (_name, check) in architecture_checks() {
+                check()?;
+            }
             println!("All architecture checks passed.");
+            Ok(())
         }
+        ArchitectureCommands::Review { json } => cmd_architecture_review(*json),
+    }
+}
+
+/// `ctl architecture review`: run every check (no fail-fast), report each
+/// outcome, and exit non-zero if any failed. Built for periodic/scheduled
+/// checkups where the full picture matters more than the first failure.
+fn cmd_architecture_review(json: bool) -> Result<()> {
+    let results: Vec<(&str, Option<String>)> = architecture_checks()
+        .into_iter()
+        .map(|(name, check)| (name, check().err().map(|e| e.to_string())))
+        .collect();
+    let failed = results.iter().filter(|(_, e)| e.is_some()).count();
+    let total = results.len();
+
+    if json {
+        let checks: Vec<_> = results
+            .iter()
+            .map(|(name, err)| {
+                serde_json::json!({ "check": name, "passed": err.is_none(), "error": err })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": total,
+                "passed": total - failed,
+                "failed": failed,
+                "checks": checks,
+            }))?
+        );
+    } else {
+        println!("Architecture review — {total} checks:");
+        for (name, err) in &results {
+            match err {
+                None => println!("  PASS  {name}"),
+                Some(e) => println!("  FAIL  {name} — {e}"),
+            }
+        }
+        println!("\n{}/{} passed, {} failed.", total - failed, total, failed);
+    }
+
+    if failed > 0 {
+        // Non-zero exit for cron/CI; the full report is already on stdout.
+        return Err(anyhow::anyhow!(
+            "architecture review: {failed}/{total} check(s) failed"
+        ));
     }
     Ok(())
 }
@@ -5322,6 +5399,18 @@ mod tests {
             detect_shared_git_op("y=`git rebase main`"),
             Some("git rebase")
         );
+    }
+
+    #[test]
+    fn architecture_check_registry_is_well_formed() {
+        // `check` (fail-fast) and `review` (run-all) share this registry, so its
+        // shape is the contract: a fixed, uniquely-named set of checks.
+        let checks = super::architecture_checks();
+        assert_eq!(checks.len(), 10, "all architecture checks registered");
+        let mut names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 10, "check names are unique");
     }
 
     #[test]
