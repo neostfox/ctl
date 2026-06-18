@@ -190,6 +190,12 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Read-only handoff artifacts (ctl-handoff-v1): export a portable snapshot
+    /// of a task for another session or human to pick up. Emits no events.
+    Handoff {
+        #[command(subcommand)]
+        command: HandoffCommands,
+    },
     /// Brainstorm provenance (V1): record which cognitive artifacts a task
     /// derived from. Record-only — never gates create/finish, never claims
     /// thinking quality or review independence.
@@ -715,6 +721,19 @@ enum AssignmentCommands {
 }
 
 #[derive(Subcommand)]
+enum HandoffCommands {
+    /// Export a portable, read-only handoff snapshot for a task
+    Export {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// Output as JSON (default is a human-readable digest)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ArchitectureCommands {
     /// Run compliance checks, failing fast on the first violation (CI gate)
     Check,
@@ -1052,6 +1071,7 @@ pub fn run() -> Result<()> {
         Commands::Telemetry { command } => cmd_telemetry(command, dry_run),
         Commands::Drift { command } => cmd_drift(command),
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
+        Commands::Handoff { command } => cmd_handoff(command),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
@@ -1686,6 +1706,115 @@ fn cmd_drift(command: &DriftCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_handoff(command: &HandoffCommands) -> Result<()> {
+    match command {
+        HandoffCommands::Export { id, json } => {
+            let app = app_open(false)?;
+            let h = app.handoff_export(id)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&h)?);
+            } else {
+                render_handoff_human(&h);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Human-readable digest of a `control.handoff.v1` artifact.
+fn render_handoff_human(h: &serde_json::Value) {
+    let s = |k: &str| h.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let arr_join = |v: Option<&serde_json::Value>| {
+        v.and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|i| i.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+
+    println!("── Handoff: {} ──", s("task_id"));
+    println!(
+        "Phase: {}{}",
+        s("phase"),
+        if h.get("is_held").and_then(|v| v.as_bool()) == Some(true) {
+            " (HELD)"
+        } else {
+            ""
+        }
+    );
+    if let Some(obj) = h.get("objective").and_then(|v| v.as_str()) {
+        println!("Objective: {obj}");
+    }
+    if let Some(b) = h.get("boundary") {
+        println!("Write scope: {}", arr_join(b.get("write_allow")));
+        let deny = arr_join(b.get("write_deny"));
+        if !deny.is_empty() {
+            println!("Write deny: {deny}");
+        }
+        println!("Read scope: {}", arr_join(b.get("read_scope")));
+    }
+
+    if let Some(gates) = h.get("gate_status").and_then(|v| v.as_array()) {
+        println!("Gates:");
+        for g in gates {
+            println!(
+                "  {} {}",
+                g.get("status").and_then(|v| v.as_str()).unwrap_or("?"),
+                g.get("gate").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+        }
+    }
+
+    if let Some(verdict) = h
+        .get("interlock")
+        .and_then(|i| i.get("verdict"))
+        .and_then(|v| v.as_str())
+    {
+        println!("Completion interlock: {verdict}");
+    }
+
+    if let Some(na) = h.get("next_action").filter(|v| !v.is_null()) {
+        println!(
+            "Next action: {} — {}",
+            na.get("action").and_then(|v| v.as_str()).unwrap_or("?"),
+            na.get("rationale").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        if let Some(cmd) = na.get("suggested_command").and_then(|v| v.as_str()) {
+            if !cmd.is_empty() {
+                println!("  -> {cmd}");
+            }
+        }
+    }
+
+    match h.get("uncommitted_in_scope") {
+        Some(serde_json::Value::Array(files)) if !files.is_empty() => {
+            println!("Uncommitted in scope ({}):", files.len());
+            for f in files {
+                if let Some(f) = f.as_str() {
+                    println!("  {f}");
+                }
+            }
+        }
+        Some(serde_json::Value::Array(_)) => println!("Uncommitted in scope: none (clean)"),
+        _ => println!("Uncommitted in scope: unverifiable (non-git)"),
+    }
+
+    if let Some(events) = h.get("recent_events").and_then(|v| v.as_array()) {
+        println!("Recent events:");
+        for e in events {
+            println!(
+                "  seq {} {} ({})",
+                e.get("seq").and_then(|v| v.as_i64()).unwrap_or(0),
+                e.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.get("at").and_then(|v| v.as_str()).unwrap_or("")
+            );
+        }
+    }
 }
 
 fn cmd_next_action(id: &str, json: bool) -> Result<()> {

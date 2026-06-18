@@ -1834,6 +1834,91 @@ impl ControlApp {
         Ok(crate::domain::drift::next_action(&report, phase))
     }
 
+    /// Read-only handoff artifact for a task (ctl-handoff-v1): a portable
+    /// snapshot another session or human can pick up from — objective +
+    /// boundary, per-gate status, the completion-interlock verdict, the
+    /// drift-derived next action, the uncommitted files inside the task's write
+    /// scope, and the recent event tail. Appends nothing, mutates nothing; every
+    /// field comes from an existing read-only query.
+    pub fn handoff_export(&self, task_id: &str) -> Result<serde_json::Value> {
+        let state = self.replay_task(task_id)?;
+        let events = self.store.read_for_task(task_id)?;
+
+        let gate_status: Vec<_> = state
+            .gates
+            .iter()
+            .map(|g| {
+                let r = state.gate_results.get(g);
+                serde_json::json!({
+                    "gate": g,
+                    "status": match r {
+                        Some(r) if r.passed => "PASS",
+                        Some(_) => "FAIL",
+                        None => "PENDING",
+                    },
+                    "checked_at": r.map(|r| r.checked_at.clone()),
+                })
+            })
+            .collect();
+
+        // Completion-interlock verdict — works in any phase ("block" outside
+        // Review); omitted only if the audit projection itself errors.
+        let interlock = self
+            .generate_audit_report(task_id)
+            .ok()
+            .and_then(|a| a.get("completion_interlock").cloned());
+
+        // Drift-derived recommended next action (read-only).
+        let next_action = self.next_action(task_id).ok().map(|p| {
+            serde_json::json!({
+                "action": format!("{:?}", p.action),
+                "level": format!("{:?}", p.level),
+                "rationale": p.rationale,
+                "suggested_command": p.suggested_command,
+            })
+        });
+
+        // Uncommitted files inside the task's write scope (None if non-git).
+        let write_allow: Vec<String> = state.write_allow.iter().cloned().collect();
+        let uncommitted = crate::infrastructure::workspace::dirty_paths_in_scope(
+            &self.project_root,
+            &write_allow,
+        )?;
+
+        // Recent event tail (chronological).
+        let start = events.len().saturating_sub(10);
+        let recent_events: Vec<_> = events[start..]
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "seq": e.seq,
+                    "type": e.event_type,
+                    "at": e.occurred_at,
+                    "actor": e.actor,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "schema": "control.handoff.v1",
+            "task_id": task_id,
+            "phase": format!("{:?}", state.phase),
+            "is_held": state.is_held,
+            "objective": state.objective,
+            "boundary": {
+                "read_scope": state.read_scope,
+                "write_allow": state.write_allow,
+                "write_deny": state.write_deny,
+                "gates": state.gates,
+            },
+            "gate_status": gate_status,
+            "interlock": interlock,
+            "next_action": next_action,
+            "uncommitted_in_scope": uncommitted,
+            "recent_events": recent_events,
+        }))
+    }
+
     // ── Queries ──
 
     pub fn get_status(&self, task_id: &str) -> Result<TaskState> {
@@ -5769,6 +5854,39 @@ mod tests {
         // Run is now Aborted (terminal) → no longer a cross-ledger finding.
         let after = app.cross_ledger_findings().unwrap();
         assert!(after.is_empty(), "finding cleared after repair: {after:?}");
+    }
+
+    #[test]
+    fn handoff_export_assembles_read_only_artifact() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+
+        let h = app.handoff_export("t1").unwrap();
+        assert_eq!(h["schema"], "control.handoff.v1");
+        assert_eq!(h["task_id"], "t1");
+        assert_eq!(h["phase"], "InProgress");
+        assert_eq!(h["objective"], "x");
+        assert!(h["boundary"]["write_allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "src"));
+        let gates = h["gate_status"].as_array().unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0]["status"], "PENDING"); // gate never run
+        assert!(!h["recent_events"].as_array().unwrap().is_empty());
+
+        // Export must be purely read-only — no events appended.
+        let before = app.replay_task("t1").unwrap().last_seq;
+        let _ = app.handoff_export("t1").unwrap();
+        assert_eq!(
+            app.replay_task("t1").unwrap().last_seq,
+            before,
+            "handoff export must not append events"
+        );
     }
 
     #[test]
