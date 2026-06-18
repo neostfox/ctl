@@ -196,6 +196,12 @@ enum Commands {
         #[command(subcommand)]
         command: HandoffCommands,
     },
+    /// PRD workflow (workflow-prd-to-tasks-v1): scaffold a PRD whose structured
+    /// `## Tasks` section a later `prd plan` step can turn into ctl tasks.
+    Prd {
+        #[command(subcommand)]
+        command: PrdCommands,
+    },
     /// Brainstorm provenance (V1): record which cognitive artifacts a task
     /// derived from. Record-only — never gates create/finish, never claims
     /// thinking quality or review independence.
@@ -739,6 +745,17 @@ enum HandoffCommands {
 }
 
 #[derive(Subcommand)]
+enum PrdCommands {
+    /// Print a structured PRD template to stdout (redirect to a file, e.g.
+    /// `ctl prd init > prd.md`), ready for the grill/LLM step to fill in.
+    Init {
+        /// Title to put in the PRD heading
+        #[arg(long, default_value = "<title>")]
+        title: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ArchitectureCommands {
     /// Run compliance checks, failing fast on the first violation (CI gate)
     Check,
@@ -1077,6 +1094,7 @@ pub fn run() -> Result<()> {
         Commands::Drift { command } => cmd_drift(command),
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
         Commands::Handoff { command } => cmd_handoff(command),
+        Commands::Prd { command } => cmd_prd(command),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
@@ -1721,6 +1739,51 @@ fn cmd_drift(command: &DriftCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// PRD template (workflow-prd-to-tasks-v1). `{title}` is substituted at runtime.
+/// The `## Tasks` section is a deliberate, parseable convention — `id` /
+/// `objective` / `write-allow` / `gates` per vertical task — so a later
+/// `prd plan` step can map each item to a `ctl task create`. Keep this in sync
+/// with that parser when it lands.
+const PRD_TEMPLATE: &str = r#"# PRD: {title}
+
+> Fill this out (the "grill" step), then a later `ctl prd plan --file <this>.md`
+> can turn the `## Tasks` section into ctl tasks. Until then this is a shape to
+> fill, not an executable spec.
+
+## Objective
+
+<one paragraph: the outcome this PRD delivers, and why>
+
+## Context
+
+<links, constraints, prior art, explicit non-goals>
+
+## Tasks
+
+<!-- One list item per vertical (independently shippable) task. Conventions a
+     future `prd plan` parser will rely on:
+       - id:          kebab-case, unique
+       - objective:   non-empty, one line
+       - write-allow: comma-separated paths (the task's write boundary)
+       - gates:       comma-separated gate template ids
+     read-scope defaults to write-allow. Keep each task small enough that one
+     agent can finish it within its boundary. -->
+
+- id: <kebab-id>
+  objective: <non-empty objective>
+  write-allow: <path>[, <path> ...]
+  gates: cargo_fmt_check, cargo_check, cargo_clippy, cargo_test
+"#;
+
+fn cmd_prd(command: &PrdCommands) -> Result<()> {
+    match command {
+        PrdCommands::Init { title } => {
+            print!("{}", PRD_TEMPLATE.replace("{title}", title));
+            Ok(())
+        }
+    }
 }
 
 fn cmd_handoff(command: &HandoffCommands) -> Result<()> {
@@ -5543,6 +5606,26 @@ mod tests {
             detect_shared_git_op("y=`git rebase main`"),
             Some("git rebase")
         );
+    }
+
+    #[test]
+    fn prd_template_holds_the_parseable_convention() {
+        // A later `prd plan` parser depends on these section headers and the
+        // per-task field keys — pin them so the template can't silently drift.
+        let t = super::PRD_TEMPLATE.replace("{title}", "Demo");
+        assert!(t.starts_with("# PRD: Demo"), "title substituted");
+        for needle in [
+            "## Objective",
+            "## Context",
+            "## Tasks",
+            "- id:",
+            "objective:",
+            "write-allow:",
+            "gates:",
+        ] {
+            assert!(t.contains(needle), "template must contain {needle:?}");
+        }
+        assert!(!t.contains("{title}"), "no unsubstituted placeholder remains");
     }
 
     #[test]
