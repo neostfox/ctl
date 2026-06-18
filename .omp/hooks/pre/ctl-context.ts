@@ -65,21 +65,21 @@ function logCtlError(
  * not. Returns stdout on success, or null on any error (logged, not swallowed).
  */
 function ctl(args: string[], stage: string): Promise<string | null> {
-  const { promise, resolve } = Promise.withResolvers<string | null>();
-  execFile(
-    "ctl",
-    args,
-    { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
-    (err, stdout, stderr) => {
-      if (err) {
-        logCtlError(stage, args, err, stderr);
-        resolve(null);
-        return;
-      }
-      resolve(stdout);
-    },
-  );
-  return promise;
+  return new Promise<string | null>((resolve) => {
+    execFile(
+      "ctl",
+      args,
+      { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          logCtlError(stage, args, err, stderr);
+          resolve(null);
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
 }
 
 /** Run `ctl hook <subcommand>` asynchronously. */
