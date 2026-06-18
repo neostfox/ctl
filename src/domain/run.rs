@@ -354,6 +354,18 @@ pub fn apply_run(state: &mut AgentRunState, event: &Event) -> Result<(), String>
                 .ok_or("lease_revoked: run holds no lease")?;
             lease.revoke();
         }
+        "lease_expired" => {
+            // TTL expiry made explicit (capability-lease-ttl-enforce-v1): an
+            // operator records that a stale lease's authorization has lapsed.
+            // Idempotent terminal transition, mirroring lease_revoked; the
+            // wall-clock TTL judgement is made at the application layer, never
+            // in this deterministic reducer.
+            let lease = state
+                .lease
+                .as_mut()
+                .ok_or("lease_expired: run holds no lease")?;
+            lease.expire();
+        }
         "run_finished" => {
             if state.phase != RunPhase::Running {
                 return Err(format!(
@@ -993,5 +1005,69 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not active"));
+    }
+
+    #[test]
+    fn lease_expired_transitions_active_to_expired() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/foo/"]}),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                2,
+                "lease_created",
+                json!({
+                    "lease_id": "lease-a", "run_id": "r1", "resource_path": "src/foo/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t1", "adapter": "omp", "scopes": ["src/foo/"]
+                }),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event("r1", 3, "lease_expired", json!({"lease_id": "lease-a"})),
+        )
+        .unwrap();
+        assert_eq!(
+            state.lease.as_ref().unwrap().status,
+            LeaseStatus::Expired,
+            "lease_expired marks the lease Expired"
+        );
+        // A consume after expiry is rejected (no longer Active).
+        let err = apply_run(
+            &mut state,
+            &make_event("r1", 4, "lease_used", json!({"lease_id": "lease-a"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn lease_expired_without_lease_errors() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/"]}),
+            ),
+        )
+        .unwrap();
+        let err =
+            apply_run(&mut state, &make_event("r1", 2, "lease_expired", json!({}))).unwrap_err();
+        assert!(err.contains("holds no lease"), "got: {err}");
     }
 }

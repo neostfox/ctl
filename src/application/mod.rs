@@ -229,6 +229,19 @@ pub struct RalphVerdict {
     pub blockers: Vec<String>,
 }
 
+/// Outcome of an explicit run-lease TTL-expiry attempt
+/// (capability-lease-ttl-enforce-v1). `outcome` is one of `expired`,
+/// `would_expire` (preview), `within_ttl` (refused — not stale), `not_active`,
+/// or `no_lease`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LeaseExpiryReport {
+    pub run_id: String,
+    pub outcome: String,
+    pub age_secs: Option<u64>,
+    pub ttl_secs: Option<u64>,
+    pub detail: String,
+}
+
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
@@ -3534,6 +3547,110 @@ impl ControlApp {
         self.append_run_event_locked(&store, run_id, event)
     }
 
+    /// Explicitly expire a run's lease **iff** it is past its wall-clock TTL
+    /// (capability-lease-ttl-enforce-v1). Operator-invoked only — TTL is never
+    /// auto-expired in a read path (that would make replay non-deterministic;
+    /// it stays report-only in `recover`). This is the explicit, recorded
+    /// counterpart: it refuses to touch a within-TTL or non-Active lease, and on
+    /// `apply` appends a single `lease_expired` event. It does NOT terminate the
+    /// run or any process — winding the run down is a separate `run recover
+    /// --abort`. Preview unless `apply`.
+    pub fn expire_run_lease(&self, run_id: &str, apply: bool) -> Result<LeaseExpiryReport> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.expire_run_lease_at(run_id, now, apply)
+    }
+
+    /// Testable core of [`expire_run_lease`] with an injected `now_epoch`.
+    fn expire_run_lease_at(
+        &self,
+        run_id: &str,
+        now_epoch: u64,
+        apply: bool,
+    ) -> Result<LeaseExpiryReport> {
+        let store = self.run_store()?;
+        let run = self.replay_run(run_id)?;
+        let mut report = LeaseExpiryReport {
+            run_id: run_id.to_string(),
+            outcome: String::new(),
+            age_secs: None,
+            ttl_secs: None,
+            detail: String::new(),
+        };
+
+        let lease = match &run.lease {
+            Some(l) => l,
+            None => {
+                report.outcome = "no_lease".to_string();
+                report.detail = "run holds no native lease (legacy or never started)".to_string();
+                return Ok(report);
+            }
+        };
+        report.ttl_secs = Some(lease.ttl_seconds);
+
+        if lease.status != crate::domain::lease::LeaseStatus::Active {
+            report.outcome = "not_active".to_string();
+            report.detail = format!(
+                "lease is already {} — nothing to expire",
+                lease.status.token()
+            );
+            return Ok(report);
+        }
+
+        // Wall-clock age from the lease_created event's occurred_at in THIS run's
+        // stream — the same source `recover_report` uses for `lease_stale`.
+        let events = store.read_for_run(run_id)?;
+        let created_epoch = event_occurred_at_by_seq(&events, lease.created_at_seq)
+            .and_then(|s| parse_iso8601_to_epoch(&s));
+        report.age_secs = created_epoch.map(|c| now_epoch.saturating_sub(c));
+
+        let stale = created_epoch
+            .map(|c| ttl_exceeded(now_epoch, c, lease.ttl_seconds))
+            .unwrap_or(false);
+        if !stale {
+            report.outcome = "within_ttl".to_string();
+            report.detail = format!(
+                "lease within TTL (age {}s ≤ ttl {}s) — refusing to expire a fresh lease",
+                report.age_secs.unwrap_or(0),
+                lease.ttl_seconds
+            );
+            return Ok(report);
+        }
+
+        if !apply {
+            report.outcome = "would_expire".to_string();
+            report.detail = format!(
+                "lease is past TTL (age {}s > ttl {}s) — re-run with --apply to record lease_expired",
+                report.age_secs.unwrap_or(0),
+                lease.ttl_seconds
+            );
+            return Ok(report);
+        }
+
+        // Apply: append a single lease_expired under the per-run lock.
+        let lease_id = lease.lease_id.clone();
+        let _lock = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run(run_id)?)
+        };
+        let event = self.build_run_event(
+            run_id,
+            "lease_expired",
+            serde_json::json!({ "lease_id": lease_id, "reason": "ttl_exceeded" }),
+        )?;
+        self.append_run_event_locked(&store, run_id, event)?;
+        report.outcome = "expired".to_string();
+        report.detail = format!(
+            "recorded lease_expired (age {}s > ttl {}s)",
+            report.age_secs.unwrap_or(0),
+            lease.ttl_seconds
+        );
+        Ok(report)
+    }
+
     // ── M6: crash recovery (slice 2) — read-only detection + explicit abort ──
 
     /// Crash-recovery snapshot of every `Running` run: whether its isolated
@@ -4579,6 +4696,13 @@ fn epoch_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
         (time_secs % 3600) / 60,
         time_secs % 60,
     )
+}
+
+/// True iff a lease created at `created_epoch` is past its `ttl` at `now_epoch`.
+/// Pure (the wall clock is read by the caller) so it is unit-testable; mirrors
+/// the staleness check in `recover_report` (strictly greater than the TTL).
+fn ttl_exceeded(now_epoch: u64, created_epoch: u64, ttl: u64) -> bool {
+    now_epoch.saturating_sub(created_epoch) > ttl
 }
 
 /// Parse a simple ISO 8601 UTC string (YYYY-MM-DDTHH:MM:SSZ) to Unix epoch seconds.
@@ -6180,6 +6304,100 @@ mod tests {
             "blockers: {:?}",
             v.blockers
         );
+    }
+
+    // ── run-lease TTL expiry (capability-lease-ttl-enforce-v1) ──
+
+    #[test]
+    fn ttl_exceeded_is_strictly_greater() {
+        assert!(ttl_exceeded(100, 0, 50)); // age 100 > 50
+        assert!(!ttl_exceeded(40, 0, 50)); // age 40 < 50
+        assert!(!ttl_exceeded(50, 0, 50)); // age 50 == 50 (not strictly greater)
+        assert!(!ttl_exceeded(0, 1000, 50)); // now before created → age 0 (saturating)
+    }
+
+    /// Seed a Running run carrying a genuine native lease (lease_created +
+    /// lease_used + run_started), satisfying the run reducer's binding rules.
+    fn seed_run_with_native_lease(app: &ControlApp, run_id: &str, task_id: &str, ttl: u64) {
+        let ev = |app: &ControlApp, ty: &str, p: serde_json::Value| {
+            let e = app.build_run_event(run_id, ty, p).unwrap();
+            app.append_run_event(run_id, e).unwrap();
+        };
+        ev(
+            app,
+            "run_created",
+            serde_json::json!({"task_id": task_id, "adapter": "omp", "write_allow": ["src"],
+                "write_deny": [], "gates": ["cargo_check"]}),
+        );
+        ev(
+            app,
+            "lease_created",
+            serde_json::json!({"lease_id": "L1", "run_id": run_id, "resource_path": "src",
+                "action": "write", "ttl_seconds": ttl, "max_uses": 100,
+                "task_id": task_id, "adapter": "omp", "scopes": ["src"]}),
+        );
+        ev(app, "lease_used", serde_json::json!({"lease_id": "L1"}));
+        ev(
+            app,
+            "run_started",
+            serde_json::json!({"worktree_path": format!(".ctl/runs/{run_id}/worktree"), "lease_id": "L1"}),
+        );
+    }
+
+    const FAR_FUTURE: u64 = 10_000_000_000; // year ~2286 — well past any lease TTL
+
+    #[test]
+    fn expire_lease_records_lease_expired_when_stale() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        let report = app.expire_run_lease_at("r1", FAR_FUTURE, true).unwrap();
+        assert_eq!(report.outcome, "expired", "{}", report.detail);
+        // The lease is now terminally Expired.
+        let run = app.replay_run("r1").unwrap();
+        assert_eq!(
+            run.lease.unwrap().status,
+            crate::domain::lease::LeaseStatus::Expired
+        );
+    }
+
+    #[test]
+    fn expire_lease_preview_does_not_mutate() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        let before = app.replay_run("r1").unwrap().last_seq;
+        let report = app.expire_run_lease_at("r1", FAR_FUTURE, false).unwrap();
+        assert_eq!(report.outcome, "would_expire", "{}", report.detail);
+        assert_eq!(
+            app.replay_run("r1").unwrap().last_seq,
+            before,
+            "preview must not append"
+        );
+        assert_eq!(
+            app.replay_run("r1").unwrap().lease.unwrap().status,
+            crate::domain::lease::LeaseStatus::Active
+        );
+    }
+
+    #[test]
+    fn expire_lease_refuses_within_ttl() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        // now before created → age 0 → not stale.
+        let report = app.expire_run_lease_at("r1", 1, false).unwrap();
+        assert_eq!(report.outcome, "within_ttl", "{}", report.detail);
+    }
+
+    #[test]
+    fn expire_lease_no_native_lease() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_running_run(&app, "t1", &["src"]); // legacy run, no native lease
+        let runs = app.run_store().unwrap().run_ids().unwrap();
+        let report = app.expire_run_lease_at(&runs[0], FAR_FUTURE, true).unwrap();
+        assert_eq!(report.outcome, "no_lease", "{}", report.detail);
     }
 
     #[test]

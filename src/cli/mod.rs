@@ -856,6 +856,21 @@ enum RunCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Explicitly expire a run's lease IF it is past its wall-clock TTL
+    /// (capability-lease-ttl-enforce-v1). Preview by default; `--apply` records
+    /// a `lease_expired` event. Refuses a within-TTL or non-active lease. Does
+    /// not terminate the run (use `run recover --abort` for that).
+    ExpireLease {
+        /// Run id whose lease to check/expire.
+        #[arg(long)]
+        run: String,
+        /// Actually record `lease_expired`; without this it only previews.
+        #[arg(long)]
+        apply: bool,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2218,6 +2233,22 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                 );
                 for d in shared_git.descriptions() {
                     println!("  - {}", d);
+                }
+            }
+        }
+        RunCommands::ExpireLease { run, apply, json } => {
+            let report = app.expire_run_lease(run, *apply)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let mark = match report.outcome.as_str() {
+                    "expired" => "EXPIRED",
+                    "would_expire" => "WOULD EXPIRE (preview)",
+                    _ => "NO-OP",
+                };
+                println!("Run '{}': {} — {}", report.run_id, mark, report.detail);
+                if report.outcome == "would_expire" {
+                    println!("Re-run with --apply to record lease_expired.");
                 }
             }
         }
