@@ -1694,10 +1694,12 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
             }
             let report = app.recover_report()?;
             let orphans = app.orphaned_run_worktrees()?;
+            let partial_starts = app.partial_start_runs()?;
             if *json {
                 let out = serde_json::json!({
                     "running": report,
                     "orphaned_worktrees": orphans,
+                    "partial_starts": partial_starts,
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
@@ -1706,12 +1708,12 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                 println!("No Running runs.");
             } else {
                 println!(
-                    "{:<38} {:<16} {:<10} {:<10} WRITE_SCOPE",
-                    "RUN_ID", "TASK_ID", "WORKTREE", "MANIFEST"
+                    "{:<38} {:<16} {:<10} {:<10} {:<8} {:<6} WRITE_SCOPE",
+                    "RUN_ID", "TASK_ID", "WORKTREE", "MANIFEST", "LEASE", "USES"
                 );
                 for r in &report {
                     println!(
-                        "{:<38} {:<16} {:<10} {:<10} {}",
+                        "{:<38} {:<16} {:<10} {:<10} {:<8} {:<6} {}",
                         r.run_id,
                         r.task_id,
                         if r.worktree_exists {
@@ -1724,6 +1726,10 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                         } else {
                             "missing"
                         },
+                        r.lease_status,
+                        r.remaining_uses
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
                         r.write_allow.join(",")
                     );
                 }
@@ -1736,6 +1742,43 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                     println!(
                         "\n{} run(s) have a MISSING worktree (likely a crash). Recover with `ctl run recover --abort <run_id>`.",
                         inconsistent.len()
+                    );
+                }
+                let stale: Vec<&str> = report
+                    .iter()
+                    .filter(|r| r.lease_stale)
+                    .map(|r| r.run_id.as_str())
+                    .collect();
+                if !stale.is_empty() {
+                    println!(
+                        "{} run(s) hold a lease past its TTL (reported only — not auto-expired): {}",
+                        stale.len(),
+                        stale.join(", ")
+                    );
+                }
+                let nonactive: Vec<&str> = report
+                    .iter()
+                    .filter(|r| r.lease_nonactive)
+                    .map(|r| r.run_id.as_str())
+                    .collect();
+                if !nonactive.is_empty() {
+                    println!(
+                        "{} Running run(s) have a non-active lease (anomaly): {}",
+                        nonactive.len(),
+                        nonactive.join(", ")
+                    );
+                }
+            }
+            if !partial_starts.is_empty() {
+                println!(
+                    "\n{} Queued run(s) hold a lease but never started (likely a crash mid-start). Recover with `ctl run recover --abort <run_id>`:",
+                    partial_starts.len()
+                );
+                for p in &partial_starts {
+                    println!(
+                        "  {} (task {})",
+                        p.get("run_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                        p.get("task_id").and_then(|v| v.as_str()).unwrap_or("?")
                     );
                 }
             }

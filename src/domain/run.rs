@@ -11,6 +11,7 @@
 //! The run reducer is pure — no filesystem, network, time, or process access.
 
 use crate::domain::event::Event;
+use crate::domain::lease::{LeaseGrant, LeaseState, LeaseStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -70,6 +71,11 @@ pub struct AgentRunState {
     pub worktree_path: Option<String>,
     /// Active lease ID for this run.
     pub lease_id: Option<String>,
+    /// The run-scoped capability lease, present once `lease_created` is applied.
+    /// Legacy (pre-lease) runs leave this `None` and carry only `lease_id`.
+    /// `#[serde(default)]` keeps any persisted projection deserializing cleanly.
+    #[serde(default)]
+    pub lease: Option<LeaseState>,
     /// Write-allowed paths (inherited from task).
     pub write_allow: BTreeSet<String>,
     /// Write-denied paths (inherited from task).
@@ -97,6 +103,7 @@ impl AgentRunState {
             phase: RunPhase::Queued,
             worktree_path: None,
             lease_id: None,
+            lease: None,
             write_allow: BTreeSet::new(),
             write_deny: BTreeSet::new(),
             gates: BTreeSet::new(),
@@ -199,9 +206,153 @@ pub fn apply_run(state: &mut AgentRunState, event: &Event) -> Result<(), String>
             if worktree_path.is_empty() || lease_id.is_empty() {
                 return Err("run_started: worktree_path and lease_id are required".into());
             }
+            // When a native run lease exists, the start must reference it and the
+            // lease must still be Active with a use to spare. Legacy runs (no
+            // lease_created) accept the lease_id as an opaque token.
+            if let Some(ref lease) = state.lease {
+                if lease.lease_id != lease_id {
+                    return Err(format!(
+                        "run_started: lease_id '{}' does not match the run's lease '{}'",
+                        lease_id, lease.lease_id
+                    ));
+                }
+                if lease.status != LeaseStatus::Active {
+                    return Err(format!(
+                        "run_started: lease '{}' is not active (status: {})",
+                        lease.lease_id, lease.status
+                    ));
+                }
+                if lease.remaining_uses == 0 {
+                    return Err(format!(
+                        "run_started: lease '{}' has no remaining uses",
+                        lease.lease_id
+                    ));
+                }
+            }
             state.phase = RunPhase::Running;
             state.worktree_path = Some(worktree_path.to_string());
             state.lease_id = Some(lease_id.to_string());
+        }
+        "lease_created" => {
+            // Granted while the run is still Queued, exactly once.
+            if state.phase != RunPhase::Queued {
+                return Err(format!(
+                    "lease_created: only valid while Queued, current: {:?}",
+                    state.phase
+                ));
+            }
+            if state.lease.is_some() {
+                return Err("lease_created: run already holds a lease".into());
+            }
+            let lease_id = event
+                .payload
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if lease_id.is_empty() {
+                return Err("lease_created: lease_id is required".into());
+            }
+            let run_id = event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let resource_path = event
+                .payload
+                .get("resource_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let action = event
+                .payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ttl_seconds = event
+                .payload
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let max_uses = event
+                .payload
+                .get("max_uses")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let task_id = event
+                .payload
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let adapter = event
+                .payload
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let scopes: BTreeSet<String> = event
+                .payload
+                .get("scopes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Run-scoped binding invariants (defense in depth — the lease lives
+            // inside this run aggregate, which is already bound to one task).
+            if max_uses < 2 {
+                return Err(
+                    "lease_created: run lease max_uses must be >= 2 (start consumes one use)"
+                        .into(),
+                );
+            }
+            if task_id != state.task_id {
+                return Err(format!(
+                    "lease_created: lease task_id '{}' does not match run task '{}'",
+                    task_id, state.task_id
+                ));
+            }
+            if adapter != state.adapter {
+                return Err(format!(
+                    "lease_created: lease adapter '{}' does not match run adapter '{}'",
+                    adapter, state.adapter
+                ));
+            }
+            if scopes != state.write_allow {
+                return Err(
+                    "lease_created: run lease scopes must equal the run's write_allow exactly"
+                        .into(),
+                );
+            }
+
+            let lease = LeaseState::grant(LeaseGrant {
+                lease_id: lease_id.to_string(),
+                run_id: run_id.to_string(),
+                resource_path: resource_path.to_string(),
+                action: action.to_string(),
+                ttl_seconds,
+                max_uses,
+                created_at_seq: event.seq,
+                task_id: task_id.to_string(),
+                adapter: adapter.to_string(),
+                scopes,
+            })
+            .map_err(|e| format!("lease_created: {}", e))?;
+            state.lease = Some(lease);
+        }
+        "lease_used" => {
+            let lease = state
+                .lease
+                .as_mut()
+                .ok_or("lease_used: run holds no lease")?;
+            lease.consume().map_err(|e| format!("lease_used: {}", e))?;
+        }
+        "lease_revoked" => {
+            let lease = state
+                .lease
+                .as_mut()
+                .ok_or("lease_revoked: run holds no lease")?;
+            lease.revoke();
         }
         "run_finished" => {
             if state.phase != RunPhase::Running {
@@ -665,6 +816,182 @@ mod tests {
         assert!(state.lease_id.is_some());
         assert!(state.gate_results.get("cargo_check").unwrap().passed);
         assert!(state.touched_files.contains("src/foo/mod.rs"));
-        assert_eq!(state.history.len(), 5);
+        assert_eq!(state.history.len(), 7);
+        // Native run lease: granted, one use consumed at start.
+        let lease = state.lease.as_ref().expect("native run lease present");
+        assert_eq!(lease.lease_id, "lease-r1");
+        assert_eq!(lease.status, LeaseStatus::Active);
+        assert_eq!(lease.remaining_uses, 99);
+        assert_eq!(lease.task_id, "t-concurrent-a");
+        assert!(lease.scopes.contains("src/foo/"));
+    }
+
+    #[test]
+    fn legacy_run_without_lease_replays() {
+        // A slice-1 run: run_created + run_started carrying an opaque lease_id,
+        // with NO lease_created. Must replay cleanly (lease stays None).
+        let mut state = AgentRunState::new("r1");
+        let e = make_event(
+            "r1",
+            1,
+            "run_created",
+            json!({"task_id": "t1", "adapter": "omp"}),
+        );
+        apply_run(&mut state, &e).unwrap();
+        let e = make_event(
+            "r1",
+            2,
+            "run_started",
+            json!({"worktree_path": "/tmp/w", "lease_id": "opaque-legacy"}),
+        );
+        apply_run(&mut state, &e).unwrap();
+        assert_eq!(state.phase, RunPhase::Running);
+        assert!(state.lease.is_none());
+        assert_eq!(state.lease_id, Some("opaque-legacy".to_string()));
+    }
+
+    #[test]
+    fn run_started_rejected_when_lease_id_mismatches() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/foo/"]}),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                2,
+                "lease_created",
+                json!({
+                    "lease_id": "lease-a", "run_id": "r1", "resource_path": "src/foo/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t1", "adapter": "omp", "scopes": ["src/foo/"]
+                }),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event("r1", 3, "lease_used", json!({"lease_id": "lease-a"})),
+        )
+        .unwrap();
+        let err = apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                4,
+                "run_started",
+                json!({"worktree_path": "/tmp/w", "lease_id": "lease-WRONG"}),
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match the run's lease"));
+    }
+
+    #[test]
+    fn lease_created_rejected_when_max_uses_below_two() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/foo/"]}),
+            ),
+        )
+        .unwrap();
+        let err = apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                2,
+                "lease_created",
+                json!({
+                    "lease_id": "lease-a", "run_id": "r1", "resource_path": "src/foo/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 1,
+                    "task_id": "t1", "adapter": "omp", "scopes": ["src/foo/"]
+                }),
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("max_uses must be >= 2"));
+    }
+
+    #[test]
+    fn lease_created_rejected_when_scopes_differ_from_write_allow() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/foo/"]}),
+            ),
+        )
+        .unwrap();
+        let err = apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                2,
+                "lease_created",
+                json!({
+                    "lease_id": "lease-a", "run_id": "r1", "resource_path": "src/bar/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t1", "adapter": "omp", "scopes": ["src/bar/"]
+                }),
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("scopes must equal"));
+    }
+
+    #[test]
+    fn lease_used_after_revoke_rejected() {
+        let mut state = AgentRunState::new("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                1,
+                "run_created",
+                json!({"task_id": "t1", "adapter": "omp", "write_allow": ["src/foo/"]}),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                2,
+                "lease_created",
+                json!({
+                    "lease_id": "lease-a", "run_id": "r1", "resource_path": "src/foo/",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t1", "adapter": "omp", "scopes": ["src/foo/"]
+                }),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event("r1", 3, "lease_revoked", json!({"lease_id": "lease-a"})),
+        )
+        .unwrap();
+        let err = apply_run(
+            &mut state,
+            &make_event("r1", 4, "lease_used", json!({"lease_id": "lease-a"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("not active"));
     }
 }

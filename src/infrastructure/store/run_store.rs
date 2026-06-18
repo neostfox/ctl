@@ -174,6 +174,12 @@ impl RunEventStore {
     /// Uses atomic write (temp + rename) to avoid corruption.
     pub fn write_run_view(&self, run_id: &str, state: &AgentRunState) -> Result<()> {
         validate_run_id(run_id)?;
+        // Structured lease projection (never prose): a native run lease reports
+        // its status/remaining_uses; a legacy (pre-lease) run reports UNKNOWN.
+        let (lease_status, remaining_uses, lease_compat) = match &state.lease {
+            Some(l) => (l.status.token(), Some(l.remaining_uses), "native"),
+            None => ("UNKNOWN", None, "pre_lease_run"),
+        };
         let view = serde_json::json!({
             "schema": "control.run-state.v1",
             "run_id": state.run_id,
@@ -182,6 +188,9 @@ impl RunEventStore {
             "phase": serde_json::to_value(&state.phase)?,
             "worktree_path": state.worktree_path,
             "lease_id": state.lease_id,
+            "lease_status": lease_status,
+            "lease_compat": lease_compat,
+            "remaining_uses": remaining_uses,
             "write_allow": state.write_allow,
             "write_deny": state.write_deny,
             "gates": state.gates,
@@ -365,6 +374,7 @@ mod tests {
             phase: RunPhase::Running,
             worktree_path: Some("/tmp/wt".to_string()),
             lease_id: Some("lease-1".to_string()),
+            lease: None,
             write_allow: BTreeSet::new(),
             write_deny: BTreeSet::new(),
             gates: BTreeSet::new(),

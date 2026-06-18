@@ -1,6 +1,6 @@
 use crate::domain::approval::{ApprovalState, ApprovalStatus};
 use crate::domain::event::Event;
-use crate::domain::lease::{LeaseState, LeaseStatus};
+use crate::domain::lease::{LeaseError, LeaseGrant, LeaseState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -1248,26 +1248,33 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .get("max_uses")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            if run_id.is_empty() || resource_path.is_empty() || action.is_empty() {
-                return Err("lease_created: run_id, resource_path, and action are required".into());
-            }
-            if ttl_seconds == 0 || max_uses == 0 {
-                return Err("lease_created: ttl_seconds and max_uses must be > 0".into());
-            }
-            state.leases.insert(
-                lease_id.to_string(),
-                LeaseState {
-                    lease_id: lease_id.to_string(),
-                    run_id: run_id.to_string(),
-                    resource_path: resource_path.to_string(),
-                    action: action.to_string(),
-                    ttl_seconds,
-                    max_uses,
-                    remaining_uses: max_uses,
-                    created_at_seq: event.seq,
-                    status: LeaseStatus::Active,
-                },
-            );
+            // Delegate to the typed transition; map its errors back to this
+            // aggregate's long-standing messages (byte-identical to pre-refactor).
+            let lease = LeaseState::grant(LeaseGrant {
+                lease_id: lease_id.to_string(),
+                run_id: run_id.to_string(),
+                resource_path: resource_path.to_string(),
+                action: action.to_string(),
+                ttl_seconds,
+                max_uses,
+                created_at_seq: event.seq,
+                // Task-aggregate leases carry no run-binding fields.
+                task_id: String::new(),
+                adapter: String::new(),
+                scopes: std::collections::BTreeSet::new(),
+            })
+            .map_err(|e| match e {
+                LeaseError::InvalidRunId
+                | LeaseError::InvalidResource
+                | LeaseError::InvalidAction => {
+                    "lease_created: run_id, resource_path, and action are required".to_string()
+                }
+                LeaseError::InvalidTtl | LeaseError::InvalidMaxUses => {
+                    "lease_created: ttl_seconds and max_uses must be > 0".to_string()
+                }
+                other => format!("lease_created: {}", other),
+            })?;
+            state.leases.insert(lease_id.to_string(), lease);
         }
         "lease_used" => {
             let lease_id = event
@@ -1282,16 +1289,13 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .leases
                 .get_mut(lease_id)
                 .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            if lease.status != LeaseStatus::Active {
-                return Err(format!("Lease '{}' is not active", lease_id));
-            }
-            if lease.remaining_uses == 0 {
-                return Err(format!("Lease '{}' has no remaining uses", lease_id));
-            }
-            lease.remaining_uses -= 1;
-            if lease.remaining_uses == 0 {
-                lease.status = LeaseStatus::Expired;
-            }
+            lease.consume().map_err(|e| match e {
+                LeaseError::NotActive => format!("Lease '{}' is not active", lease_id),
+                LeaseError::NoRemainingUses => {
+                    format!("Lease '{}' has no remaining uses", lease_id)
+                }
+                other => format!("Lease '{}': {}", lease_id, other),
+            })?;
         }
         "lease_expired" => {
             let lease_id = event
@@ -1306,7 +1310,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .leases
                 .get_mut(lease_id)
                 .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            lease.status = LeaseStatus::Expired;
+            lease.expire();
         }
         "lease_revoked" => {
             let lease_id = event
@@ -1321,7 +1325,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 .leases
                 .get_mut(lease_id)
                 .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            lease.status = LeaseStatus::Revoked;
+            lease.revoke();
         }
         // ── M4: Approval events ──
         "approval_requested" => {

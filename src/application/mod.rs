@@ -64,6 +64,13 @@ pub struct ReviseTaskInput<'a> {
     pub depends_on: Option<&'a [String]>,
 }
 
+/// V1 run-scoped capability-lease defaults, shared so the M4 task-embedded run
+/// path and the M6 run-aggregate path grant identical leases. `max_uses` must be
+/// >= 2 so the single use consumed at start does not immediately expire (and thus
+/// make non-active) a freshly Running run.
+pub const RUN_LEASE_TTL_SECONDS: u64 = 3600;
+pub const RUN_LEASE_MAX_USES: u64 = 100;
+
 /// M6 crash-recovery snapshot of one `Running` run (see [`ControlApp::recover_report`]).
 /// `worktree_exists == false` marks an inconsistent run whose isolation
 /// workspace is gone — a recovery-abort candidate.
@@ -75,6 +82,21 @@ pub struct RunRecoveryStatus {
     pub worktree_path: Option<String>,
     pub worktree_exists: bool,
     pub manifest_exists: bool,
+    /// The run's lease id (native or legacy opaque), if any.
+    pub lease_id: Option<String>,
+    /// Structured lease status token: `ACTIVE` / `REVOKED` / `EXPIRED`, or
+    /// `UNKNOWN` for a legacy (pre-lease) run.
+    pub lease_status: String,
+    /// `native` once a `lease_created` is in the run's stream; `pre_lease_run`
+    /// for slice-1 runs that predate run-scoped leases.
+    pub lease_compat: String,
+    /// Remaining lease uses (native leases only).
+    pub remaining_uses: Option<u64>,
+    /// Wall-clock TTL exceeded for a still-Active lease. Reported only — recover
+    /// never appends `lease_expired`.
+    pub lease_stale: bool,
+    /// A Running run whose native lease is not Active — an anomaly worth a look.
+    pub lease_nonactive: bool,
 }
 
 impl ControlApp {
@@ -2593,8 +2615,8 @@ impl ControlApp {
             "run_id": run_id,
             "resource_path": state.write_allow.iter().next().unwrap_or(&String::new()),
             "action": "write",
-            "ttl_seconds": 3600,
-            "max_uses": 100,
+            "ttl_seconds": RUN_LEASE_TTL_SECONDS,
+            "max_uses": RUN_LEASE_MAX_USES,
         });
         let lease_event = self.build_event(task_id, "lease_created", lease_payload)?;
         self.validate_and_append(&lease_event)?;
@@ -3092,6 +3114,38 @@ impl ControlApp {
             std::fs::rename(&temp_path, &manifest_path)?;
         }
 
+        // Grant + immediately consume a NEW run-scoped lease, then start — all
+        // three events appended under the registry+per-run critical section
+        // already held here. start_run does not require any pre-existing lease;
+        // it mints one. NOTE: these ledger appends are NOT atomic with the
+        // worktree/manifest filesystem side-effects above. A crash between them
+        // is surfaced read-only by `ctl run recover` (orphaned worktree, or a
+        // Queued run holding a lease), never silently reconciled.
+        let resource_path = write_allow.first().cloned().unwrap_or_default();
+        let lease_created = self.build_run_event(
+            run_id,
+            "lease_created",
+            serde_json::json!({
+                "lease_id": lease_id,
+                "run_id": run_id,
+                "resource_path": resource_path,
+                "action": "write",
+                "ttl_seconds": RUN_LEASE_TTL_SECONDS,
+                "max_uses": RUN_LEASE_MAX_USES,
+                "task_id": run.task_id,
+                "adapter": run.adapter,
+                "scopes": write_allow, // == run.write_allow exactly (V1)
+            }),
+        )?;
+        self.append_run_event_locked(&store, run_id, lease_created)?;
+
+        let lease_used = self.build_run_event(
+            run_id,
+            "lease_used",
+            serde_json::json!({ "lease_id": lease_id }),
+        )?;
+        self.append_run_event_locked(&store, run_id, lease_used)?;
+
         let payload = serde_json::json!({
             "worktree_path": worktree_path.to_string_lossy(),
             "lease_id": lease_id,
@@ -3155,6 +3209,18 @@ impl ControlApp {
                 }
             }
         }
+        // Revoke the run's native lease (if still Active) before the terminal
+        // event, mirroring the M4 path. Appended under the per-run lock held here.
+        if let Some(ref lease) = run.lease {
+            if lease.status == crate::domain::lease::LeaseStatus::Active {
+                let revoke = self.build_run_event(
+                    run_id,
+                    "lease_revoked",
+                    serde_json::json!({ "lease_id": lease.lease_id }),
+                )?;
+                self.append_run_event_locked(&store, run_id, revoke)?;
+            }
+        }
         let event = self.build_run_event(run_id, event_type, payload)?;
         self.append_run_event_locked(&store, run_id, event)
     }
@@ -3169,6 +3235,10 @@ impl ControlApp {
     /// filesystem, never appends.
     pub fn recover_report(&self) -> Result<Vec<RunRecoveryStatus>> {
         let store = self.run_store()?;
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let mut out = Vec::new();
         for run in self.active_runs()? {
             let manifest_exists = store
@@ -3180,6 +3250,40 @@ impl ControlApp {
                 .as_ref()
                 .map(|wt| Path::new(wt).exists())
                 .unwrap_or(false);
+
+            // Structured lease projection + read-only staleness. Staleness is
+            // wall-clock TTL computed from the lease_created event's occurred_at
+            // in THIS run's stream — it is reported, never auto-expired.
+            let (lease_status, lease_compat, remaining_uses, lease_stale, lease_nonactive) =
+                match &run.lease {
+                    Some(l) => {
+                        let active = l.status == crate::domain::lease::LeaseStatus::Active;
+                        let stale = if active {
+                            let events = store.read_for_run(&run.run_id).unwrap_or_default();
+                            event_occurred_at_by_seq(&events, l.created_at_seq)
+                                .and_then(|s| parse_iso8601_to_epoch(&s))
+                                .map(|created| now_epoch.saturating_sub(created) > l.ttl_seconds)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        (
+                            l.status.token().to_string(),
+                            "native".to_string(),
+                            Some(l.remaining_uses),
+                            stale,
+                            !active,
+                        )
+                    }
+                    None => (
+                        "UNKNOWN".to_string(),
+                        "pre_lease_run".to_string(),
+                        None,
+                        false,
+                        false,
+                    ),
+                };
+
             out.push(RunRecoveryStatus {
                 run_id: run.run_id.clone(),
                 task_id: run.task_id.clone(),
@@ -3187,7 +3291,35 @@ impl ControlApp {
                 worktree_path: run.worktree_path.clone(),
                 worktree_exists,
                 manifest_exists,
+                lease_id: run.lease_id.clone(),
+                lease_status,
+                lease_compat,
+                remaining_uses,
+                lease_stale,
+                lease_nonactive,
             });
+        }
+        Ok(out)
+    }
+
+    /// Runs that committed a lease but never reached `Running` — i.e. a crash
+    /// between lease consumption and `run_started` within `start_run`. Read-only;
+    /// the resolution is the existing explicit `ctl run recover --abort`.
+    pub fn partial_start_runs(&self) -> Result<Vec<serde_json::Value>> {
+        let store = self.run_store()?;
+        let mut out = Vec::new();
+        for run_id in store.run_ids()? {
+            let run = self.replay_run(&run_id)?;
+            if run.phase == RunPhase::Queued {
+                if let Some(ref lease) = run.lease {
+                    out.push(serde_json::json!({
+                        "run_id": run.run_id,
+                        "task_id": run.task_id,
+                        "lease_id": lease.lease_id,
+                        "lease_status": lease.status.token(),
+                    }));
+                }
+            }
         }
         Ok(out)
     }
@@ -5407,6 +5539,231 @@ mod tests {
         app.finish_run(&r_src).unwrap();
         app.start_run(&r_src2).unwrap();
         assert_eq!(app.replay_run(&r_src2).unwrap().phase, RunPhase::Running);
+    }
+
+    // ── M6: run-scoped capability lease wiring (capability-lease-run-wiring-v1) ──
+
+    #[test]
+    fn start_run_grants_and_consumes_native_lease() {
+        let dir = TempDir::new();
+        let (app, run_id, _wt) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        let run = app.replay_run(&run_id).unwrap();
+        let lease = run.lease.as_ref().expect("native run lease present");
+        assert_eq!(lease.status, crate::domain::lease::LeaseStatus::Active);
+        assert_eq!(lease.max_uses, RUN_LEASE_MAX_USES);
+        assert_eq!(lease.ttl_seconds, RUN_LEASE_TTL_SECONDS);
+        // Start consumes exactly one use.
+        assert_eq!(lease.remaining_uses, RUN_LEASE_MAX_USES - 1);
+        assert_eq!(lease.task_id, "task-src");
+        assert_eq!(lease.adapter, "omp");
+        assert_eq!(lease.scopes, run.write_allow);
+        assert_eq!(run.lease_id.as_deref(), Some(lease.lease_id.as_str()));
+
+        // Manifest carries the same lease_id.
+        let manifest = std::fs::read_to_string(
+            dir.path()
+                .join(".ctl/runs")
+                .join(&run_id)
+                .join("run-manifest.json"),
+        )
+        .unwrap();
+        assert!(manifest.contains(&lease.lease_id));
+
+        // run.json projection reports structured (non-prose) lease fields.
+        let run_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".ctl/runs").join(&run_id).join("run.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(run_json["lease_status"], "ACTIVE");
+        assert_eq!(run_json["lease_compat"], "native");
+        assert_eq!(run_json["remaining_uses"], RUN_LEASE_MAX_USES - 1);
+    }
+
+    #[test]
+    fn overlap_rejected_emits_no_lease_event() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let _a = seed_running_run(&app, "task-a", &["src"]); // Running on src
+        inprogress_task(&app, "task-b", &["src"]);
+        let b = app.create_run("task-b", "omp").unwrap();
+        assert!(app
+            .start_run(&b)
+            .unwrap_err()
+            .to_string()
+            .contains("scope conflict"));
+        let run = app.replay_run(&b).unwrap();
+        assert_eq!(run.phase, RunPhase::Queued);
+        assert!(
+            run.lease.is_none(),
+            "a rejected start must not grant a lease"
+        );
+        // Only run_created is on the ledger — no lease event leaked.
+        let events =
+            std::fs::read_to_string(dir.path().join(".ctl/runs").join(&b).join("events.jsonl"))
+                .unwrap();
+        assert_eq!(
+            events.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "rejected start left extra events: {events}"
+        );
+        assert!(!events.contains("lease_created"));
+    }
+
+    #[test]
+    fn second_start_run_does_not_double_consume() {
+        let dir = TempDir::new();
+        let (app, run_id, _wt) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        let before = app
+            .replay_run(&run_id)
+            .unwrap()
+            .lease
+            .unwrap()
+            .remaining_uses;
+        assert!(app
+            .start_run(&run_id)
+            .unwrap_err()
+            .to_string()
+            .contains("Queued"));
+        let after = app
+            .replay_run(&run_id)
+            .unwrap()
+            .lease
+            .unwrap()
+            .remaining_uses;
+        assert_eq!(before, after, "rejected re-start must not consume a use");
+        assert_eq!(after, RUN_LEASE_MAX_USES - 1);
+    }
+
+    #[test]
+    fn finish_revokes_lease_and_unblocks_overlapping_run() {
+        let dir = TempDir::new();
+        let (app, r_src, _wt) = git_repo_with_started_run(dir.path(), "task-src", &["src"]);
+        // An overlapping run is blocked while the first holds the scope.
+        inprogress_task(&app, "task-src2", &["src"]);
+        let r2 = app.create_run("task-src2", "omp").unwrap();
+        assert!(app
+            .start_run(&r2)
+            .unwrap_err()
+            .to_string()
+            .contains("scope conflict"));
+        // Finishing the first run revokes its lease and frees the scope.
+        app.finish_run(&r_src).unwrap();
+        let first = app.replay_run(&r_src).unwrap();
+        let first_lease = first.lease.clone().unwrap();
+        assert_eq!(
+            first_lease.status,
+            crate::domain::lease::LeaseStatus::Revoked
+        );
+        // The previously-blocked run can now start and gets its OWN active lease.
+        app.start_run(&r2).unwrap();
+        let second = app.replay_run(&r2).unwrap();
+        assert_eq!(second.phase, RunPhase::Running);
+        let l2 = second.lease.unwrap();
+        assert_eq!(l2.status, crate::domain::lease::LeaseStatus::Active);
+        assert_eq!(l2.remaining_uses, RUN_LEASE_MAX_USES - 1);
+        assert_ne!(l2.lease_id, first_lease.lease_id);
+    }
+
+    #[test]
+    fn recover_reports_unknown_lease_for_legacy_run() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // seed_running_run emits run_started with an opaque lease_id and NO
+        // lease_created — a slice-1 (pre-lease) run.
+        seed_running_run(&app, "t", &["src"]);
+        let report = app.recover_report().unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].lease_status, "UNKNOWN");
+        assert_eq!(report[0].lease_compat, "pre_lease_run");
+        assert_eq!(report[0].remaining_uses, None);
+        assert_eq!(report[0].lease_id.as_deref(), Some("lease-seed"));
+        assert!(!report[0].lease_nonactive);
+    }
+
+    #[test]
+    fn partial_start_run_detected_read_only() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // Hand-build a crash mid-start: run_created + lease_created + lease_used,
+        // but no run_started (process died before the start committed).
+        let run_id = generate_uuid();
+        let created = app
+            .build_run_event(
+                &run_id,
+                "run_created",
+                serde_json::json!({
+                    "task_id": "t", "adapter": "omp",
+                    "write_allow": ["src"], "write_deny": [], "gates": ["cargo_check"],
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, created).unwrap();
+        let lc = app
+            .build_run_event(
+                &run_id,
+                "lease_created",
+                serde_json::json!({
+                    "lease_id": "L", "run_id": run_id.clone(), "resource_path": "src",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t", "adapter": "omp", "scopes": ["src"],
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, lc).unwrap();
+        let lu = app
+            .build_run_event(&run_id, "lease_used", serde_json::json!({"lease_id": "L"}))
+            .unwrap();
+        app.append_run_event(&run_id, lu).unwrap();
+
+        let partials = app.partial_start_runs().unwrap();
+        assert_eq!(partials.len(), 1);
+        assert_eq!(partials[0]["run_id"].as_str(), Some(run_id.as_str()));
+        assert_eq!(partials[0]["lease_status"], "ACTIVE");
+        // Still Queued → absent from the Running-only recover report.
+        assert!(app.recover_report().unwrap().is_empty());
+        // The read-only scan appended nothing.
+        assert_eq!(app.replay_run(&run_id).unwrap().last_seq, 3);
+    }
+
+    #[test]
+    fn running_run_with_revoked_lease_flagged_nonactive() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let run_id = generate_uuid();
+        for (etype, payload) in [
+            (
+                "run_created",
+                serde_json::json!({
+                    "task_id": "t", "adapter": "omp",
+                    "write_allow": ["src"], "write_deny": [], "gates": ["cargo_check"],
+                }),
+            ),
+            (
+                "lease_created",
+                serde_json::json!({
+                    "lease_id": "L", "run_id": run_id.clone(), "resource_path": "src",
+                    "action": "write", "ttl_seconds": 3600, "max_uses": 100,
+                    "task_id": "t", "adapter": "omp", "scopes": ["src"],
+                }),
+            ),
+            ("lease_used", serde_json::json!({"lease_id": "L"})),
+            (
+                "run_started",
+                serde_json::json!({
+                    "worktree_path": format!(".ctl/runs/{}/worktree", run_id),
+                    "lease_id": "L",
+                }),
+            ),
+            ("lease_revoked", serde_json::json!({"lease_id": "L"})),
+        ] {
+            let e = app.build_run_event(&run_id, etype, payload).unwrap();
+            app.append_run_event(&run_id, e).unwrap();
+        }
+        let report = app.recover_report().unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].lease_status, "REVOKED");
+        assert!(report[0].lease_nonactive);
     }
 
     // ── M6: crash recovery (slice 2) ────────────────────────────────────────
