@@ -99,6 +99,91 @@ pub struct RunRecoveryStatus {
     pub lease_nonactive: bool,
 }
 
+/// One task↔run↔registry↔worktree inconsistency, with the explicit repair that
+/// `ctl repair --cross-ledger --apply` would perform.
+///
+/// A task transition and its run-ledger counterpart are two separate appends
+/// (each single-writer, but with no transaction spanning both), so a crash
+/// between them can leave the ledgers disagreeing. This classifies the
+/// disagreement and names a single, conservative repair — it never fabricates a
+/// "correct" history, only retires the stale side (abort the live run, or remove
+/// a leftover worktree).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CrossLedgerFinding {
+    pub kind: CrossLedgerKind,
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub detail: String,
+    pub repair: RepairAction,
+}
+
+/// The class of cross-ledger drift. One finding per run, chosen by severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossLedgerKind {
+    /// A non-terminal run whose `task_id` has no task ledger at all.
+    OrphanRun,
+    /// A Running run whose task is already terminal (Completed/Cancelled) — the
+    /// classic non-atomic window (task closed, run not).
+    StrandedRun,
+    /// A Running run whose isolated worktree is gone (crash mid-run).
+    MissingWorktreeRun,
+    /// A Queued run holding a lease that never reached `run_started` (crash
+    /// mid-start).
+    PartialStartRun,
+    /// A terminal run whose worktree dir still lingers on disk (leftover
+    /// isolation, safe to prune).
+    OrphanedWorktree,
+}
+
+impl CrossLedgerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrossLedgerKind::OrphanRun => "orphan_run",
+            CrossLedgerKind::StrandedRun => "stranded_run",
+            CrossLedgerKind::MissingWorktreeRun => "missing_worktree_run",
+            CrossLedgerKind::PartialStartRun => "partial_start_run",
+            CrossLedgerKind::OrphanedWorktree => "orphaned_worktree",
+        }
+    }
+}
+
+/// The single repair an inconsistency maps to. Conservative by construction:
+/// either retire a stale run (which appends `run_aborted` — the canonical repair
+/// evidence) or remove a leftover worktree dir (fs-only; the run ledger is
+/// already terminal and correct).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RepairAction {
+    /// Abort the run: revoke its lease, clean its worktree, append `run_aborted`.
+    AbortRun { reason: String },
+    /// Remove the leftover worktree directory (fs-only — no ledger event).
+    RemoveWorktree { path: String },
+}
+
+impl RepairAction {
+    /// One-line preview of what `--apply` would do.
+    pub fn preview(&self) -> String {
+        match self {
+            RepairAction::AbortRun { reason } => {
+                format!("abort run (revoke lease, clean worktree, append run_aborted) — {reason}")
+            }
+            RepairAction::RemoveWorktree { path } => {
+                format!("remove leftover worktree dir {path} (fs-only, no ledger event)")
+            }
+        }
+    }
+}
+
+/// Outcome of applying one cross-ledger repair.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepairOutcome {
+    pub run_id: String,
+    pub kind: CrossLedgerKind,
+    pub applied: bool,
+    pub result: String,
+}
+
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
@@ -3363,6 +3448,152 @@ impl ControlApp {
         Ok(orphans)
     }
 
+    /// Classify every cross-ledger inconsistency (read-only — replays aggregates
+    /// and stats the filesystem, never appends).
+    ///
+    /// One finding per run, chosen by severity: orphan (no task) > stranded
+    /// (terminal task) > missing-worktree, plus partial-start for a Queued run
+    /// still holding a lease, and orphaned-worktree for a terminal run whose
+    /// isolation dir lingers. Reuses the same "active"/"terminal" notions as
+    /// `doctor` and `run recover`, so the three views never disagree. A run whose
+    /// own ledger is torn is skipped here — that is `ctl repair --run` territory,
+    /// not cross-ledger drift.
+    pub fn cross_ledger_findings(&self) -> Result<Vec<CrossLedgerFinding>> {
+        use crate::domain::run::RunPhase;
+        use crate::domain::task::Phase;
+
+        // Task phase map; a missing entry means the task has no ledger.
+        let mut task_phases: std::collections::HashMap<String, Phase> =
+            std::collections::HashMap::new();
+        for tid in self.store.task_ids()? {
+            if let Ok(state) = self.replay_task(&tid) {
+                task_phases.insert(tid, state.phase);
+            }
+        }
+
+        let store = self.run_store()?;
+        let mut findings = Vec::new();
+        for run_id in store.run_ids()? {
+            let run = match self.replay_run(&run_id) {
+                Ok(r) => r,
+                Err(_) => continue, // torn run ledger — not a cross-ledger concern
+            };
+            let worktree_on_disk = run
+                .worktree_path
+                .as_ref()
+                .map(|w| Path::new(w).exists())
+                .unwrap_or(false);
+            let task_id = (!run.task_id.is_empty()).then(|| run.task_id.clone());
+
+            match run.phase {
+                RunPhase::Running | RunPhase::Queued => {
+                    let no_task =
+                        !run.task_id.is_empty() && !task_phases.contains_key(&run.task_id);
+                    let task_terminal = matches!(
+                        task_phases.get(&run.task_id),
+                        Some(Phase::Completed) | Some(Phase::Cancelled)
+                    );
+                    let (kind, detail) = if no_task {
+                        (
+                            CrossLedgerKind::OrphanRun,
+                            format!(
+                                "run '{}' is {:?} but references task '{}', which has no ledger",
+                                run_id, run.phase, run.task_id
+                            ),
+                        )
+                    } else if task_terminal {
+                        (
+                            CrossLedgerKind::StrandedRun,
+                            format!(
+                                "run '{}' is {:?} but its task '{}' is terminal",
+                                run_id, run.phase, run.task_id
+                            ),
+                        )
+                    } else if run.phase == RunPhase::Running && !worktree_on_disk {
+                        (
+                            CrossLedgerKind::MissingWorktreeRun,
+                            format!(
+                                "run '{}' is Running but its isolated worktree is missing",
+                                run_id
+                            ),
+                        )
+                    } else if run.phase == RunPhase::Queued && run.lease.is_some() {
+                        (
+                            CrossLedgerKind::PartialStartRun,
+                            format!(
+                                "run '{}' is Queued holding a lease but never started (crash mid-start)",
+                                run_id
+                            ),
+                        )
+                    } else {
+                        continue; // consistent (active run, live task, worktree present)
+                    };
+                    findings.push(CrossLedgerFinding {
+                        repair: RepairAction::AbortRun {
+                            reason: format!("cross-ledger repair: {}", kind.as_str()),
+                        },
+                        kind,
+                        run_id: run_id.clone(),
+                        task_id,
+                        detail,
+                    });
+                }
+                RunPhase::Completed | RunPhase::Failed | RunPhase::Aborted => {
+                    if worktree_on_disk {
+                        let path = run.worktree_path.clone().unwrap_or_default();
+                        findings.push(CrossLedgerFinding {
+                            kind: CrossLedgerKind::OrphanedWorktree,
+                            run_id: run_id.clone(),
+                            task_id,
+                            detail: format!(
+                                "run '{}' is {:?} but its worktree dir still exists at {}",
+                                run_id, run.phase, path
+                            ),
+                            repair: RepairAction::RemoveWorktree { path },
+                        });
+                    }
+                }
+            }
+        }
+        Ok(findings)
+    }
+
+    /// Apply one cross-ledger repair. Run aborts append `run_aborted`
+    /// (+`lease_revoked`) — the canonical repair evidence; worktree removal is
+    /// fs-only (the run ledger is already terminal and correct). Errors are
+    /// captured in the outcome, not propagated, so a batch apply continues past a
+    /// single failure.
+    pub fn apply_cross_ledger_repair(&self, finding: &CrossLedgerFinding) -> RepairOutcome {
+        let mut outcome = RepairOutcome {
+            run_id: finding.run_id.clone(),
+            kind: finding.kind,
+            applied: false,
+            result: String::new(),
+        };
+        outcome.result = match &finding.repair {
+            RepairAction::AbortRun { reason } => match self.abort_run(&finding.run_id, reason) {
+                Ok(ev) => {
+                    outcome.applied = true;
+                    format!("aborted run (run_aborted at seq {})", ev.seq)
+                }
+                Err(e) => format!("abort failed: {e}"),
+            },
+            RepairAction::RemoveWorktree { path } => {
+                match crate::infrastructure::workspace::cleanup_worktree(
+                    &self.project_root,
+                    Path::new(path),
+                ) {
+                    Ok(()) => {
+                        outcome.applied = true;
+                        format!("removed leftover worktree {path}")
+                    }
+                    Err(e) => format!("worktree removal failed: {e}"),
+                }
+            }
+        };
+        outcome
+    }
+
     /// M6 slice 3: read-only "can this run's work land, and if not, how do I
     /// recover?" verdict for a run aggregate's isolated worktree. Emits NO
     /// events and never merges. A run is `mergeable` iff every touched file is
@@ -5398,6 +5629,146 @@ mod tests {
             .unwrap();
         app.append_run_event(&run_id, started).unwrap();
         run_id
+    }
+
+    // ── cross-ledger detect+repair (cross-ledger-detect-repair-v1) ──
+
+    fn mk_planning_task(app: &ControlApp, id: &str) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    }
+
+    /// Like `seed_running_run` but the worktree is an absolute path that actually
+    /// exists on disk — so the run looks fully consistent.
+    fn seed_running_run_with_worktree(
+        app: &ControlApp,
+        root: &Path,
+        task_id: &str,
+        write_allow: &[&str],
+    ) -> String {
+        let run_id = generate_uuid();
+        let wt = root
+            .join(".ctl")
+            .join("runs")
+            .join(&run_id)
+            .join("worktree");
+        std::fs::create_dir_all(&wt).unwrap();
+        let wa: Vec<String> = write_allow.iter().map(|s| s.to_string()).collect();
+        let created = app
+            .build_run_event(
+                &run_id,
+                "run_created",
+                serde_json::json!({
+                    "task_id": task_id, "adapter": "omp", "write_allow": wa,
+                    "write_deny": [], "gates": ["cargo_check"],
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, created).unwrap();
+        let started = app
+            .build_run_event(
+                &run_id,
+                "run_started",
+                serde_json::json!({
+                    "worktree_path": wt.to_string_lossy(), "lease_id": "lease-seed",
+                }),
+            )
+            .unwrap();
+        app.append_run_event(&run_id, started).unwrap();
+        run_id
+    }
+
+    #[test]
+    fn cross_ledger_detects_orphan_run() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let run_id = seed_running_run(&app, "ghost-task", &["src"]);
+        let f = app.cross_ledger_findings().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CrossLedgerKind::OrphanRun);
+        assert_eq!(f[0].run_id, run_id);
+        assert!(matches!(f[0].repair, RepairAction::AbortRun { .. }));
+    }
+
+    #[test]
+    fn cross_ledger_detects_stranded_run() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.cancel_task("t1").unwrap(); // terminal task
+        seed_running_run(&app, "t1", &["src"]);
+        let f = app.cross_ledger_findings().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CrossLedgerKind::StrandedRun);
+    }
+
+    #[test]
+    fn cross_ledger_detects_missing_worktree_run() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap(); // live, InProgress
+        seed_running_run(&app, "t1", &["src"]); // worktree path not on disk
+        let f = app.cross_ledger_findings().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CrossLedgerKind::MissingWorktreeRun);
+    }
+
+    #[test]
+    fn cross_ledger_clean_when_run_consistent() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        seed_running_run_with_worktree(&app, dir.path(), "t1", &["src"]);
+        let f = app.cross_ledger_findings().unwrap();
+        assert!(f.is_empty(), "consistent run yields no finding: {f:?}");
+    }
+
+    #[test]
+    fn cross_ledger_detects_orphaned_worktree() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let run_id = seed_running_run_with_worktree(&app, dir.path(), "ghost", &["src"]);
+        // Terminal-ize WITHOUT abort_run so the worktree dir lingers.
+        let aborted = app
+            .build_run_event(&run_id, "run_aborted", serde_json::json!({"reason": "x"}))
+            .unwrap();
+        app.append_run_event(&run_id, aborted).unwrap();
+        let f = app.cross_ledger_findings().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, CrossLedgerKind::OrphanedWorktree);
+        assert!(matches!(f[0].repair, RepairAction::RemoveWorktree { .. }));
+    }
+
+    #[test]
+    fn cross_ledger_apply_aborts_run_and_clears_finding() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let run_id = seed_running_run(&app, "ghost-task", &["src"]);
+        let findings = app.cross_ledger_findings().unwrap();
+        assert_eq!(findings.len(), 1);
+        let outcome = app.apply_cross_ledger_repair(&findings[0]);
+        assert!(outcome.applied, "repair applied: {}", outcome.result);
+        assert_eq!(outcome.run_id, run_id);
+        // Run is now Aborted (terminal) → no longer a cross-ledger finding.
+        let after = app.cross_ledger_findings().unwrap();
+        assert!(after.is_empty(), "finding cleared after repair: {after:?}");
     }
 
     #[test]

@@ -45,7 +45,8 @@ enum Commands {
     Validate,
     /// Diagnose local task ledger health
     Doctor,
-    /// Truncate a torn trailing record from a ledger (explicit crash-recovery)
+    /// Truncate a torn trailing record from a ledger (explicit crash-recovery),
+    /// or with --cross-ledger, detect and repair task↔run inconsistencies
     Repair {
         /// Repair this task's event ledger
         #[arg(long)]
@@ -56,9 +57,18 @@ enum Commands {
         /// Scan every task and run ledger
         #[arg(long)]
         all: bool,
-        /// Actually truncate the torn record; without this it only reports (dry-run)
+        /// Detect cross-ledger task↔run↔worktree inconsistencies (orphan/stranded/
+        /// missing-worktree/partial-start runs, orphaned worktrees). Preview by
+        /// default; with --apply, retires the stale side (abort run / prune
+        /// worktree). Takes no target selector.
+        #[arg(long)]
+        cross_ledger: bool,
+        /// Actually perform the repair; without this it only previews (dry-run)
         #[arg(long)]
         apply: bool,
+        /// Emit JSON (cross-ledger mode)
+        #[arg(long)]
+        json: bool,
     },
     /// Schema validation commands
     Schema {
@@ -996,8 +1006,17 @@ pub fn run() -> Result<()> {
             task,
             run,
             all,
+            cross_ledger,
             apply,
-        } => cmd_repair(task.as_deref(), run.as_deref(), *all, *apply),
+            json,
+        } => cmd_repair(
+            task.as_deref(),
+            run.as_deref(),
+            *all,
+            *cross_ledger,
+            *apply,
+            *json,
+        ),
         Commands::Schema { command } => cmd_schema(command),
         Commands::Boundary { command } => cmd_boundary(command),
         Commands::Gate { command } => cmd_gate(command, dry_run),
@@ -1331,11 +1350,26 @@ fn cmd_doctor() -> Result<()> {
     Ok(())
 }
 
-fn cmd_repair(task: Option<&str>, run: Option<&str>, all: bool, apply: bool) -> Result<()> {
+fn cmd_repair(
+    task: Option<&str>,
+    run: Option<&str>,
+    all: bool,
+    cross_ledger: bool,
+    apply: bool,
+    json: bool,
+) -> Result<()> {
+    if cross_ledger {
+        if task.is_some() || run.is_some() || all {
+            return Err(anyhow::anyhow!(
+                "--cross-ledger takes no target selector (it scans all task↔run ledgers)"
+            ));
+        }
+        return cmd_repair_cross_ledger(apply, json);
+    }
     let selectors = task.is_some() as u8 + run.is_some() as u8 + all as u8;
     if selectors != 1 {
         return Err(anyhow::anyhow!(
-            "specify exactly one of --task <id>, --run <id>, or --all"
+            "specify exactly one of --task <id>, --run <id>, --all, or --cross-ledger"
         ));
     }
     let app = app_open(false)?;
@@ -1378,6 +1412,75 @@ fn cmd_repair(task: Option<&str>, run: Option<&str>, all: bool, apply: bool) -> 
             "\n{repaired} ledger(s) have a torn tail. This is a dry run — re-run with --apply to repair."
         );
     }
+    Ok(())
+}
+
+/// `ctl repair --cross-ledger`: detect task↔run↔worktree inconsistencies and,
+/// with `--apply`, retire the stale side. Preview is read-only; apply executes
+/// each repair (run aborts append `run_aborted` — the audit trail) and continues
+/// past individual failures.
+fn cmd_repair_cross_ledger(apply: bool, json: bool) -> Result<()> {
+    let app = app_open(false)?;
+    let findings = app.cross_ledger_findings()?;
+
+    if !apply {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "mode": "preview",
+                    "inconsistencies": findings,
+                }))?
+            );
+            return Ok(());
+        }
+        if findings.is_empty() {
+            println!("No cross-ledger inconsistencies found.");
+            return Ok(());
+        }
+        println!(
+            "{} cross-ledger inconsistency(ies) found (preview — no ledgers modified):",
+            findings.len()
+        );
+        for f in &findings {
+            println!("  [{}] {}", f.kind.as_str(), f.detail);
+            println!("      -> repair: {}", f.repair.preview());
+        }
+        println!("\nThis is a preview. Re-run with --apply to execute these repairs.");
+        return Ok(());
+    }
+
+    // --apply
+    let outcomes: Vec<_> = findings
+        .iter()
+        .map(|f| app.apply_cross_ledger_repair(f))
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": "apply",
+                "outcomes": outcomes,
+            }))?
+        );
+        return Ok(());
+    }
+    if outcomes.is_empty() {
+        println!("No cross-ledger inconsistencies found.");
+        return Ok(());
+    }
+    for o in &outcomes {
+        let mark = if o.applied { "REPAIRED" } else { "FAILED" };
+        println!(
+            "  [{}] run {} — {} ({})",
+            o.kind.as_str(),
+            o.run_id,
+            o.result,
+            mark
+        );
+    }
+    let applied = outcomes.iter().filter(|o| o.applied).count();
+    println!("\nApplied {}/{} repair(s).", applied, outcomes.len());
     Ok(())
 }
 
