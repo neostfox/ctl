@@ -1168,6 +1168,51 @@ opencode
 
 `manual` 是第一个正式 adapter，不是临时兜底：CLI 先生成结构化任务包，让人或任意 AI 工具执行并回填结果。这样可以在接入自动执行器前验证协议是否完整。
 
+#### Adapter 诊断（adapter-doctor-v1）
+
+注册表（`SUPPORTED_ADAPTERS` + `adapter_for`）是 adapter 的唯一真相源，但“注册了”不等于“接对了”：Rust 侧契约可能没接好（`capabilities` 形状不对、`prepare_run` 没盖对名字、`validate_output` 漏判 source），宿主侧集成也可能缺失（control-guard skill 不存在、managed-protocol 漂移、插件 / hook 文件缺位）。adapter-doctor-v1 沿这两条轴诊断。
+
+**只报事实，不给综合分。** 每条 check 带一个状态枚举，而非单个 bool：
+
+```rust
+enum CheckStatus { Pass, Fail, Warn, Unknown, NotTracked }   // JSON: SCREAMING_SNAKE_CASE
+```
+
+- 我们**刻意不输出 0–100 的“支持健康分”**——只有逐条状态 + `PASS/FAIL/WARN/UNKNOWN/NOT_TRACKED` 计数 + `healthy/total`。
+- 判失败的唯一依据是 `counts.fail > 0`；`WARN/UNKNOWN/NOT_TRACKED` 永不算失败。
+- 未实际执行或无法判定的检查保持 `NOT_TRACKED` / `UNKNOWN`，**绝不冒充 `PASS`**。
+
+数据结构（`src/adapters/mod.rs`，全部 `Serialize`，`--json` 直出事实）：
+
+```rust
+struct AdapterCheck       { name: String, status: CheckStatus, detail: String }
+struct StatusTally        { pass, fail, warn, unknown, not_tracked: usize }
+struct AdapterDiagnostic  { adapter, resolved: bool, checks: Vec<AdapterCheck>, counts: StatusTally }
+struct AdapterSummary     { adapter, output_format, workspace, capabilities: Vec<String> }
+struct AdapterDoctorReport{ adapters, total, healthy, failed: usize, counts: StatusTally }
+```
+
+`AdapterDiagnostic` 没有 `healthy` 布尔——失败是事实 `counts.fail > 0`（`has_failures()`）。`AdapterDoctorReport` 里 `healthy` 是“无 FAIL 的 adapter 数”，是计数而非评分。
+
+**两类 check：**
+
+- `contract.*` —— 纯函数，住在 `crate::adapters::adapter_contract_checks`（无 fs / process）。是 conformance 套件的线上孪生，条款一一对应：`resolves`、`name_matches`、`capabilities_adapter`、`capabilities_output_format`、`capabilities_list`、`prepare_run`、`validate_output_accepts`、`validate_output_rejects_foreign`。未知名字只返回一条失败的 `contract.resolves`。
+- `platform.*` —— 需要文件系统与协议检查器，因此在 application 层装配（`application::adapter_doctor_report`），折进同一个 `AdapterDiagnostic`：
+  - `platform.skill_present`：该 adapter 的 control-guard skill 是否存在（缺失 = FAIL）。
+  - `platform.protocol_in_sync`：**复用** `infrastructure::skills::evaluate_protocol_drift`——即 CI 漂移测试的同一套 marker/version/core 解析比对逻辑（已从 `#[cfg(test)]` 提升为编译进二进制的公共 API）。漂移 = FAIL，skill 缺失 = UNKNOWN。
+  - opencode：`platform.opencode_plugin_present`（`.opencode/plugins/ctl-gate.ts`，缺失 = FAIL）；`platform.opencode_bun_tests`（默认 `NOT_TRACKED`，仅 `--verify` 真跑 `bun test`，Bun 不可用 = UNKNOWN）。
+  - omp：`platform.omp_hook_present` 与 `platform.omp_config_present`——“检测得到才检查”，缺失分别为 WARN / UNKNOWN，绝不硬判 FAIL（某个 checkout 可能本就没接 OMP），也从不断言 hook 的运行时行为。
+
+**CLI（逻辑在 `adapters/` + `application/` + `infrastructure/`，`cli/` 只格式化）：**
+
+| 命令 | 作用 | 失败语义 |
+|---|---|---|
+| `ctl adapter list [--json]` | 列出全部注册 adapter 的 `output_format` / 能力 | 总是成功 |
+| `ctl adapter status --adapter <name> [--json] [--verify]` | 单个 adapter：contract + platform | 存在 FAIL → 非零退出 |
+| `ctl adapter doctor [--json] [--verify]` | 全部 adapter：contract + platform | 任一 adapter 有 FAIL → 非零退出 |
+
+诊断只读文件与注册表，从不触碰任务 / run 账本；`--verify` 之外不跑任何外部进程，因此默认随时可跑。
+
 ### 7. 人机协作断点
 
 控制系统必须知道哪些动作需要人确认：

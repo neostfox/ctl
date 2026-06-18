@@ -221,6 +221,20 @@ ctl research record|status            研究 / spike 任务：以证据 + 未知
 **支持哪些 AI 工具？**
 当前激活 OMP（原生 hook）、Claude Code（PreToolUse hook）与 opencode（`.opencode/plugins/ctl-gate.ts` 插件：`tool.execute.before` 门禁 + system 上下文注入）。控制层只依赖统一协议；`ctl` 另带 `opencode` 执行器 adapter（`ctl adapter capabilities --adapter opencode`、`ctl run ingest --adapter opencode`）。Codex 仍为规划中的兼容目标。
 
+**怎么查看 / 诊断已注册的 adapter？**
+`ctl adapter` 提供三个只读自省命令（均支持 `--json`）：
+
+- `ctl adapter list` —— 列出注册表里全部 adapter 及其 `output_format` / 能力（registry 顺序）。
+- `ctl adapter status --adapter <name> [--verify]` —— 诊断单个 adapter。
+- `ctl adapter doctor [--verify]` —— 诊断全部 adapter。
+
+诊断沿两条轴展开，每条 check 带一个 `PASS / FAIL / WARN / UNKNOWN / NOT_TRACKED` 状态：
+
+- **contract.*** —— Rust `ExecutorAdapter` 契约条款（解析、名字自洽、capabilities 形状、`prepare_run`、`validate_output` 接受/拒绝）。这是 `src/adapters/` 里 conformance 测试套件的**线上孪生**：CI 用 `#[test]` 断言，doctor 用同样条款在已发布二进制上回答“有没有半成品 adapter 被发出去”。
+- **platform.*** —— 宿主集成：control-guard skill 是否存在、managed-protocol 是否漂移（**复用** CI 的协议漂移检查器）、opencode 插件 / OMP hook·config 文件是否就位、opencode 的 Bun 插件测试。
+
+刻意**不给综合“健康分”**：输出只报事实——每条 check 的状态，以及 `PASS/FAIL/WARN/UNKNOWN/NOT_TRACKED` 计数与 `healthy/total`。判失败的唯一依据是“存在 FAIL”；WARN/UNKNOWN 不算失败，存在 FAIL 时命令非零退出。未实际执行或无法判定的检查保持 `NOT_TRACKED` / `UNKNOWN`，绝不冒充 `PASS`：opencode 的 Bun 插件测试默认 `NOT_TRACKED`，仅在 `--verify` 下真正运行（Bun 不可用则 `UNKNOWN`）。诊断只读文件与注册表，从不触碰任务 / run 账本。
+
 **会不会限制太死？**
 默认只读、最小权限是刻意设计。需要越界时走 `ctl apply` 申请受审批的路径例外，而不是直接放开。
 

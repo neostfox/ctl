@@ -878,6 +878,35 @@ enum AdapterCommands {
         #[arg(long)]
         adapter: String,
     },
+    /// List every registered executor adapter and its declared capabilities
+    List {
+        /// Emit JSON instead of a table
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show contract + platform-integration status of a single adapter
+    Status {
+        /// Adapter name (e.g., "omp")
+        #[arg(long)]
+        adapter: String,
+        /// Emit JSON instead of human-readable output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Run live checks too (e.g. the opencode Bun plugin tests). Off by
+        /// default — live checks otherwise report NOT_TRACKED.
+        #[arg(long, default_value_t = false)]
+        verify: bool,
+    },
+    /// Diagnose every registered adapter: Rust contract + platform integration
+    Doctor {
+        /// Emit JSON instead of human-readable output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Run live checks too (e.g. the opencode Bun plugin tests). Off by
+        /// default — live checks otherwise report NOT_TRACKED.
+        #[arg(long, default_value_t = false)]
+        verify: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1905,8 +1934,119 @@ fn cmd_adapter(command: &AdapterCommands) -> Result<()> {
             let caps = app.adapter_capabilities(adapter)?;
             println!("{}", serde_json::to_string_pretty(&caps)?);
         }
+        AdapterCommands::List { json } => {
+            let app = app_open(false)?;
+            let adapters = app.adapter_list();
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&adapters)?);
+            } else {
+                print_adapter_list(&adapters);
+            }
+        }
+        AdapterCommands::Status {
+            adapter,
+            json,
+            verify,
+        } => {
+            let app = app_open(false)?;
+            let diag = app.adapter_status(adapter, *verify);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&diag)?);
+            } else {
+                print_adapter_diagnostic(&diag);
+            }
+            if diag.has_failures() {
+                return Err(anyhow::anyhow!(
+                    "Adapter '{}' has {} failing check(s)",
+                    adapter,
+                    diag.counts.fail
+                ));
+            }
+        }
+        AdapterCommands::Doctor { json, verify } => {
+            let app = app_open(false)?;
+            let report = app.adapter_doctor(*verify);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_adapter_doctor(&report);
+            }
+            if report.failed > 0 {
+                return Err(anyhow::anyhow!(
+                    "Adapter doctor found {} adapter(s) with failing check(s)",
+                    report.failed
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn print_adapter_list(adapters: &[crate::adapters::AdapterSummary]) {
+    if adapters.is_empty() {
+        println!("No adapters registered.");
+        return;
+    }
+    // Size the ADAPTER/OUTPUT columns to their widest value (min = header width).
+    let name_w = adapters
+        .iter()
+        .map(|a| a.adapter.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let fmt_w = adapters
+        .iter()
+        .map(|a| a.output_format.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    println!("{:<name_w$}  {:<fmt_w$}  CAPABILITIES", "ADAPTER", "OUTPUT");
+    for a in adapters {
+        println!(
+            "{:<name_w$}  {:<fmt_w$}  {}",
+            a.adapter,
+            a.output_format,
+            a.capabilities.join(", ")
+        );
+    }
+    println!("\n{} adapter(s) registered.", adapters.len());
+}
+
+/// One factual counts line over a [`StatusTally`] — no composite score.
+fn tally_line(t: &crate::adapters::StatusTally) -> String {
+    format!(
+        "{} PASS · {} FAIL · {} WARN · {} UNKNOWN · {} NOT_TRACKED",
+        t.pass, t.fail, t.warn, t.unknown, t.not_tracked
+    )
+}
+
+fn print_adapter_diagnostic(diag: &crate::adapters::AdapterDiagnostic) {
+    // Factual headline: did any check FAIL? (WARN/UNKNOWN/NOT_TRACKED are not
+    // failures.) Deliberately not a "health" verdict or score.
+    let headline = if diag.counts.fail > 0 { "FAIL" } else { "OK" };
+    println!(
+        "Adapter '{}': {} (resolved={})",
+        diag.adapter, headline, diag.resolved
+    );
+    for c in &diag.checks {
+        println!("  [{}] {}: {}", c.status.label(), c.name, c.detail);
+    }
+    println!("  counts: {}", tally_line(&diag.counts));
+}
+
+fn print_adapter_doctor(report: &crate::adapters::AdapterDoctorReport) {
+    for diag in &report.adapters {
+        print_adapter_diagnostic(diag);
+        println!();
+    }
+    println!(
+        "{} adapters · {} without failures · {} with failures",
+        report.total, report.healthy, report.failed
+    );
+    println!("checks: {}", tally_line(&report.counts));
+    if report.failed > 0 {
+        println!("Next: ctl adapter status --adapter <name> to inspect a failing adapter");
+    }
 }
 
 fn print_task_state(

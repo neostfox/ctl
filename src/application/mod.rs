@@ -2770,6 +2770,31 @@ impl ControlApp {
         Ok(adapter.capabilities())
     }
 
+    /// adapter-doctor-v1: summarize every registered executor adapter.
+    pub fn adapter_list(&self) -> Vec<crate::adapters::AdapterSummary> {
+        crate::adapters::adapter_list()
+    }
+
+    /// adapter-doctor-v1: diagnose one adapter — the Rust `ExecutorAdapter`
+    /// contract clauses PLUS host platform integration (control-guard skill,
+    /// managed-protocol drift, plugin/hook files, Bun tests). `verify` opts into
+    /// live checks (the opencode Bun suite); without it they stay NOT_TRACKED. An
+    /// unknown name yields a single failing contract check (never an Err), so the
+    /// caller reports the failure uniformly.
+    pub fn adapter_status(
+        &self,
+        adapter_name: &str,
+        verify: bool,
+    ) -> crate::adapters::AdapterDiagnostic {
+        adapter_status_diagnostic(&self.project_root, adapter_name, verify)
+    }
+
+    /// adapter-doctor-v1: diagnose every registered adapter. Factual counts only
+    /// (no composite health score).
+    pub fn adapter_doctor(&self, verify: bool) -> crate::adapters::AdapterDoctorReport {
+        adapter_doctor_report(&self.project_root, verify)
+    }
+
     /// Abort an active run: revoke lease, cleanup worktree, emit run_failed.
     pub fn run_abort(&self, task_id: &str, reason: &str) -> Result<()> {
         let state = self.replay_task(task_id)?;
@@ -3755,6 +3780,180 @@ pub fn generate_uuid() -> String {
         (ts >> 8) as u32,
         (c & 0xFFFF) as u16,
     )
+}
+
+// ── adapter-doctor-v1: platform-integration diagnostics ─────────────────────
+//
+// The Rust `ExecutorAdapter` contract clauses are checked purely in
+// `crate::adapters`. Here we add the host-integration checks that need the
+// filesystem and the managed-protocol drift checker, then fold both into one
+// `AdapterDiagnostic`. We report FACTS — presence checks are PASS/FAIL/WARN/
+// UNKNOWN; live verification (the opencode Bun suite) is NOT_TRACKED unless
+// `--verify`, and UNKNOWN when the tool is unavailable — never a silent PASS.
+
+/// Diagnose a single adapter: contract clauses (pure) + platform integration.
+pub fn adapter_status_diagnostic(
+    project_root: &std::path::Path,
+    adapter_name: &str,
+    verify: bool,
+) -> crate::adapters::AdapterDiagnostic {
+    let resolved = adapter_for(adapter_name).is_ok();
+    let mut checks = crate::adapters::adapter_contract_checks(adapter_name);
+    checks.extend(adapter_platform_checks(project_root, adapter_name, verify));
+    crate::adapters::AdapterDiagnostic::new(adapter_name, resolved, checks)
+}
+
+/// Diagnose every registered adapter (registry order). Factual report only.
+pub fn adapter_doctor_report(
+    project_root: &std::path::Path,
+    verify: bool,
+) -> crate::adapters::AdapterDoctorReport {
+    let adapters = crate::adapters::supported_adapters()
+        .iter()
+        .map(|name| adapter_status_diagnostic(project_root, name, verify))
+        .collect();
+    crate::adapters::AdapterDoctorReport::new(adapters)
+}
+
+/// Presence check: PASS if `rel` exists under `root`, else the `missing` status.
+fn presence_check(
+    root: &std::path::Path,
+    name: &str,
+    rel: &str,
+    missing: crate::adapters::CheckStatus,
+) -> crate::adapters::AdapterCheck {
+    use crate::adapters::{AdapterCheck, CheckStatus};
+    if root.join(rel).exists() {
+        AdapterCheck::new(name, CheckStatus::Pass, format!("present: {rel}"))
+    } else {
+        AdapterCheck::new(name, missing, format!("missing: {rel}"))
+    }
+}
+
+/// Platform-integration checks for one adapter. An adapter with no registered
+/// platform wiring yields a single UNKNOWN check (it gets contract-only
+/// coverage, and we say so rather than implying a pass).
+fn adapter_platform_checks(
+    project_root: &std::path::Path,
+    adapter_name: &str,
+    verify: bool,
+) -> Vec<crate::adapters::AdapterCheck> {
+    use crate::adapters::{AdapterCheck, CheckStatus};
+    use crate::infrastructure::skills::{
+        evaluate_protocol_drift, platform_skill_for, DriftStatus, CANONICAL_PROTOCOL_PATH,
+    };
+
+    let ps = match platform_skill_for(adapter_name) {
+        Some(ps) => ps,
+        None => {
+            return vec![AdapterCheck::new(
+                "platform.integration",
+                CheckStatus::Unknown,
+                format!("no platform integration registered for adapter '{adapter_name}'"),
+            )];
+        }
+    };
+
+    let mut checks = Vec::new();
+
+    // 1. control-guard skill must exist for this adapter.
+    checks.push(presence_check(
+        project_root,
+        "platform.skill_present",
+        ps.skill_path,
+        CheckStatus::Fail,
+    ));
+
+    // 2. managed-protocol marker/version/core drift — REUSES the CI checker.
+    checks.push(match evaluate_protocol_drift(project_root, ps.skill_path) {
+        DriftStatus::InSync(v) => AdapterCheck::new(
+            "platform.protocol_in_sync",
+            CheckStatus::Pass,
+            format!("managed core v{v} matches {CANONICAL_PROTOCOL_PATH}"),
+        ),
+        DriftStatus::Drift(why) => {
+            AdapterCheck::new("platform.protocol_in_sync", CheckStatus::Fail, why)
+        }
+        DriftStatus::Missing => AdapterCheck::new(
+            "platform.protocol_in_sync",
+            CheckStatus::Unknown,
+            "skill absent; cannot evaluate drift",
+        ),
+    });
+
+    // 3 + 4. adapter-specific host wiring.
+    match adapter_name {
+        "omp" => {
+            // OMP hook/config presence is checked WHEN DETECTABLE: absence is a
+            // WARN/UNKNOWN, not a hard FAIL (a checkout may legitimately not wire
+            // OMP), and live hook behavior is never asserted here.
+            checks.push(presence_check(
+                project_root,
+                "platform.omp_hook_present",
+                ps.entry_point,
+                CheckStatus::Warn,
+            ));
+            checks.push(presence_check(
+                project_root,
+                "platform.omp_config_present",
+                ".omp/settings.json",
+                CheckStatus::Unknown,
+            ));
+        }
+        "opencode" => {
+            // The plugin file is the hard requirement for the opencode gate.
+            checks.push(presence_check(
+                project_root,
+                "platform.opencode_plugin_present",
+                ps.entry_point,
+                CheckStatus::Fail,
+            ));
+            // Bun plugin tests: NOT_TRACKED by default; run only under --verify.
+            checks.push(opencode_bun_tests_check(project_root, verify));
+        }
+        _ => {}
+    }
+
+    checks
+}
+
+/// The opencode plugin's Bun test suite. NOT_TRACKED unless `verify`; under
+/// `--verify` it is actually run (UNKNOWN if the test file is absent or Bun is
+/// unavailable — never a silent PASS).
+fn opencode_bun_tests_check(
+    project_root: &std::path::Path,
+    verify: bool,
+) -> crate::adapters::AdapterCheck {
+    use crate::adapters::{AdapterCheck, CheckStatus};
+    const TEST_FILE: &str = ".opencode/plugins/ctl-gate.test.ts";
+    let name = "platform.opencode_bun_tests";
+    if !project_root.join(TEST_FILE).exists() {
+        return AdapterCheck::new(name, CheckStatus::Unknown, format!("missing: {TEST_FILE}"));
+    }
+    if !verify {
+        return AdapterCheck::new(
+            name,
+            CheckStatus::NotTracked,
+            "Bun plugin tests not run by default; pass --verify to execute",
+        );
+    }
+    match run_bun_opencode_tests(project_root) {
+        Ok(true) => AdapterCheck::new(name, CheckStatus::Pass, "bun test passed"),
+        Ok(false) => AdapterCheck::new(name, CheckStatus::Fail, "bun test reported failures"),
+        Err(e) => AdapterCheck::new(name, CheckStatus::Unknown, format!("bun unavailable: {e}")),
+    }
+}
+
+/// Run `bun test` in `.opencode` — a FIXED command (not arbitrary shell). Returns
+/// whether the suite passed; errors only if Bun cannot be launched.
+fn run_bun_opencode_tests(project_root: &std::path::Path) -> Result<bool> {
+    let dir = project_root.join(".opencode");
+    let output = std::process::Command::new("bun")
+        .arg("test")
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| anyhow!("failed to launch bun: {e}"))?;
+    Ok(output.status.success())
 }
 
 // ── ISO 8601 timestamp (no external crate) ──
@@ -6361,5 +6560,112 @@ mod tests {
         app.start_task("t").unwrap();
         let run_id = app.create_run("t", "omp").unwrap();
         assert_eq!(app.replay_run(&run_id).unwrap().last_seq, 1);
+    }
+}
+
+#[cfg(test)]
+mod adapter_doctor_tests {
+    //! adapter-doctor-v1 platform-integration assembly, exercised against the
+    //! real repo root (the dogfooding checkout ships every platform file).
+    use super::{adapter_doctor_report, adapter_status_diagnostic};
+    use crate::adapters::{supported_adapters, CheckStatus};
+    use std::path::PathBuf;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn status_of<'a>(
+        diag: &'a crate::adapters::AdapterDiagnostic,
+        check: &str,
+    ) -> &'a crate::adapters::AdapterCheck {
+        diag.checks
+            .iter()
+            .find(|c| c.name == check)
+            .unwrap_or_else(|| panic!("missing check '{check}'"))
+    }
+
+    #[test]
+    fn doctor_over_repo_root_has_no_failures_and_is_factual() {
+        let report = adapter_doctor_report(&repo_root(), false);
+        assert_eq!(report.total, supported_adapters().len());
+        assert_eq!(
+            report.healthy, report.total,
+            "no adapter should FAIL in-repo"
+        );
+        assert_eq!(report.failed, 0);
+        // Bun plugin tests must NOT be run by default → at least one NOT_TRACKED.
+        assert!(
+            report.counts.not_tracked >= 1,
+            "opencode Bun tests must be NOT_TRACKED without --verify"
+        );
+        // Sanity: the aggregate tally equals the sum of per-adapter pass counts.
+        let pass_sum: usize = report.adapters.iter().map(|d| d.counts.pass).sum();
+        assert_eq!(report.counts.pass, pass_sum);
+    }
+
+    #[test]
+    fn status_layers_contract_and_platform_checks() {
+        let diag = adapter_status_diagnostic(&repo_root(), "opencode", false);
+        assert!(diag.resolved);
+        let names: Vec<&str> = diag.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("contract.")),
+            "must include the pure contract clauses"
+        );
+        for expected in [
+            "platform.skill_present",
+            "platform.protocol_in_sync",
+            "platform.opencode_plugin_present",
+            "platform.opencode_bun_tests",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+        // Skills are in sync in-repo → drift check PASSes (REUSE of CI checker).
+        assert_eq!(
+            status_of(&diag, "platform.protocol_in_sync").status,
+            CheckStatus::Pass
+        );
+        // Bun tests NOT_TRACKED by default.
+        assert_eq!(
+            status_of(&diag, "platform.opencode_bun_tests").status,
+            CheckStatus::NotTracked
+        );
+    }
+
+    #[test]
+    fn omp_hook_and_config_present_in_repo_pass() {
+        let diag = adapter_status_diagnostic(&repo_root(), "omp", false);
+        for n in ["platform.omp_hook_present", "platform.omp_config_present"] {
+            assert_eq!(
+                status_of(&diag, n).status,
+                CheckStatus::Pass,
+                "{n} ships in-repo"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_adapter_fails_contract_and_reports_unknown_platform() {
+        let diag = adapter_status_diagnostic(&repo_root(), "bogus", false);
+        assert!(!diag.resolved);
+        assert!(diag.has_failures(), "contract.resolves must FAIL");
+        // The platform layer says UNKNOWN (no wiring), never a fabricated PASS.
+        assert_eq!(
+            status_of(&diag, "platform.integration").status,
+            CheckStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn verify_attempts_bun_so_it_is_not_not_tracked() {
+        // Under --verify the Bun check is actually attempted: PASS, FAIL, or
+        // UNKNOWN (bun unavailable) — but never NOT_TRACKED.
+        let diag = adapter_status_diagnostic(&repo_root(), "opencode", true);
+        assert_ne!(
+            status_of(&diag, "platform.opencode_bun_tests").status,
+            CheckStatus::NotTracked,
+            "--verify must attempt the Bun suite"
+        );
     }
 }

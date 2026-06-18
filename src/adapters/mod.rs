@@ -75,6 +75,314 @@ pub trait ExecutorAdapter {
     fn validate_output(&self, output: &Value) -> Result<()>;
 }
 
+// ── Adapter diagnostics (adapter-doctor-v1) ──────────────────────────────────
+//
+// `ctl adapter list / status / doctor` answer "is this adapter wired up?" along
+// two axes:
+//   * the *contract* — does the Rust `ExecutorAdapter` impl satisfy the same
+//     clauses the `conformance` suite asserts in CI? These checks are PURE and
+//     live here next to the trait (no fs/process).
+//   * *platform integration* — does the host wiring exist (control-guard skill,
+//     managed-protocol sync, plugin/hook files, Bun tests)? Those need the
+//     filesystem and the protocol checker, so they are assembled in the
+//     application layer (see `application::adapter_doctor_report`), which folds
+//     them into the same [`AdapterDiagnostic`].
+//
+// We report FACTS, never a composite "support score": each check carries a
+// [`CheckStatus`], and reports expose per-status counts. Anything we do not
+// actually run (live Bun tests off the `--verify` path) or cannot determine is
+// `NOT_TRACKED` / `UNKNOWN` — never silently `PASS`.
+
+/// Outcome of a single diagnostic check. Distinct from a bare bool so the JSON
+/// stays honest: `Unknown`/`NotTracked` are first-class, not coerced to pass/fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CheckStatus {
+    /// The check ran and the property holds.
+    Pass,
+    /// The check ran and the property is violated — a real defect.
+    Fail,
+    /// The check ran; the result is non-fatal but worth surfacing.
+    Warn,
+    /// The check could not be evaluated (e.g. a prerequisite file is absent, or
+    /// a live tool is unavailable). Not a pass and not a defect.
+    Unknown,
+    /// The check is intentionally not run in this mode (e.g. live Bun tests are
+    /// only executed under `--verify`). Never reported as `Pass`.
+    NotTracked,
+}
+
+impl CheckStatus {
+    /// Short fixed-width label for human output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CheckStatus::Pass => "PASS",
+            CheckStatus::Fail => "FAIL",
+            CheckStatus::Warn => "WARN",
+            CheckStatus::Unknown => "UNKNOWN",
+            CheckStatus::NotTracked => "NOT_TRACKED",
+        }
+    }
+}
+
+/// Result of one diagnostic check.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdapterCheck {
+    /// Stable, namespaced identifier (e.g. `"contract.validate_output_accepts"`,
+    /// `"platform.skill_present"`).
+    pub name: String,
+    /// The check outcome.
+    pub status: CheckStatus,
+    /// Human-readable evidence for the result.
+    pub detail: String,
+}
+
+impl AdapterCheck {
+    pub fn new(name: impl Into<String>, status: CheckStatus, detail: impl Into<String>) -> Self {
+        AdapterCheck {
+            name: name.into(),
+            status,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Per-status counts over a set of checks. Purely factual — no weighting, no
+/// score.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StatusTally {
+    pub pass: usize,
+    pub fail: usize,
+    pub warn: usize,
+    pub unknown: usize,
+    pub not_tracked: usize,
+}
+
+impl StatusTally {
+    fn record(&mut self, status: CheckStatus) {
+        match status {
+            CheckStatus::Pass => self.pass += 1,
+            CheckStatus::Fail => self.fail += 1,
+            CheckStatus::Warn => self.warn += 1,
+            CheckStatus::Unknown => self.unknown += 1,
+            CheckStatus::NotTracked => self.not_tracked += 1,
+        }
+    }
+
+    /// Fold another tally in (for report-level aggregation).
+    pub fn merge(&mut self, other: &StatusTally) {
+        self.pass += other.pass;
+        self.fail += other.fail;
+        self.warn += other.warn;
+        self.unknown += other.unknown;
+        self.not_tracked += other.not_tracked;
+    }
+}
+
+/// Diagnostic for one adapter: did it resolve, and what did each check find?
+/// There is deliberately no `healthy` bool here — failure is the factual
+/// `counts.fail > 0` ([`AdapterDiagnostic::has_failures`]); WARN/UNKNOWN/
+/// NOT_TRACKED never count as failures.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdapterDiagnostic {
+    /// Registry name the diagnostic was requested for.
+    pub adapter: String,
+    /// Whether [`adapter_for`] returned an implementation.
+    pub resolved: bool,
+    /// All checks (contract first, then platform), in execution order.
+    pub checks: Vec<AdapterCheck>,
+    /// Per-status counts over `checks`.
+    pub counts: StatusTally,
+}
+
+impl AdapterDiagnostic {
+    /// Build a diagnostic, computing the tally from `checks`.
+    pub fn new(adapter: impl Into<String>, resolved: bool, checks: Vec<AdapterCheck>) -> Self {
+        let mut counts = StatusTally::default();
+        for c in &checks {
+            counts.record(c.status);
+        }
+        AdapterDiagnostic {
+            adapter: adapter.into(),
+            resolved,
+            checks,
+            counts,
+        }
+    }
+
+    /// A diagnostic "fails" iff at least one check is `FAIL`. WARN/UNKNOWN/
+    /// NOT_TRACKED are reported but never make an adapter fail.
+    pub fn has_failures(&self) -> bool {
+        self.counts.fail > 0
+    }
+}
+
+/// One-line summary of a registered adapter, for `ctl adapter list`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdapterSummary {
+    /// Registry name.
+    pub adapter: String,
+    /// Declared `output_format` capability (e.g. `"agent-output.json"`).
+    pub output_format: String,
+    /// Declared `workspace` capability (e.g. `"disposable_worktree"`).
+    pub workspace: String,
+    /// Declared capability tokens.
+    pub capabilities: Vec<String>,
+}
+
+/// Aggregate report across every registered adapter, for `ctl adapter doctor`.
+/// Factual counts only — `healthy` / `total` and per-status `counts`. No score.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdapterDoctorReport {
+    /// Per-adapter diagnostics, in registry order.
+    pub adapters: Vec<AdapterDiagnostic>,
+    /// Number of adapters diagnosed.
+    pub total: usize,
+    /// Adapters with zero `FAIL` checks.
+    pub healthy: usize,
+    /// Adapters with at least one `FAIL` check.
+    pub failed: usize,
+    /// Per-status counts summed across every adapter's checks.
+    pub counts: StatusTally,
+}
+
+impl AdapterDoctorReport {
+    /// Build a report, computing `total` / `healthy` / `failed` / `counts` from
+    /// the per-adapter diagnostics.
+    pub fn new(adapters: Vec<AdapterDiagnostic>) -> Self {
+        let total = adapters.len();
+        let failed = adapters.iter().filter(|d| d.has_failures()).count();
+        let mut counts = StatusTally::default();
+        for d in &adapters {
+            counts.merge(&d.counts);
+        }
+        AdapterDoctorReport {
+            adapters,
+            total,
+            healthy: total - failed,
+            failed,
+            counts,
+        }
+    }
+}
+
+/// Map a boolean contract assertion to a PASS/FAIL check.
+fn contract_check(name: &str, ok: bool, detail: impl Into<String>) -> AdapterCheck {
+    AdapterCheck::new(
+        name,
+        if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail,
+    )
+}
+
+/// Summarize a single registered adapter. Errors only if `name` is unknown.
+pub fn adapter_summary(name: &str) -> Result<AdapterSummary> {
+    let adapter = adapter_for(name)?;
+    let caps = adapter.capabilities();
+    let capabilities = caps["capabilities"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(AdapterSummary {
+        adapter: name.to_string(),
+        output_format: caps["output_format"].as_str().unwrap_or("").to_string(),
+        workspace: caps["workspace"].as_str().unwrap_or("").to_string(),
+        capabilities,
+    })
+}
+
+/// Summarize every registered adapter (registry order). Skips any that fail to
+/// resolve — by construction the registry and resolver agree, so this is total.
+pub fn adapter_list() -> Vec<AdapterSummary> {
+    supported_adapters()
+        .iter()
+        .filter_map(|name| adapter_summary(name).ok())
+        .collect()
+}
+
+/// Run the Rust `ExecutorAdapter` *contract* at runtime and report per-clause
+/// results — the live-binary twin of the `conformance` suite. PURE: no fs, no
+/// process, no ledgers. An unknown name yields a single failing
+/// `contract.resolves` check (everything downstream needs the resolved adapter).
+/// Platform-integration checks are added separately by the application layer.
+pub fn adapter_contract_checks(name: &str) -> Vec<AdapterCheck> {
+    let adapter = match adapter_for(name) {
+        Ok(a) => a,
+        Err(e) => return vec![contract_check("contract.resolves", false, e.to_string())],
+    };
+
+    let mut checks = vec![contract_check(
+        "contract.resolves",
+        true,
+        "adapter_for() returned an implementation",
+    )];
+
+    let reported = adapter.adapter_name();
+    checks.push(contract_check(
+        "contract.name_matches",
+        reported == name,
+        format!("adapter_name()=\"{reported}\" vs registry \"{name}\""),
+    ));
+
+    let caps = adapter.capabilities();
+    checks.push(contract_check(
+        "contract.capabilities_adapter",
+        caps["adapter"] == serde_json::json!(name),
+        format!("capabilities.adapter = {}", caps["adapter"]),
+    ));
+    checks.push(contract_check(
+        "contract.capabilities_output_format",
+        caps["output_format"].is_string(),
+        format!("output_format = {}", caps["output_format"]),
+    ));
+    checks.push(contract_check(
+        "contract.capabilities_list",
+        caps["capabilities"].is_array(),
+        "capabilities.capabilities is an array",
+    ));
+
+    match adapter.prepare_run(
+        "task-doctor",
+        "run-doctor",
+        "lease-doctor",
+        Path::new("/tmp/ctl-adapter-doctor"),
+        &["src".to_string()],
+        &[],
+        &["cargo_check".to_string()],
+    ) {
+        Ok(m) => checks.push(contract_check(
+            "contract.prepare_run",
+            m.adapter == name && !m.schema.is_empty(),
+            format!("manifest.adapter={}, schema={}", m.adapter, m.schema),
+        )),
+        Err(e) => checks.push(contract_check("contract.prepare_run", false, e.to_string())),
+    }
+
+    let good = serde_json::json!({ "source": name, "touched_files": [] });
+    checks.push(contract_check(
+        "contract.validate_output_accepts",
+        adapter.validate_output(&good).is_ok(),
+        "matching source + touched_files accepted",
+    ));
+    // A sentinel source no adapter claims — distinct from every registry name.
+    let foreign = serde_json::json!({ "source": "__not_an_adapter__", "touched_files": [] });
+    checks.push(contract_check(
+        "contract.validate_output_rejects_foreign",
+        adapter.validate_output(&foreign).is_err(),
+        "foreign source rejected",
+    ));
+
+    checks
+}
+
 #[cfg(test)]
 mod conformance {
     //! The shared adapter conformance suite. Every supported adapter is run
@@ -209,6 +517,146 @@ mod conformance {
             supported_adapters(),
             &["omp", "opencode"],
             "supported-adapter registry changed — update the conformance suite + CLI docs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagnostics {
+    //! Tests for the adapter-doctor-v1 *contract* checks and the factual
+    //! reporting types. Platform-integration assembly (fs + protocol drift +
+    //! Bun) is tested in the application and infrastructure layers where the
+    //! filesystem is available.
+    use super::*;
+
+    #[test]
+    fn list_summarizes_every_registered_adapter() {
+        let summaries = adapter_list();
+        assert_eq!(
+            summaries.len(),
+            supported_adapters().len(),
+            "list must cover the whole registry"
+        );
+        for (summary, name) in summaries.iter().zip(supported_adapters()) {
+            assert_eq!(&summary.adapter, name, "list preserves registry order");
+            assert!(
+                !summary.output_format.is_empty(),
+                "{name}: summary must carry the declared output_format"
+            );
+            assert!(
+                !summary.capabilities.is_empty(),
+                "{name}: summary must carry the declared capabilities"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_rejects_unknown_adapter() {
+        assert!(
+            adapter_summary("definitely-not-an-adapter").is_err(),
+            "an unknown adapter has no summary"
+        );
+    }
+
+    #[test]
+    fn contract_checks_pass_for_every_supported_adapter() {
+        for name in supported_adapters() {
+            let checks = adapter_contract_checks(name);
+            // The contract pass must exercise the full clause set, not a subset.
+            for clause in [
+                "contract.resolves",
+                "contract.name_matches",
+                "contract.capabilities_adapter",
+                "contract.capabilities_output_format",
+                "contract.capabilities_list",
+                "contract.prepare_run",
+                "contract.validate_output_accepts",
+                "contract.validate_output_rejects_foreign",
+            ] {
+                let c = checks
+                    .iter()
+                    .find(|c| c.name == clause)
+                    .unwrap_or_else(|| panic!("{name}: missing contract clause '{clause}'"));
+                assert_eq!(
+                    c.status,
+                    CheckStatus::Pass,
+                    "{name}: contract clause '{clause}' must pass — {}",
+                    c.detail
+                );
+            }
+            // A supported adapter has zero contract failures.
+            assert!(
+                checks.iter().all(|c| c.status != CheckStatus::Fail),
+                "{name}: a supported adapter must have no failing contract checks"
+            );
+        }
+    }
+
+    #[test]
+    fn contract_checks_for_unknown_adapter_is_a_single_failure() {
+        let checks = adapter_contract_checks("definitely-not-an-adapter");
+        assert_eq!(checks.len(), 1, "only the resolves check is reported");
+        assert_eq!(checks[0].name, "contract.resolves");
+        assert_eq!(checks[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn diagnostic_counts_and_failure_are_factual() {
+        let checks = vec![
+            AdapterCheck::new("a", CheckStatus::Pass, ""),
+            AdapterCheck::new("b", CheckStatus::Warn, ""),
+            AdapterCheck::new("c", CheckStatus::Unknown, ""),
+            AdapterCheck::new("d", CheckStatus::NotTracked, ""),
+        ];
+        let diag = AdapterDiagnostic::new("x", true, checks);
+        assert_eq!(diag.counts.pass, 1);
+        assert_eq!(diag.counts.warn, 1);
+        assert_eq!(diag.counts.unknown, 1);
+        assert_eq!(diag.counts.not_tracked, 1);
+        assert_eq!(diag.counts.fail, 0);
+        // WARN/UNKNOWN/NOT_TRACKED never make an adapter "fail".
+        assert!(!diag.has_failures(), "no FAIL → not a failure");
+
+        let failing = AdapterDiagnostic::new(
+            "y",
+            true,
+            vec![AdapterCheck::new("e", CheckStatus::Fail, "")],
+        );
+        assert!(failing.has_failures());
+    }
+
+    #[test]
+    fn report_aggregates_factual_counts_without_a_score() {
+        let healthy = AdapterDiagnostic::new(
+            "ok",
+            true,
+            vec![AdapterCheck::new("a", CheckStatus::Pass, "")],
+        );
+        let broken = AdapterDiagnostic::new(
+            "bad",
+            true,
+            vec![
+                AdapterCheck::new("a", CheckStatus::Pass, ""),
+                AdapterCheck::new("b", CheckStatus::Fail, ""),
+            ],
+        );
+        let report = AdapterDoctorReport::new(vec![healthy, broken]);
+        assert_eq!(report.total, 2);
+        assert_eq!(report.healthy, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.counts.pass, 2);
+        assert_eq!(report.counts.fail, 1);
+    }
+
+    #[test]
+    fn check_status_serializes_screaming_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::NotTracked).unwrap(),
+            "\"NOT_TRACKED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Pass).unwrap(),
+            "\"PASS\""
         );
     }
 }
