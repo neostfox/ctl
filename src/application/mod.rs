@@ -66,8 +66,8 @@ pub struct ReviseTaskInput<'a> {
 
 /// V1 run-scoped capability-lease defaults, shared so the M4 task-embedded run
 /// path and the M6 run-aggregate path grant identical leases. `max_uses` must be
-/// >= 2 so the single use consumed at start does not immediately expire (and thus
-/// make non-active) a freshly Running run.
+/// at least 2 so the single use consumed at start does not immediately expire
+/// (and thus make non-active) a freshly Running run.
 pub const RUN_LEASE_TTL_SECONDS: u64 = 3600;
 pub const RUN_LEASE_MAX_USES: u64 = 100;
 
