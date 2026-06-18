@@ -529,6 +529,11 @@ enum TaskCommands {
         /// Review/hold triggers; repeat for multiple entries
         #[arg(long = "risk-triggers")]
         risk_triggers: Vec<String>,
+        /// Enforce the TDD red→green interlock: finish is blocked unless the
+        /// cargo_test gate history shows a FAIL before a PASS. Adds the
+        /// `tdd-red-green` risk trigger; requires a cargo_test gate.
+        #[arg(long)]
+        tdd: bool,
         /// Required gate template IDs; repeat for multiple entries
         #[arg(long = "gates", required = true)]
         gates: Vec<String>,
@@ -1153,10 +1158,20 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             write_allow,
             write_deny,
             risk_triggers,
+            tdd,
             gates,
             depends_on,
             kind,
         } => {
+            // `--tdd` is sugar for adding the opt-in risk trigger.
+            let mut triggers = risk_triggers.clone();
+            if *tdd
+                && !triggers
+                    .iter()
+                    .any(|t| t == crate::application::TDD_RED_GREEN_TRIGGER)
+            {
+                triggers.push(crate::application::TDD_RED_GREEN_TRIGGER.to_string());
+            }
             let event = app.create_task_with_kind(
                 id,
                 CreateTaskInput {
@@ -1164,7 +1179,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     read_scope,
                     write_allow,
                     write_deny,
-                    risk_triggers,
+                    risk_triggers: &triggers,
                     gates,
                     depends_on,
                 },

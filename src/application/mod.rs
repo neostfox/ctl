@@ -71,6 +71,41 @@ pub struct ReviseTaskInput<'a> {
 pub const RUN_LEASE_TTL_SECONDS: u64 = 3600;
 pub const RUN_LEASE_MAX_USES: u64 = 100;
 
+/// Risk-trigger sentinel that opts a task into the TDD red→green completion
+/// interlock (ctl-tdd-loop-v1). Carried in `risk_triggers` (an existing
+/// free-form, schema-declared field), so enabling it needs no schema or
+/// aggregate change; set conveniently via `ctl task create --tdd`.
+pub const TDD_RED_GREEN_TRIGGER: &str = "tdd-red-green";
+
+/// The gate whose `gate_checked` history must show red→green for a TDD-enforced
+/// task. The canonical test gate.
+const TDD_TEST_GATE: &str = "cargo_test";
+
+/// True if `gate_id`'s `gate_checked` history contains a FAILING result at an
+/// earlier seq than a PASSING one — i.e. the test demonstrably went red→green.
+/// Read-only over the task's event stream.
+fn gate_went_red_before_green(events: &[Event], gate_id: &str) -> bool {
+    let mut first_fail_seq: Option<i64> = None;
+    for e in events {
+        if e.event_type != "gate_checked"
+            || e.payload.get("gate_id").and_then(|v| v.as_str()) != Some(gate_id)
+        {
+            continue;
+        }
+        let passed = e
+            .payload
+            .get("passed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !passed {
+            first_fail_seq.get_or_insert(e.seq);
+        } else if first_fail_seq.is_some_and(|fseq| e.seq > fseq) {
+            return true; // a pass after a prior fail
+        }
+    }
+    false
+}
+
 /// M6 crash-recovery snapshot of one `Running` run (see [`ControlApp::recover_report`]).
 /// `worktree_exists == false` marks an inconsistent run whose isolation
 /// workspace is gone — a recovery-abort candidate.
@@ -535,6 +570,29 @@ impl ControlApp {
                 "Completion interlock: rejected evidence unresolved for: {:?}",
                 rejected_files
             ));
+        }
+
+        // TDD red→green interlock (ctl-tdd-loop-v1), opt-in via the
+        // `tdd-red-green` risk trigger. A test that only ever passed proves
+        // nothing; require the test gate to have FAILED (red) at an earlier
+        // point than it PASSED (green) in this task's own gate history —
+        // evidence the test can actually fail. Derived from the existing
+        // `gate_checked` event stream, so no new event type or schema.
+        if state.risk_triggers.contains(TDD_RED_GREEN_TRIGGER) {
+            if !state.gates.contains(TDD_TEST_GATE) {
+                return Err(anyhow!(
+                    "Completion interlock (tdd-red-green): task opted into TDD but has no \
+                     '{TDD_TEST_GATE}' gate to prove red→green. Add it to the task's gates."
+                ));
+            }
+            if !gate_went_red_before_green(&events, TDD_TEST_GATE) {
+                return Err(anyhow!(
+                    "Completion interlock (tdd-red-green): no red→green evidence for \
+                     '{TDD_TEST_GATE}'. TDD requires the test to FAIL before it PASSES — run \
+                     the gate while the test is red (before implementing), then again once \
+                     green. Found no failing '{TDD_TEST_GATE}' result preceding a passing one."
+                ));
+            }
         }
 
         // Commit interlock (M-g): a task cannot complete with uncommitted work
@@ -4602,6 +4660,133 @@ mod tests {
         // M-f: a fresh passing completion audit is now a finish prerequisite;
         // M6: it must come from a non-implementer reviewer.
         audit_pass(app, id, None);
+    }
+
+    // ── TDD red→green interlock (ctl-tdd-loop-v1) ──
+
+    /// Drive a TDD-opted task (cargo_test gate + `tdd-red-green` trigger) to a
+    /// finishable Review state, optionally recording a RED cargo_test before the
+    /// green one. Non-git temp dir → tree/commit interlocks are skipped, isolating
+    /// the TDD check.
+    fn drive_tdd_to_review(app: &ControlApp, id: &str, record_red: bool) {
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_test".to_string()];
+        let triggers = vec![TDD_RED_GREEN_TRIGGER.to_string()];
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: "tdd",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &triggers,
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+        app.start_task(id).unwrap();
+        if record_red {
+            app.record_gate(id, "cargo_test", false, "red: test fails, impl absent")
+                .unwrap();
+        }
+        app.submit_task(id).unwrap();
+        app.record_gate(id, "cargo_test", true, "green: impl done")
+            .unwrap();
+        audit_pass(app, id, None);
+    }
+
+    #[test]
+    fn tdd_interlock_blocks_when_test_only_passed() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_tdd_to_review(&app, "tdd-nored", false); // green only, never red
+        let err = app.finish_task("tdd-nored").unwrap_err().to_string();
+        assert!(err.contains("tdd-red-green"), "got: {err}");
+        assert!(err.contains("red→green"), "got: {err}");
+    }
+
+    #[test]
+    fn tdd_interlock_allows_with_red_before_green() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_tdd_to_review(&app, "tdd-ok", true); // red, then green
+        let ev = app.finish_task("tdd-ok").unwrap();
+        assert_eq!(ev.event_type, "task_completed");
+    }
+
+    #[test]
+    fn tdd_interlock_inactive_without_trigger() {
+        // A normal task (no trigger) finishes with only a green gate.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        drive_to_review(&app, "normal");
+        let ev = app.finish_task("normal").unwrap();
+        assert_eq!(ev.event_type, "task_completed");
+    }
+
+    #[test]
+    fn tdd_interlock_requires_a_test_gate() {
+        // Opted into TDD but no cargo_test gate → clear misconfiguration block.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let scope = vec!["src".to_string()];
+        let gates = vec!["cargo_check".to_string()]; // no cargo_test
+        let triggers = vec![TDD_RED_GREEN_TRIGGER.to_string()];
+        app.create_task(
+            "tdd-misconf",
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &triggers,
+                gates: &gates,
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready("tdd-misconf").unwrap();
+        app.start_task("tdd-misconf").unwrap();
+        app.submit_task("tdd-misconf").unwrap();
+        app.record_gate("tdd-misconf", "cargo_check", true, "ok")
+            .unwrap();
+        audit_pass(&app, "tdd-misconf", None);
+        let err = app.finish_task("tdd-misconf").unwrap_err().to_string();
+        assert!(err.contains("no 'cargo_test' gate"), "got: {err}");
+    }
+
+    #[test]
+    fn gate_red_before_green_helper() {
+        let mk = |seq: i64, passed: bool| Event {
+            schema: "control.event-envelope.v1".to_string(),
+            event_id: format!("e{seq}"),
+            command_id: format!("c{seq}"),
+            task_id: "t".to_string(),
+            seq,
+            occurred_at: "2026-01-01T00:00:00Z".to_string(),
+            actor: "t".to_string(),
+            event_type: "gate_checked".to_string(),
+            payload: serde_json::json!({"gate_id": "cargo_test", "passed": passed}),
+        };
+        // pass-only → false
+        assert!(!gate_went_red_before_green(&[mk(1, true)], "cargo_test"));
+        // fail then pass → true
+        assert!(gate_went_red_before_green(
+            &[mk(1, false), mk(2, true)],
+            "cargo_test"
+        ));
+        // pass then fail (no later pass) → false
+        assert!(!gate_went_red_before_green(
+            &[mk(1, true), mk(2, false)],
+            "cargo_test"
+        ));
+        // different gate id → false
+        assert!(!gate_went_red_before_green(
+            &[mk(1, false), mk(2, true)],
+            "cargo_check"
+        ));
     }
 
     #[test]
