@@ -5625,7 +5625,10 @@ mod tests {
         ] {
             assert!(t.contains(needle), "template must contain {needle:?}");
         }
-        assert!(!t.contains("{title}"), "no unsubstituted placeholder remains");
+        assert!(
+            !t.contains("{title}"),
+            "no unsubstituted placeholder remains"
+        );
     }
 
     #[test]
