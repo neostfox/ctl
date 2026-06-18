@@ -1194,6 +1194,8 @@ struct AdapterDoctorReport{ adapters, total, healthy, failed: usize, counts: Sta
 
 `AdapterDiagnostic` 没有 `healthy` 布尔——失败是事实 `counts.fail > 0`（`has_failures()`）。`AdapterDoctorReport` 里 `healthy` 是“无 FAIL 的 adapter 数”，是计数而非评分。
 
+`healthy` 的语义严格是「**没有失败检查**」（no failing checks），**不等于「安全可用」**。`WARN` / `UNKNOWN` / `NOT_TRACKED`（平台 wiring 缺失、Bun 测试未运行、协议状态无法判定等）仍可能代表现实风险，只是不构成命令失败。请把 `healthy` 读作「无 FAIL」，而非「已验证可用」。
+
 **两类 check：**
 
 - `contract.*` —— 纯函数，住在 `crate::adapters::adapter_contract_checks`（无 fs / process）。是 conformance 套件的线上孪生，条款一一对应：`resolves`、`name_matches`、`capabilities_adapter`、`capabilities_output_format`、`capabilities_list`、`prepare_run`、`validate_output_accepts`、`validate_output_rejects_foreign`。未知名字只返回一条失败的 `contract.resolves`。

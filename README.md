@@ -235,6 +235,8 @@ ctl research record|status            研究 / spike 任务：以证据 + 未知
 
 刻意**不给综合“健康分”**：输出只报事实——每条 check 的状态，以及 `PASS/FAIL/WARN/UNKNOWN/NOT_TRACKED` 计数与 `healthy/total`。判失败的唯一依据是“存在 FAIL”；WARN/UNKNOWN 不算失败，存在 FAIL 时命令非零退出。未实际执行或无法判定的检查保持 `NOT_TRACKED` / `UNKNOWN`，绝不冒充 `PASS`：opencode 的 Bun 插件测试默认 `NOT_TRACKED`，仅在 `--verify` 下真正运行（Bun 不可用则 `UNKNOWN`）。诊断只读文件与注册表，从不触碰任务 / run 账本。
 
+注意：`healthy`（= 无 FAIL 的 adapter 数）只表示「**没有失败检查**」，**不等于「安全可用」**——`WARN` / `UNKNOWN` / `NOT_TRACKED` 仍可能暗含现实风险，只是不触发非零退出。
+
 **会不会限制太死？**
 默认只读、最小权限是刻意设计。需要越界时走 `ctl apply` 申请受审批的路径例外，而不是直接放开。
 
