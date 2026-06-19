@@ -378,18 +378,17 @@ analysis above and records it. Determine it once here, from the real project.
 
 ### Selection principle (not a fixed list)
 
-Choose gates by what they catch, not by a per-language template:
+The floor mirrors **what the project already enforces** — the checks its CI runs
+and its tool configs require. Choose by what each gate catches, not by a
+per-language template:
 
 - **Always include correctness gates** — compilation/build and tests. A task
   that builds and passes tests is the minimum honest "done".
-- **Include real-problem lint gates** — linters that flag actual defects
-  (e.g. clippy), *when the project already uses them* (the CI runs them, or a
-  lint config is present).
-- **Exclude auto-fixable pure-formatting gates** from the floor — formatting
-  (e.g. `cargo fmt --check`) is mechanically fixable and should not *block* task
-  completion. A project may still run it in CI; it just isn't part of the
-  task-completion floor. Add it to an individual task's `--gates` only when a
-  task specifically needs it.
+- **Include lint gates** — linters that flag defects (e.g. clippy), *when the
+  project already uses them* (the CI runs them, or a lint config is present).
+- **Include formatting gates** — formatting checks (e.g. `cargo fmt --check`)
+  *when the project enforces formatting*: its CI runs the check, or it ships a
+  fmt config. If the project does not enforce formatting anywhere, leave it out.
 
 Use only gate IDs that exist as ctl gate templates. Today those are Rust-only:
 
@@ -397,12 +396,13 @@ Use only gate IDs that exist as ctl gate templates. Today those are Rust-only:
 |---|---|---|
 | `cargo_check` | compilation | yes (correctness) |
 | `cargo_test` | test failures | yes (correctness) |
-| `cargo_clippy` | real lint defects | yes, **if** the project lints with clippy |
-| `cargo_fmt_check` | formatting drift | no — auto-fixable, not a blocking floor |
+| `cargo_clippy` | lint defects | yes, **if** the project lints with clippy |
+| `cargo_fmt_check` | formatting drift | yes, **if** the project enforces formatting |
 
-For a Rust project whose CI runs clippy (or that ships a clippy config), the
-floor is therefore `cargo_check`, `cargo_test`, `cargo_clippy` — check + test +
-one real lint gate.
+For a Rust project whose CI runs `cargo fmt --check`, `cargo check`,
+`cargo clippy`, and `cargo test`, the floor is therefore all four:
+`cargo_check`, `cargo_test`, `cargo_clippy`, `cargo_fmt_check` — it mirrors the
+gates CI already enforces.
 
 **No applicable templates → leave it empty.** Detection by marker file does not
 reliably classify every project (a `package.json` may be Node, a tool, or a
@@ -420,7 +420,7 @@ Write a `[project]` section (this path is inside the skill's operating boundary 
 ```toml
 [project]
 type = "rust"
-default_gates = ["cargo_check", "cargo_test", "cargo_clippy"]
+default_gates = ["cargo_check", "cargo_test", "cargo_clippy", "cargo_fmt_check"]
 ```
 
 Rules:
