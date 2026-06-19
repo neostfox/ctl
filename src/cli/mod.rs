@@ -6056,7 +6056,8 @@ mod tests {
 
     #[test]
     fn project_gates_single_line() {
-        let cfg = "[project]\ndefault_gates = [\"cargo_check\", \"cargo_test\", \"cargo_clippy\"]\n";
+        let cfg =
+            "[project]\ndefault_gates = [\"cargo_check\", \"cargo_test\", \"cargo_clippy\"]\n";
         assert_eq!(
             parse_project_default_gates(cfg),
             vec!["cargo_check", "cargo_test", "cargo_clippy"]
