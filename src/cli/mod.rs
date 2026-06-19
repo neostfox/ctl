@@ -5396,33 +5396,32 @@ fn cmd_hook_spec_status() -> Result<()> {
         return Ok(());
     }
 
-    // Find the most recent mtime among spec files
+    // Find the most recent mtime among spec files.
+    // spec_dir is guaranteed to exist here — the early return above handles its absence.
     let mut spec_mtime: Option<std::time::SystemTime> = None;
     let mut spec_count = 0u32;
-    if spec_dir.exists() {
-        fn scan_dir(
-            dir: &Path,
-            mtime: &mut Option<std::time::SystemTime>,
-            count: &mut u32,
-        ) -> Result<()> {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                let meta = entry.metadata()?;
-                if meta.is_dir() {
-                    scan_dir(&entry.path(), mtime, count)?;
-                } else if entry.path().extension().is_some_and(|e| e == "md") {
-                    *count += 1;
-                    let t = meta.modified()?;
-                    *mtime = Some(mtime.map_or(
-                        t,
-                        |prev: std::time::SystemTime| if t > prev { t } else { prev },
-                    ));
-                }
+    fn scan_dir(
+        dir: &Path,
+        mtime: &mut Option<std::time::SystemTime>,
+        count: &mut u32,
+    ) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                scan_dir(&entry.path(), mtime, count)?;
+            } else if entry.path().extension().is_some_and(|e| e == "md") {
+                *count += 1;
+                let t = meta.modified()?;
+                *mtime = Some(mtime.map_or(
+                    t,
+                    |prev: std::time::SystemTime| if t > prev { t } else { prev },
+                ));
             }
-            Ok(())
         }
-        scan_dir(&spec_dir, &mut spec_mtime, &mut spec_count)?;
+        Ok(())
     }
+    scan_dir(&spec_dir, &mut spec_mtime, &mut spec_count)?;
 
     // Find the most recent mtime among source files
     let mut src_mtime: Option<std::time::SystemTime> = None;

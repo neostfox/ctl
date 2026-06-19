@@ -277,17 +277,16 @@ drift 只能触发暂停、解释或重规划 proposal，不能自动扩权
 6. assignment.json / agent-output.json 作为后续 OMP adapter contract baseline。
 
 需要实现的命令：
-- ctl assignment create
 - ctl assignment export
 - ctl run ingest --adapter manual
-- ctl audit
+- ctl audit --id <task>
 - ctl report
 
 验收：
 - 从 task create 到 assignment export 再到 output ingest 可端到端完成。
 - evidence 包含 input/output/command/file hash。
 - 重放后 audit 结论一致。
-- 中断后 control status 可恢复上下文。
+- 中断后 ctl board 可恢复上下文。
 - 至少提供一个完整 fixture 覆盖 small task。
 - cargo fmt --check
 - cargo check --locked --offline
@@ -315,7 +314,7 @@ M3 完成后不要马上进 M4。先用它治理真实小任务。
 里程碑：M3 dogfood
 
 目标：
-使用当前 control CLI 治理至少 3 个真实 small task，发现协议缺口。
+使用当前 ctl CLI 治理至少 3 个真实 small task，发现协议缺口。
 
 允许修改：
 - README.md
@@ -459,10 +458,10 @@ M3 完成后不要马上进 M4。先用它治理真实小任务。
 6. SDD 的 effort_delta、super_delta、unplanned_deps 只能作为 evidence signal。
 
 需要实现的命令：
-- control telemetry add
-- control drift compute
-- control drift explain
-- control next-action
+- ctl telemetry add
+- ctl drift compute
+- ctl drift explain
+- ctl next-action
 
 验收：
 - Golden fixtures 对应固定动作。
@@ -527,8 +526,8 @@ M3 完成后不要马上进 M4。先用它治理真实小任务。
 - ctl schedule plan
 - ctl schedule validate
 - ctl schedule run
-- control agent report
-- ctl workspace merge-candidate
+- ctl agent-report
+- ctl run merge-candidate
 
 验收：
 - 重叠写入被拒绝。
