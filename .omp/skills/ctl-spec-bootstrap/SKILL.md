@@ -368,6 +368,72 @@ Read the root directory. Match marker files:
 
 **Mixed projects**: If multiple markers exist, treat each as a separate language module. Generate specs per language under `.ctl/spec/backend/`.
 
+## Step 1.5: Determine and record the project default gate floor
+
+The **project default gate floor** is the set of ctl gate templates that
+`ctl task create` applies when a task omits `--gates`. It is a project-wide
+safety floor — the gates every gate-less task in this repo must pass before it
+can finish. ctl does **not** hardcode this floor; bootstrap derives it from the
+analysis above and records it. Determine it once here, from the real project.
+
+### Selection principle (not a fixed list)
+
+Choose gates by what they catch, not by a per-language template:
+
+- **Always include correctness gates** — compilation/build and tests. A task
+  that builds and passes tests is the minimum honest "done".
+- **Include real-problem lint gates** — linters that flag actual defects
+  (e.g. clippy), *when the project already uses them* (the CI runs them, or a
+  lint config is present).
+- **Exclude auto-fixable pure-formatting gates** from the floor — formatting
+  (e.g. `cargo fmt --check`) is mechanically fixable and should not *block* task
+  completion. A project may still run it in CI; it just isn't part of the
+  task-completion floor. Add it to an individual task's `--gates` only when a
+  task specifically needs it.
+
+Use only gate IDs that exist as ctl gate templates. Today those are Rust-only:
+
+| ctl gate template | Catches | In the floor? |
+|---|---|---|
+| `cargo_check` | compilation | yes (correctness) |
+| `cargo_test` | test failures | yes (correctness) |
+| `cargo_clippy` | real lint defects | yes, **if** the project lints with clippy |
+| `cargo_fmt_check` | formatting drift | no — auto-fixable, not a blocking floor |
+
+For a Rust project whose CI runs clippy (or that ships a clippy config), the
+floor is therefore `cargo_check`, `cargo_test`, `cargo_clippy` — check + test +
+one real lint gate.
+
+**No applicable templates → leave it empty.** Detection by marker file does not
+reliably classify every project (a `package.json` may be Node, a tool, or a
+mixed repo). If the project's language has **no** ctl gate templates yet
+(Node/TypeScript, Python, Go, Java, …), do **not** invent gate IDs. Leave
+`default_gates` empty/absent; `ctl task create` will keep requiring an explicit
+`--gates` for that repo until templates exist. A later, more capable bootstrap
+fills these in.
+
+### Record it in `.ctl/config.toml`
+
+Write a `[project]` section (this path is inside the skill's operating boundary —
+`.ctl/`). Example for this kind of Rust repo:
+
+```toml
+[project]
+type = "rust"
+default_gates = ["cargo_check", "cargo_test", "cargo_clippy"]
+```
+
+Rules:
+
+- **Validate before writing**: every ID in `default_gates` must be a real ctl
+  gate template (the table above). Never write an ID ctl does not define.
+- **Idempotent**: if `[project].default_gates` already exists and matches the
+  analysis, leave it untouched. If it differs, this is likely a user-tuned floor
+  — **report the difference and ask** before overwriting; do not silently
+  replace it.
+- **Empty is valid**: if no templates apply, omit `default_gates` (or write an
+  empty list) rather than guessing.
+
 ## Step 2: Map architecture
 
 ### 2.1 Generate directory tree
@@ -717,6 +783,7 @@ Before finishing, validate:
 
   Language: [language(s)]
   Build: [build tool]
+  Default gate floor: [default_gates written to .ctl/config.toml, or "none — no applicable templates"]
   Layers detected: [list]
 
   .ctl/spec/backend/
