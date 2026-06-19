@@ -189,6 +189,13 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-cli-reference/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
         },
+        // Read-only subagent role(s). Writable roles are deferred until it is
+        // verified (in a sandbox) whether subagent tool calls reach the gate;
+        // a read-only role never writes, so it is safe under ctl today.
+        EmbeddedFile {
+            relative_path: "agents/ctl-oracle.md",
+            content: include_str!("../../.claude/agents/ctl-oracle.md"),
+        },
     ]
 }
 
@@ -370,7 +377,10 @@ mod tests {
     fn inject_claude_ships_hooks_settings_and_workflow_skills() {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
-        assert_eq!(n, 10, "claude injects 3 integration files + 7 skills");
+        assert_eq!(
+            n, 11,
+            "claude injects 3 integration files + 7 skills + 1 agent"
+        );
         for f in [
             "hooks/ctl-context.py",
             "hooks/ctl-gate.py",
@@ -382,10 +392,23 @@ mod tests {
             "skills/ctl-handoff/SKILL.md",
             "skills/ctl-architecture-review/SKILL.md",
             "skills/ctl-cli-reference/SKILL.md",
+            "agents/ctl-oracle.md",
         ] {
             assert!(
                 d.path.join(".claude").join(f).exists(),
                 "claude init must ship {f}"
+            );
+        }
+        // The shipped agent must be read-only: no Write/Edit/Bash in its tools.
+        let oracle = std::fs::read_to_string(d.path.join(".claude/agents/ctl-oracle.md")).unwrap();
+        let tools_line = oracle
+            .lines()
+            .find(|l| l.starts_with("tools:"))
+            .expect("agent declares a tools line");
+        for forbidden in ["Write", "Edit", "Bash"] {
+            assert!(
+                !tools_line.contains(forbidden),
+                "read-only agent must not grant {forbidden}: {tools_line}"
             );
         }
         // The research note is task output, not integration — never shipped.
