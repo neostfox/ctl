@@ -153,6 +153,18 @@ During work:
 - Record brainstorm, research, uncertainty and evidence provenance when applicable.
 - Treat model and critic claims as advisory unless supported by an appropriate oracle.
 
+Subagent dispatch (read-only by default):
+
+- Dispatch **read-only** work — investigation, broad search, research, codebase
+  questions — to read-only subagents (built-in `Explore`; `claude-code-guide` for
+  Claude Code / SDK / API questions). They preserve main-agent context and cannot
+  break scope because they never write.
+- Keep **writes inline** in the main agent. Only the main agent reliably carries
+  the active task's `CTL_TASK_ID` binding and routes its Write/Edit/Bash through
+  the ctl gate. Do **not** dispatch file edits to subagents: a subagent runs in an
+  isolated context, does not inherit `CTL_TASK_ID`, and it is unverified whether
+  its tool calls reach the PreToolUse gate at all.
+
 Before completion:
 
 1. Commit the final changes.
