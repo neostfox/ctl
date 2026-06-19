@@ -159,6 +159,12 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "settings.json",
             content: include_str!("../../.claude/settings.json"),
         },
+        // Entry/router skill: control-guard-core verbatim (drift-checked by
+        // control_guard_protocol_sync), Claude-specific integration section.
+        EmbeddedFile {
+            relative_path: "skills/control-guard/SKILL.md",
+            content: include_str!("../../.claude/skills/control-guard/SKILL.md"),
+        },
         // Workflow skill mirror (Claude Code format): same managed core + phase
         // body as the OMP/opencode copies, drift-checked by workflow_protocol_sync.
         EmbeddedFile {
@@ -378,13 +384,14 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 11,
-            "claude injects 3 integration files + 7 skills + 1 agent"
+            n, 12,
+            "claude injects 3 integration files + control-guard + 6 workflow skills + cli-reference + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
             "hooks/ctl-gate.py",
             "settings.json",
+            "skills/control-guard/SKILL.md",
             "skills/ctl-grill-with-spec/SKILL.md",
             "skills/ctl-to-prd/SKILL.md",
             "skills/ctl-to-tasks/SKILL.md",
@@ -667,8 +674,10 @@ pub fn workflow_phase_body(skill: &str) -> Result<String> {
 /// carrying the managed core, and the host entry point the skill must reference
 /// (OMP hook / opencode plugin).
 pub struct PlatformSkill {
-    /// Registry adapter name this platform backs (e.g. "omp", "opencode").
-    pub adapter: &'static str,
+    /// The executor adapter this platform backs, if any. `None` for a platform
+    /// that hosts a drift-checked control-guard but is not an executor adapter
+    /// (e.g. Claude Code — used interactively; it ingests no autonomous runs).
+    pub adapter: Option<&'static str>,
     /// Display label (e.g. "OMP").
     pub label: &'static str,
     /// Skill file carrying the managed-core block.
@@ -683,23 +692,35 @@ pub struct PlatformSkill {
 pub fn platform_skills() -> &'static [PlatformSkill] {
     &[
         PlatformSkill {
-            adapter: "omp",
+            adapter: Some("omp"),
             label: "OMP",
             skill_path: ".omp/skills/control-guard/SKILL.md",
             entry_point: ".omp/hooks/pre/ctl-context.ts",
         },
         PlatformSkill {
-            adapter: "opencode",
+            adapter: Some("opencode"),
             label: "opencode",
             skill_path: ".opencode/skills/control-guard/SKILL.md",
             entry_point: ".opencode/plugins/ctl-gate.ts",
+        },
+        // Claude Code is a platform (drift-checked control-guard) but not an
+        // executor adapter — `adapter: None`. adapter_doctor only iterates
+        // SUPPORTED_ADAPTERS, so it never looks this up; the control-guard drift
+        // tests iterate every row, so they DO cover it.
+        PlatformSkill {
+            adapter: None,
+            label: "Claude Code",
+            skill_path: ".claude/skills/control-guard/SKILL.md",
+            entry_point: ".claude/hooks/ctl-gate.py",
         },
     ]
 }
 
 /// The platform wiring backing a given adapter, if any.
 pub fn platform_skill_for(adapter: &str) -> Option<&'static PlatformSkill> {
-    platform_skills().iter().find(|p| p.adapter == adapter)
+    platform_skills()
+        .iter()
+        .find(|p| p.adapter == Some(adapter))
 }
 
 /// Normalize protocol text for comparison: LF endings, trailing per-line
@@ -828,6 +849,7 @@ mod control_guard_protocol_sync {
         "experimental.chat.system.transform",
         ".opencode/plugins",
         ".omp/hooks",
+        ".claude/hooks",
         "PreToolUse",
         "job poll",
         "OMP todo",
