@@ -159,3 +159,7 @@ invent a write target to place a handoff.
 `.ctl/tasks/<task-id>/handoff.md` only if that path is in the active task's `write_allow`;
 otherwise print it. Note whether `CTL_TASK_ID` is set so the next opencode session binds to
 the right task (the plugin reads it to resolve multi-active ambiguity).
+
+**Recommended role** (autonomous dispatch — see control-guard): `explore` — `ctl handoff
+export` and summarizing prior context are read-only (always spawnable). Persisting the
+handoff inside scope is a write the dispatching task already governs.

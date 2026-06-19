@@ -10,7 +10,8 @@ opencode-side shims.
 | Path | Role |
 |---|---|
 | `plugins/ctl-gate.ts` | opencode plugin: gates `write`/`edit`/`patch`/`bash`/`task` via `ctl hook gate` and injects active task boundaries via `ctl hook context`. |
-| `skills/control-guard/SKILL.md` | Entry-point skill: proactive task lifecycle routing and the close-out (audit → finish → archive) protocol. |
+| `skills/control-guard/SKILL.md` | Entry-point skill: proactive task lifecycle routing, the subagent-role dispatch table, and the close-out (audit → finish → archive) protocol. |
+| `agent/designer.md`, `agent/oracle.md` | Custom subagent roles the primary agent dispatches by phase (design → `designer`, diagnosis → `oracle`). Mirrors the `.omp` role set under opencode-native names; built-in `explore` (read-only) and `build` (implementation) cover the rest. The `task`-tool gate governs each spawn. |
 
 ## How enforcement works
 

@@ -151,3 +151,7 @@ into the task artifact and note the gap; do not pretend the interlock passed.
 Opt a task in at create time: `ctl task create --tdd ... --gates cargo_test`. Capture each
 run with `ctl gate run --id <id> --gate cargo_test`; `.opencode/plugins/ctl-gate.ts` governs
 the edits between runs. `ctl task finish` enforces the red→green interlock — no skip flag.
+
+**Recommended role** (autonomous dispatch — see control-guard): `build` — red→green
+implementation. Writable role, so it needs an active in_progress task; route deep
+root-causing of a stuck test to `oracle`.

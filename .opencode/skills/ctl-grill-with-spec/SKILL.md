@@ -166,3 +166,7 @@ no quality claim). Writing `grill.md` or an ADR is a mutating write gated by
 `.opencode/plugins/ctl-gate.ts`: it must fall inside the active task's `write_allow` or
 the plugin throws. Hand confirmed alignment to `ctl-to-prd`; a durable lesson to
 `ctl-spec-update`.
+
+**Recommended role** (autonomous dispatch — see control-guard): `explore` for the
+read-only investigation and alignment; `designer` when authoring `grill.md` or an ADR
+inside an active task's scope. `explore` is the only read-only role.

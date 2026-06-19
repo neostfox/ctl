@@ -161,3 +161,7 @@ control-guard for the actual `ctl task create`.
 Proposals are notes; the real `ctl task create` is gated by `.opencode/plugins/ctl-gate.ts`.
 Use `ctl task create --dry-run` to preview a boundary and `ctl board` to check sibling
 tasks for write-scope overlap before creating. Record PRD provenance with `ctl brainstorm`.
+
+**Recommended role** (autonomous dispatch — see control-guard): `designer` — shaping
+vertical task proposals from a PRD is design work; the proposals are notes until the
+gated `ctl task create`. Writable role, so it needs an active in_progress task.

@@ -176,6 +176,27 @@ Suggestion.
   out-of-scope or wrong-phase verdict, and **fails closed** for mutating tools
   when `ctl` is unavailable. Read-only tools are never blocked.
 
+### Subagent roles (autonomous dispatch)
+
+ctl **governs** subagent spawns; **you choose** which to dispatch. opencode picks a
+subagent by its `description`, so route by phase:
+
+| Phase / skill | Role (opencode-native) | Governance |
+|---|---|---|
+| read-only investigation; review gates (reviewer ≠ implementer) | `explore` | **read-only — always spawnable** |
+| architecture & design, ADR / spec authoring (design, `ctl-architecture-review` follow-up) | `designer` | writable — needs an active in_progress task |
+| diagnosis & hard reasoning, falsifiable root-cause (`ctl-diagnose`) | `oracle` | writable — needs an active in_progress task |
+| red→green implementation (`ctl-tdd-loop`) | `build` | writable — needs an active in_progress task |
+
+`explore` is the **only** read-only role and is always safe to dispatch. Writable
+roles (`build` / `designer` / `oracle`) are **blocked without an active task**;
+once allowed they inherit the dispatching task's `write_allow` — bind them with
+`CTL_TASK_ID` when several tasks are active. The `task`-tool gate enforces all of
+this — you do not replicate it. `explore` and `build` are opencode built-ins;
+`designer` and `oracle` are defined in `.opencode/agent/*.md`. The roster mirrors the
+`.omp` set (`explore` read-only; `build` / `designer` / `oracle` writable) under
+opencode-native names.
+
 Subtasks: use opencode's native task/todo tracking within the parent's
 `write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
 var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The

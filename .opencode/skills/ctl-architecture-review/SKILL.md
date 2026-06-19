@@ -170,3 +170,7 @@ task with its own scope and gates — the review never edits code itself.
 is inside an active task's `write_allow`; otherwise print it. A chosen candidate becomes a NEW
 governed task via `ctl task create` (gated by `.opencode/plugins/ctl-gate.ts`) — this skill never
 edits code.
+
+**Recommended role** (autonomous dispatch — see control-guard): `explore` — the survey
+and candidate report are read-only (always spawnable, no active task required). Authoring
+a chosen candidate into a new governed task is `designer`; implementing it is `build`.

@@ -162,3 +162,7 @@ Write the PRD under `.ctl/spec/prd/` only if that path is inside the active task
 `write_allow`; otherwise print it for the user to place. `ctl prd init` is read-only.
 When the PRD is confirmed, route to `ctl-to-tasks`; the `.opencode/plugins/ctl-gate.ts`
 plugin still governs every resulting `ctl task create`.
+
+**Recommended role** (autonomous dispatch — see control-guard): `designer` — PRD
+synthesis is authoring a design artifact within scope. Writable role, so it needs an
+active in_progress task; hand implementation to `build`.
