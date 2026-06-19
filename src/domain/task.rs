@@ -85,7 +85,6 @@ pub struct RunInfo {
     pub run_id: String,
     pub adapter: String,
     pub lease_id: String,
-    pub started_at_seq: i64,
 }
 
 impl fmt::Display for RunInfo {
@@ -1197,7 +1196,6 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 run_id: run_id.to_string(),
                 adapter: adapter.to_string(),
                 lease_id: lease_id.to_string(),
-                started_at_seq: event.seq,
             });
         }
         "run_completed" => {
@@ -1433,6 +1431,12 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             approval.status = ApprovalStatus::Expired;
         }
         // ── M6: Multi-agent scheduling events ──
+        // NOTE (deferred, see ROADMAP "已知缺口"): `run_scheduled` / `run_launched` /
+        // `run_merged` and the task-level mirror state they maintain (`active_runs`,
+        // `RunRef`, `schedule_plan_id`) are reducer-ready and tested but NOT emitted in
+        // production. `ctl schedule run` drives the canonical AgentRun aggregate
+        // (run-store) instead; wiring these would create a second, conflicting source of
+        // truth. Kept as forward-looking scaffolding, reachable via replay/tests.
         "run_scheduled" => {
             // Task is assigned to a schedule plan.
             let plan_id = event

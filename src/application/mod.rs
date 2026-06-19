@@ -2630,6 +2630,10 @@ impl ControlApp {
     pub fn workspace_apply(&self, task_id: &str) -> Result<Event> {
         // Expire any stale leases before applying
         let _ = self.expire_stale_leases(task_id);
+        // Record expiry of any stale approvals before the approval gate below, so
+        // the ledger reflects the transition rather than the gate lazily reading a
+        // still-"granted" approval as invalid (mirrors lease expiry above).
+        let _ = self.expire_stale_approvals(task_id);
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress {
             return Err(anyhow!(
@@ -2696,7 +2700,7 @@ impl ControlApp {
             });
             if !has_valid_approval {
                 return Err(anyhow!(
-                    "High-risk change '{}' on '{}' requires valid approval (not expired). Rule: APPROVAL-001. Grant with: control approval grant --id {} --request <request_id>",
+                    "High-risk change '{}' on '{}' requires valid approval (not expired). Rule: APPROVAL-001. Grant with: ctl approval grant --id {} --request <request_id>",
                     risk_type, path, task_id
                 ));
             }
@@ -4167,6 +4171,44 @@ impl ControlApp {
                         });
                         let event = self.build_event(task_id, "lease_expired", payload)?;
                         self.validate_and_append(&event)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `approval_expired` for any granted approval whose TTL has elapsed.
+    ///
+    /// Mirrors `expire_stale_leases`. Without this, an expired approval was only
+    /// ever *read* as invalid at the apply gate (lazy invalidation) and the ledger
+    /// never recorded the expiry transition — the `approval_expired` event and the
+    /// `ApprovalStatus::Expired` state were reachable only via replay/tests.
+    /// Idempotent: once expired, `is_granted()` is false, so a subsequent call
+    /// skips it (no duplicate event). The schema for `approval_expired` permits
+    /// only `request_id`, so no `reason` field is emitted.
+    fn expire_stale_approvals(&self, task_id: &str) -> Result<()> {
+        let state = self.replay_task(task_id)?;
+        let events = self.store.read_for_task(task_id)?;
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        for approval in state.pending_approvals.values() {
+            if !approval.is_granted() {
+                continue;
+            }
+            if let Some(granted_seq) = approval.granted_at_seq {
+                if let Some(granted_at_str) = event_occurred_at_by_seq(&events, granted_seq) {
+                    if let Some(granted_epoch) = parse_iso8601_to_epoch(&granted_at_str) {
+                        if now_epoch.saturating_sub(granted_epoch) > approval.ttl_seconds {
+                            let payload = serde_json::json!({
+                                "request_id": approval.request_id,
+                            });
+                            let event = self.build_event(task_id, "approval_expired", payload)?;
+                            self.validate_and_append(&event)?;
+                        }
                     }
                 }
             }
@@ -6783,6 +6825,57 @@ mod tests {
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].lease_status, "REVOKED");
         assert!(report[0].lease_nonactive);
+    }
+
+    #[test]
+    fn expire_stale_approvals_records_approval_expired_and_is_idempotent() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "t", &["src"]);
+
+        // Request and grant an approval, but backdate the grant far past its TTL
+        // so the wall-clock expiry check fires deterministically.
+        let req = app
+            .approval_request(
+                "t",
+                "high-risk edit",
+                serde_json::json!({ "high_risk_files": ["src/x.rs"] }),
+                1,
+            )
+            .unwrap();
+        let request_id = req.payload["request_id"].as_str().unwrap().to_string();
+
+        let mut granted = app
+            .build_event(
+                "t",
+                "approval_granted",
+                serde_json::json!({ "request_id": request_id }),
+            )
+            .unwrap();
+        granted.occurred_at = "2020-01-01T00:00:00Z".to_string();
+        app.validate_and_append(&granted).unwrap();
+        app.rebuild_task_view("t").unwrap();
+
+        // Precondition: the approval reads as Granted before expiry runs.
+        let before = app.replay_task("t").unwrap();
+        assert_eq!(
+            before.pending_approvals[&request_id].status,
+            crate::domain::approval::ApprovalStatus::Granted
+        );
+        let seq_before = before.last_seq;
+
+        // Expiry records an explicit approval_expired event and transitions state.
+        app.expire_stale_approvals("t").unwrap();
+        let after = app.replay_task("t").unwrap();
+        assert_eq!(
+            after.pending_approvals[&request_id].status,
+            crate::domain::approval::ApprovalStatus::Expired
+        );
+        assert_eq!(after.last_seq, seq_before + 1);
+
+        // Idempotent: a second pass appends nothing (the approval is no longer granted).
+        app.expire_stale_approvals("t").unwrap();
+        assert_eq!(app.replay_task("t").unwrap().last_seq, seq_before + 1);
     }
 
     // ── M6: crash recovery (slice 2) ────────────────────────────────────────

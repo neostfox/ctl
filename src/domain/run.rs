@@ -140,6 +140,11 @@ pub fn apply_run(state: &mut AgentRunState, event: &Event) -> Result<(), String>
         ));
     }
 
+    // NOTE (deferred, see ROADMAP "已知缺口"): some arms below are reducer-ready and
+    // tested but not yet emitted by any production path — `run_failed`, `gate_checked`,
+    // `evidence_accepted`, `evidence_rejected`. Production currently records the
+    // task-level equivalents; these run-scoped variants are reachable only via replay
+    // and tests. They are intentional forward-looking scaffolding, not dead code.
     match event.event_type.as_str() {
         "run_created" => {
             if state.last_seq > 0 {

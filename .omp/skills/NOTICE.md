@@ -14,3 +14,21 @@ copied verbatim. Thanks to their authors.
 Earlier internal lineage: several skills descend from a prior **Trellis** workflow
 (brainstorm, check, break-loop, spec bootstrap/update), now consolidated into the ctl/OMP
 skill set above.
+
+## Workflow skills foundation (L0 references)
+
+The workflow skills — `ctl-grill-with-spec`, `ctl-to-prd`, `ctl-to-tasks`,
+`ctl-tdd-loop`, `ctl-handoff`, and the canonical core at
+`.agent/protocols/workflow-skills.md` — are **ctl-native rewrites** inspired by
+Matt Pocock's engineering skill workflow and by Trellis PR #335:
+
+| Source | Adapted into | Status |
+|---|---|---|
+| [mattpocock/skills](https://github.com/mattpocock/skills) — engineering skill workflow (setup → grill-with-docs → to-prd → to-issues → tdd → review → diagnose → improve-architecture → handoff) | the phase map and the grill / PRD / tasks / TDD / handoff skill shapes | L0 reference — not vendored |
+| [mindfold-ai/Trellis PR #335](https://github.com/mindfold-ai/Trellis/pull/335) — First Principles / Bayesian thinking-framework placement | First Principles embedded in grill, Bayesian reasoning kept in `ctl-diagnose` (not floating "think better" skills) | L0 reference — not vendored |
+
+These external materials are treated as **L0 reference material**: ctl adapts the
+*ideas*, never vendors third-party skill text as an active control plane, and does
+not place them inside its trust boundary. The skills are agent workflow
+disciplines — they do not prove correctness and do not replace ctl gates, audits,
+reviewer independence, or tamper evidence.

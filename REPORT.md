@@ -63,7 +63,7 @@ All tasks have evidence in `events.jsonl`. All completed tasks pass replay deter
 
 **Symptom**: `ctl task create --read-scope schemas/` fails with "Path is protected".
 **Root cause**: `is_protected()` applies to ALL scope paths, including read-only scope. Protected check should only apply to write scope.
-**Fix**: Not yet fixed — requires separating read vs write protection in PathNormalizer.
+**Fix**: **FIXED** — `PathNormalizer` now splits `normalize()` (read scope; no protected-path check) from `normalize_write()` (write scope; enforces protected paths). See `src/infrastructure/boundary/normalizer.rs`. (Consistent with the "M4 Readiness" / "M3 Legacy Issues" entries below.)
 **Severity**: MEDIUM — limits ability to track schema changes as tasks.
 
 ## M3 Verification Results
@@ -195,7 +195,7 @@ Total: 124 tests pass (105 existing + 19 new).
 
 ## Dogfood Observations
 
-- **Command latency**: Each `control` command completes in < 0.2s (target < 2s) ✅
+- **Command latency**: Each `ctl` command completes in < 0.2s (target < 2s) ✅
 - **Error messages**: Clear, include rule IDs (AUDIT-001, ADAPTER-005)
 - **Status readability**: M4 fields (run, lease, approval) now visible in human output
 - **Windows compatibility**: Gate runner works; git worktree add fails with UNC paths

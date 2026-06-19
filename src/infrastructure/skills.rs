@@ -37,6 +37,39 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-spec-bootstrap/SKILL.md"),
         },
+        // Workflow skills foundation (workflow-skills-foundation-v1): ctl-native
+        // rewrites of the grill → PRD → tasks → TDD → handoff disciplines. Each
+        // embeds the managed workflow-core verbatim (drift-checked against
+        // `.agent/protocols/workflow-skills.md`); they ship with `ctl init` like
+        // the other OMP skills and are routed (not auto-loaded).
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-grill-with-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-prd/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-to-prd/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-tasks/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-tdd-loop/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-tdd-loop/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-handoff/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-handoff/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-architecture-review/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-cli-reference/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-cli-reference/SKILL.md"),
+        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
         // than being regenerated per project by ctl-spec-bootstrap. Closes the
@@ -105,6 +138,164 @@ pub fn inject_all(project_root: &std::path::Path) -> anyhow::Result<usize> {
         merge_settings(&settings_path)?;
     }
 
+    Ok(count)
+}
+
+/// Claude Code integration files, written under `.claude/`. The governance
+/// hooks + the settings.json that registers them. (The research note
+/// `subagent-dispatch.md` is intentionally NOT shipped — it is task output, not
+/// integration.)
+pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
+    vec![
+        EmbeddedFile {
+            relative_path: "hooks/ctl-context.py",
+            content: include_str!("../../.claude/hooks/ctl-context.py"),
+        },
+        EmbeddedFile {
+            relative_path: "hooks/ctl-gate.py",
+            content: include_str!("../../.claude/hooks/ctl-gate.py"),
+        },
+        EmbeddedFile {
+            relative_path: "settings.json",
+            content: include_str!("../../.claude/settings.json"),
+        },
+        // Entry/router skill: control-guard-core verbatim (drift-checked by
+        // control_guard_protocol_sync), Claude-specific integration section.
+        EmbeddedFile {
+            relative_path: "skills/control-guard/SKILL.md",
+            content: include_str!("../../.claude/skills/control-guard/SKILL.md"),
+        },
+        // Workflow skill mirror (Claude Code format): same managed core + phase
+        // body as the OMP/opencode copies, drift-checked by workflow_protocol_sync.
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-grill-with-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-prd/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-to-prd/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-tasks/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-tdd-loop/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-tdd-loop/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-handoff/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-handoff/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-architecture-review/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-cli-reference/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
+        },
+        // Read-only subagent role(s). Writable roles are deferred until it is
+        // verified (in a sandbox) whether subagent tool calls reach the gate;
+        // a read-only role never writes, so it is safe under ctl today.
+        EmbeddedFile {
+            relative_path: "agents/ctl-oracle.md",
+            content: include_str!("../../.claude/agents/ctl-oracle.md"),
+        },
+    ]
+}
+
+/// opencode integration files, written under `.opencode/`: the gate plugin, the
+/// custom subagent roles, the README, and the workflow skill mirror. (`package.json`
+/// is bun-local — generated separately by `default_opencode_package_json`. The
+/// plugin's `.test.ts` is a dev test, not shipped.)
+pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
+    vec![
+        EmbeddedFile {
+            relative_path: "plugins/ctl-gate.ts",
+            content: include_str!("../../.opencode/plugins/ctl-gate.ts"),
+        },
+        EmbeddedFile {
+            relative_path: "agent/designer.md",
+            content: include_str!("../../.opencode/agent/designer.md"),
+        },
+        EmbeddedFile {
+            relative_path: "agent/oracle.md",
+            content: include_str!("../../.opencode/agent/oracle.md"),
+        },
+        EmbeddedFile {
+            relative_path: "README.md",
+            content: include_str!("../../.opencode/README.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/control-guard/SKILL.md",
+            content: include_str!("../../.opencode/skills/control-guard/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-grill-with-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-prd/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-to-prd/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-tasks/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-tdd-loop/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-tdd-loop/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-handoff/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-handoff/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-architecture-review/SKILL.md"),
+        },
+    ]
+}
+
+/// Minimal `.opencode/package.json` (bun-local, gitignored in this repo) so the
+/// injected gate plugin resolves its opencode dependency.
+pub fn default_opencode_package_json() -> &'static str {
+    "{\n  \"dependencies\": {\n    \"@opencode-ai/plugin\": \"1.17.4\"\n  }\n}\n"
+}
+
+/// Write a set of embedded files under `base_dir`, skipping any that already
+/// exist (never clobber user content). Returns the count newly written.
+fn write_embedded(base_dir: &std::path::Path, files: Vec<EmbeddedFile>) -> anyhow::Result<usize> {
+    let mut count = 0usize;
+    for file in files {
+        let file_path = base_dir.join(file.relative_path);
+        let parent = file_path.parent().unwrap();
+        std::fs::create_dir_all(parent)?;
+        if !file_path.exists() {
+            std::fs::write(&file_path, file.content)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Inject the Claude Code integration into `.claude/` (write-if-absent).
+pub fn inject_claude(project_root: &std::path::Path) -> anyhow::Result<usize> {
+    write_embedded(&project_root.join(".claude"), claude_embedded_files())
+}
+
+/// Inject the opencode integration into `.opencode/` (write-if-absent), plus a
+/// default `package.json` if none exists.
+pub fn inject_opencode(project_root: &std::path::Path) -> anyhow::Result<usize> {
+    let dir = project_root.join(".opencode");
+    let mut count = write_embedded(&dir, opencode_embedded_files())?;
+    let pkg = dir.join("package.json");
+    if !pkg.exists() {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&pkg, default_opencode_package_json())?;
+        count += 1;
+    }
     Ok(count)
 }
 
@@ -188,6 +379,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inject_claude_ships_hooks_settings_and_workflow_skills() {
+        let d = TmpDir::new("claude");
+        let n = inject_claude(&d.path).unwrap();
+        assert_eq!(
+            n, 12,
+            "claude injects 3 integration files + control-guard + 6 workflow skills + cli-reference + 1 agent"
+        );
+        for f in [
+            "hooks/ctl-context.py",
+            "hooks/ctl-gate.py",
+            "settings.json",
+            "skills/control-guard/SKILL.md",
+            "skills/ctl-grill-with-spec/SKILL.md",
+            "skills/ctl-to-prd/SKILL.md",
+            "skills/ctl-to-tasks/SKILL.md",
+            "skills/ctl-tdd-loop/SKILL.md",
+            "skills/ctl-handoff/SKILL.md",
+            "skills/ctl-architecture-review/SKILL.md",
+            "skills/ctl-cli-reference/SKILL.md",
+            "agents/ctl-oracle.md",
+        ] {
+            assert!(
+                d.path.join(".claude").join(f).exists(),
+                "claude init must ship {f}"
+            );
+        }
+        // The shipped agent must be read-only: no Write/Edit/Bash in its tools.
+        let oracle = std::fs::read_to_string(d.path.join(".claude/agents/ctl-oracle.md")).unwrap();
+        let tools_line = oracle
+            .lines()
+            .find(|l| l.starts_with("tools:"))
+            .expect("agent declares a tools line");
+        for forbidden in ["Write", "Edit", "Bash"] {
+            assert!(
+                !tools_line.contains(forbidden),
+                "read-only agent must not grant {forbidden}: {tools_line}"
+            );
+        }
+        // The research note is task output, not integration — never shipped.
+        assert!(!d.path.join(".claude/subagent-dispatch.md").exists());
+        // Idempotent: re-running writes nothing new.
+        assert_eq!(inject_claude(&d.path).unwrap(), 0);
+    }
+
+    #[test]
+    fn inject_opencode_ships_plugin_agents_skills_and_package_json() {
+        let d = TmpDir::new("opencode");
+        let n = inject_opencode(&d.path).unwrap();
+        assert!(
+            n >= 6,
+            "opencode injects the plugin, agents, skills, package.json"
+        );
+        for f in [
+            "plugins/ctl-gate.ts",
+            "agent/designer.md",
+            "agent/oracle.md",
+            "README.md",
+            "package.json",
+            "skills/control-guard/SKILL.md",
+        ] {
+            assert!(
+                d.path.join(".opencode").join(f).exists(),
+                "opencode init must ship {f}"
+            );
+        }
+        // The plugin's dev test is not shipped to consumers.
+        assert!(!d.path.join(".opencode/plugins/ctl-gate.test.ts").exists());
+        // Idempotent.
+        assert_eq!(inject_opencode(&d.path).unwrap(), 0);
+    }
+
     /// The distribution gap: ctl-review linked guide files that `ctl init` never
     /// shipped. Assert every `../../spec/guides/*.md` the skill references now
     /// resolves to a real file after init.
@@ -229,12 +492,192 @@ pub const CANONICAL_PROTOCOL_PATH: &str = ".agent/protocols/control-guard.md";
 const CORE_START_PREFIX: &str = "<!-- ctl:control-guard-core:start version=";
 const CORE_END_MARKER: &str = "<!-- ctl:control-guard-core:end -->";
 
+// ── Managed workflow-skills protocol (workflow-skills-foundation-v1) ─────────
+//
+// A second, independent managed-block family. The canonical workflow-core
+// (`.agent/protocols/workflow-skills.md`) is embedded verbatim inside EVERY
+// workflow skill across both platforms; the `workflow_protocol_sync` test below
+// refuses to let any copy diverge. Same parse/normalize primitives as
+// control-guard, different markers.
+
+/// Canonical workflow-skills protocol source, relative to the project root.
+pub const WORKFLOW_CANONICAL_PROTOCOL_PATH: &str = ".agent/protocols/workflow-skills.md";
+
+const WORKFLOW_CORE_START_PREFIX: &str = "<!-- ctl:workflow-core:start version=";
+const WORKFLOW_CORE_END_MARKER: &str = "<!-- ctl:workflow-core:end -->";
+
+/// One workflow skill file carrying the managed workflow-core block.
+pub struct WorkflowSkill {
+    /// Logical skill name shared across platforms (e.g. "ctl-grill-with-spec").
+    pub skill: &'static str,
+    /// Platform that backs it ("omp" | "opencode").
+    pub platform: &'static str,
+    /// Skill file path carrying the managed-core block.
+    pub path: &'static str,
+    /// A platform-specific token that MUST appear in this file (outside the
+    /// core) — proves the skill is wired to its host, and that platform mechanics
+    /// live outside the shared core.
+    pub platform_marker: &'static str,
+}
+
+/// Every workflow skill, both platforms. Adding a workflow skill means adding its
+/// two rows here (and embedding the OMP copy in `all_embedded_files`); the drift
+/// test iterates this list. The five logical skills are the foundation set:
+/// grill-with-spec, to-prd, to-tasks, tdd-loop, handoff.
+pub fn workflow_skills() -> &'static [WorkflowSkill] {
+    &[
+        WorkflowSkill {
+            skill: "ctl-grill-with-spec",
+            platform: "omp",
+            path: ".omp/skills/ctl-grill-with-spec/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-grill-with-spec",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-grill-with-spec/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-prd",
+            platform: "omp",
+            path: ".omp/skills/ctl-to-prd/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-prd",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-to-prd/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-tasks",
+            platform: "omp",
+            path: ".omp/skills/ctl-to-tasks/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-tasks",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-to-tasks/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-tdd-loop",
+            platform: "omp",
+            path: ".omp/skills/ctl-tdd-loop/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-tdd-loop",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-tdd-loop/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-handoff",
+            platform: "omp",
+            path: ".omp/skills/ctl-handoff/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-handoff",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-handoff/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "omp",
+            path: ".omp/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        // Claude Code mirror: same managed core + phase body, only the
+        // `## Claude Code Integration` section differs (drift-checked below).
+        WorkflowSkill {
+            skill: "ctl-grill-with-spec",
+            platform: "claude",
+            path: ".claude/skills/ctl-grill-with-spec/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-prd",
+            platform: "claude",
+            path: ".claude/skills/ctl-to-prd/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-tasks",
+            platform: "claude",
+            path: ".claude/skills/ctl-to-tasks/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-tdd-loop",
+            platform: "claude",
+            path: ".claude/skills/ctl-tdd-loop/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-handoff",
+            platform: "claude",
+            path: ".claude/skills/ctl-handoff/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "claude",
+            path: ".claude/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+    ]
+}
+
+/// Extract `(version, normalized_core)` from a skill's managed **workflow**-core
+/// block. Same contract as [`extract_managed_core`], different markers.
+pub fn extract_workflow_core(skill: &str) -> Result<(String, String)> {
+    extract_core_block(skill, WORKFLOW_CORE_START_PREFIX, WORKFLOW_CORE_END_MARKER)
+}
+
+/// The shared body of a workflow skill: everything between the end of the managed
+/// core and the start of the platform integration section. This is the
+/// phase-specific instruction text that must be IDENTICAL across a skill's two
+/// platform files (only the core is platform-neutral; the phase body is too, and
+/// is kept in sync by construction + the parity test). Returns the normalized
+/// text, or the whole post-core remainder if no platform heading is found.
+pub fn workflow_phase_body(skill: &str) -> Result<String> {
+    let after = skill
+        .split(WORKFLOW_CORE_END_MARKER)
+        .nth(1)
+        .ok_or_else(|| anyhow!("workflow-core end marker not found"))?;
+    // Cut at whichever platform integration heading is present. These exact
+    // headings are emitted by every workflow skill.
+    let cut = [
+        "\n## OMP Integration",
+        "\n## opencode Integration",
+        "\n## Claude Code Integration",
+    ]
+    .iter()
+    .filter_map(|h| after.find(h))
+    .min()
+    .unwrap_or(after.len());
+    Ok(normalize_protocol(&after[..cut]))
+}
+
 /// A platform's control-guard wiring: which adapter it backs, the skill file
 /// carrying the managed core, and the host entry point the skill must reference
 /// (OMP hook / opencode plugin).
 pub struct PlatformSkill {
-    /// Registry adapter name this platform backs (e.g. "omp", "opencode").
-    pub adapter: &'static str,
+    /// The executor adapter this platform backs, if any. `None` for a platform
+    /// that hosts a drift-checked control-guard but is not an executor adapter
+    /// (e.g. Claude Code — used interactively; it ingests no autonomous runs).
+    pub adapter: Option<&'static str>,
     /// Display label (e.g. "OMP").
     pub label: &'static str,
     /// Skill file carrying the managed-core block.
@@ -249,23 +692,35 @@ pub struct PlatformSkill {
 pub fn platform_skills() -> &'static [PlatformSkill] {
     &[
         PlatformSkill {
-            adapter: "omp",
+            adapter: Some("omp"),
             label: "OMP",
             skill_path: ".omp/skills/control-guard/SKILL.md",
             entry_point: ".omp/hooks/pre/ctl-context.ts",
         },
         PlatformSkill {
-            adapter: "opencode",
+            adapter: Some("opencode"),
             label: "opencode",
             skill_path: ".opencode/skills/control-guard/SKILL.md",
             entry_point: ".opencode/plugins/ctl-gate.ts",
+        },
+        // Claude Code is a platform (drift-checked control-guard) but not an
+        // executor adapter — `adapter: None`. adapter_doctor only iterates
+        // SUPPORTED_ADAPTERS, so it never looks this up; the control-guard drift
+        // tests iterate every row, so they DO cover it.
+        PlatformSkill {
+            adapter: None,
+            label: "Claude Code",
+            skill_path: ".claude/skills/control-guard/SKILL.md",
+            entry_point: ".claude/hooks/ctl-gate.py",
         },
     ]
 }
 
 /// The platform wiring backing a given adapter, if any.
 pub fn platform_skill_for(adapter: &str) -> Option<&'static PlatformSkill> {
-    platform_skills().iter().find(|p| p.adapter == adapter)
+    platform_skills()
+        .iter()
+        .find(|p| p.adapter == Some(adapter))
 }
 
 /// Normalize protocol text for comparison: LF endings, trailing per-line
@@ -285,8 +740,22 @@ pub fn normalize_protocol(s: &str) -> String {
 /// unless exactly one well-formed block exists — catching missing, duplicate, or
 /// one-sided markers, and an unparseable version.
 pub fn extract_managed_core(skill: &str) -> Result<(String, String)> {
-    let starts = skill.matches(CORE_START_PREFIX).count();
-    let ends = skill.matches(CORE_END_MARKER).count();
+    extract_core_block(skill, CORE_START_PREFIX, CORE_END_MARKER)
+}
+
+/// Extract `(version, normalized_core)` from a managed block delimited by the
+/// given `start_prefix` / `end_marker`. The single parse/normalize primitive
+/// shared by both the control-guard and workflow protocol checks (and their
+/// runtime evaluators), so the two families cannot drift in how they read a
+/// block. Errors unless exactly one well-formed block exists — catching missing,
+/// duplicate, or one-sided markers, and an unparseable version.
+fn extract_core_block(
+    skill: &str,
+    start_prefix: &str,
+    end_marker: &str,
+) -> Result<(String, String)> {
+    let starts = skill.matches(start_prefix).count();
+    let ends = skill.matches(end_marker).count();
     if starts != 1 {
         return Err(anyhow!(
             "expected exactly one managed-core start marker, found {starts}"
@@ -297,12 +766,12 @@ pub fn extract_managed_core(skill: &str) -> Result<(String, String)> {
             "expected exactly one managed-core end marker, found {ends}"
         ));
     }
-    let start_idx = skill.find(CORE_START_PREFIX).unwrap();
-    let end_idx = skill.find(CORE_END_MARKER).unwrap();
+    let start_idx = skill.find(start_prefix).unwrap();
+    let end_idx = skill.find(end_marker).unwrap();
     if start_idx >= end_idx {
         return Err(anyhow!("managed-core end marker precedes start marker"));
     }
-    let after = &skill[start_idx + CORE_START_PREFIX.len()..];
+    let after = &skill[start_idx + start_prefix.len()..];
     let line_len = after.find('\n').unwrap_or(after.len());
     let version = after[..line_len]
         .split_whitespace()
@@ -316,7 +785,7 @@ pub fn extract_managed_core(skill: &str) -> Result<(String, String)> {
             "could not parse version from managed-core start marker"
         ));
     }
-    let body_start = start_idx + CORE_START_PREFIX.len() + line_len + 1;
+    let body_start = start_idx + start_prefix.len() + line_len + 1;
     Ok((version, normalize_protocol(&skill[body_start..end_idx])))
 }
 
@@ -380,6 +849,7 @@ mod control_guard_protocol_sync {
         "experimental.chat.system.transform",
         ".opencode/plugins",
         ".omp/hooks",
+        ".claude/hooks",
         "PreToolUse",
         "job poll",
         "OMP todo",
@@ -506,6 +976,221 @@ mod control_guard_protocol_sync {
         assert!(
             matches!(status, DriftStatus::Drift(_)),
             "tampered core must drift"
+        );
+    }
+}
+
+// ── Managed workflow-skills protocol: drift test ─────────────────────────────
+//
+// The workflow foundation (workflow-skills-foundation-v1) embeds ONE canonical
+// workflow-core (`.agent/protocols/workflow-skills.md`) verbatim inside every
+// workflow skill across BOTH platforms. These tests refuse to let the copies, or
+// the platform-shared phase bodies, diverge — the same discipline as
+// `control_guard_protocol_sync`, reusing the same parse/normalize primitives.
+#[cfg(test)]
+mod workflow_protocol_sync {
+    use super::{
+        all_embedded_files, extract_workflow_core, normalize_protocol, workflow_phase_body,
+        workflow_skills, WORKFLOW_CANONICAL_PROTOCOL_PATH,
+    };
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// Platform mechanics that must NEVER appear in the shared workflow core.
+    const PLATFORM_TOKENS: &[&str] = &[
+        "tool.execute.before",
+        "experimental.chat.system.transform",
+        ".opencode/plugins",
+        ".omp/hooks",
+        "PreToolUse",
+        "ctl-gate.ts",
+    ];
+
+    fn manifest_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn read(rel: &str) -> String {
+        let p = manifest_root().join(rel);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("missing {rel}: {e}"))
+    }
+
+    /// (1) The canonical workflow protocol source exists and declares its version.
+    #[test]
+    fn canonical_workflow_protocol_exists_and_declares_version() {
+        let canon = read(WORKFLOW_CANONICAL_PROTOCOL_PATH);
+        assert!(
+            canon.contains("WORKFLOW_PROTOCOL_VERSION = 1"),
+            "canonical workflow protocol must declare WORKFLOW_PROTOCOL_VERSION = 1"
+        );
+    }
+
+    /// (2)/(3) Both platforms exist for every logical workflow skill, and the OMP
+    /// copy is shipped by `ctl init` (embedded).
+    #[test]
+    fn both_platforms_present_and_omp_is_shipped() {
+        let mut by_skill: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for ws in workflow_skills() {
+            by_skill.entry(ws.skill).or_default().push(ws.platform);
+        }
+        assert!(!by_skill.is_empty(), "expected workflow skills");
+        for (skill, platforms) in &by_skill {
+            assert!(platforms.contains(&"omp"), "{skill}: missing OMP skill");
+            assert!(
+                platforms.contains(&"opencode"),
+                "{skill}: missing OpenCode skill"
+            );
+        }
+
+        let embedded: Vec<&str> = all_embedded_files()
+            .iter()
+            .map(|f| f.relative_path)
+            .collect();
+        for ws in workflow_skills().iter().filter(|w| w.platform == "omp") {
+            let rel = ws.path.strip_prefix(".omp/").unwrap();
+            assert!(
+                embedded.contains(&rel),
+                "ctl init must ship OMP workflow skill {rel}"
+            );
+        }
+    }
+
+    /// (3)/(4) The managed core in every workflow skill equals the canonical
+    /// source exactly, all declare the same version, and that version is declared
+    /// canonically. Editing the canonical without re-syncing a skill fails here.
+    #[test]
+    fn managed_core_identical_across_canonical_and_all_skills() {
+        let canonical = normalize_protocol(&read(WORKFLOW_CANONICAL_PROTOCOL_PATH));
+        let mut prev_version: Option<String> = None;
+        for ws in workflow_skills() {
+            let skill = read(ws.path);
+            let (version, core) =
+                extract_workflow_core(&skill).unwrap_or_else(|e| panic!("{}: {e}", ws.path));
+            assert_eq!(
+                core, canonical,
+                "{}: managed workflow core drifted from {WORKFLOW_CANONICAL_PROTOCOL_PATH} — re-sync the skill",
+                ws.path
+            );
+            if let Some(prev) = &prev_version {
+                assert_eq!(
+                    &version, prev,
+                    "{}: protocol version disagrees with another skill",
+                    ws.path
+                );
+            }
+            prev_version = Some(version.clone());
+            assert!(
+                canonical.contains(&format!("WORKFLOW_PROTOCOL_VERSION = {version}")),
+                "{}: canonical must declare WORKFLOW_PROTOCOL_VERSION = {version}",
+                ws.path
+            );
+            // (6) the platform marker appears OUTSIDE the managed core.
+            assert!(
+                skill.contains(ws.platform_marker),
+                "{}: must reference its platform marker '{}'",
+                ws.path,
+                ws.platform_marker
+            );
+            assert!(
+                !core.contains(ws.platform_marker),
+                "{}: platform marker '{}' leaked into the managed core",
+                ws.path,
+                ws.platform_marker
+            );
+        }
+        assert!(
+            prev_version.is_some(),
+            "expected at least one workflow skill"
+        );
+    }
+
+    /// (6) No platform-specific mechanic leaks into the shared canonical core.
+    /// Since every skill's core is asserted equal to canonical, a clean canonical
+    /// proves a clean core in all skills.
+    #[test]
+    fn no_platform_token_leaks_into_canonical_core() {
+        let canonical = normalize_protocol(&read(WORKFLOW_CANONICAL_PROTOCOL_PATH));
+        for tok in PLATFORM_TOKENS {
+            assert!(
+                !canonical.contains(tok),
+                "platform token '{tok}' must not appear in the canonical workflow core"
+            );
+        }
+    }
+
+    /// The platform-shared phase body (everything between the managed core and the
+    /// platform integration section) must be IDENTICAL across a skill's OMP and
+    /// OpenCode files. Editing one platform's body without the other fails here —
+    /// this is what keeps the *semantic* workflow in sync, not just the core.
+    #[test]
+    fn phase_body_is_identical_across_platforms() {
+        let mut bodies: BTreeMap<&str, BTreeMap<&str, String>> = BTreeMap::new();
+        for ws in workflow_skills() {
+            let body =
+                workflow_phase_body(&read(ws.path)).unwrap_or_else(|e| panic!("{}: {e}", ws.path));
+            bodies
+                .entry(ws.skill)
+                .or_default()
+                .insert(ws.platform, body);
+        }
+        for (skill, per_platform) in bodies {
+            let omp = per_platform.get("omp").expect("omp body");
+            let oc = per_platform.get("opencode").expect("opencode body");
+            assert_eq!(
+                omp, oc,
+                "{skill}: phase body drifted between OMP and OpenCode"
+            );
+            // The Claude Code mirror (when present) must share the same body.
+            if let Some(claude) = per_platform.get("claude") {
+                assert_eq!(
+                    omp, claude,
+                    "{skill}: phase body drifted between OMP and Claude Code"
+                );
+            }
+            assert!(!omp.is_empty(), "{skill}: phase body is empty");
+        }
+    }
+
+    /// (5) Marker corruption is detected: missing or one-sided markers error.
+    #[test]
+    fn extract_workflow_core_rejects_corrupt_markers() {
+        assert!(extract_workflow_core("no markers here").is_err());
+        assert!(
+            extract_workflow_core("<!-- ctl:workflow-core:start version=1 -->\nbody, no end")
+                .is_err()
+        );
+        assert!(extract_workflow_core("only an end <!-- ctl:workflow-core:end -->").is_err());
+    }
+
+    /// Provenance guard: ctl adapts ideas, it never vendors third-party skill
+    /// trees as an active control plane. No source-named skill dir may exist.
+    #[test]
+    fn no_third_party_skills_vendored() {
+        for forbidden in [
+            ".omp/skills/mattpocock",
+            ".opencode/skills/mattpocock",
+            ".trellis",
+            "vendor/skills",
+        ] {
+            assert!(
+                !manifest_root().join(forbidden).exists(),
+                "third-party skills must not be vendored: {forbidden}"
+            );
+        }
+    }
+
+    /// The L0 external-reference status is recorded in the protocol and NOTICE.
+    #[test]
+    fn docs_record_l0_external_reference_status() {
+        let canon = read(WORKFLOW_CANONICAL_PROTOCOL_PATH);
+        assert!(
+            canon.contains("L0 reference"),
+            "canonical protocol must record L0 external-reference status"
+        );
+        let notice = read(".omp/skills/NOTICE.md");
+        assert!(
+            notice.contains("Pocock"),
+            "NOTICE must record the workflow-skills provenance (Matt Pocock / Trellis PR #335)"
         );
     }
 }
