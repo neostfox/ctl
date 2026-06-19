@@ -141,6 +141,121 @@ pub fn inject_all(project_root: &std::path::Path) -> anyhow::Result<usize> {
     Ok(count)
 }
 
+/// Claude Code integration files, written under `.claude/`. The governance
+/// hooks + the settings.json that registers them. (The research note
+/// `subagent-dispatch.md` is intentionally NOT shipped — it is task output, not
+/// integration.)
+pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
+    vec![
+        EmbeddedFile {
+            relative_path: "hooks/ctl-context.py",
+            content: include_str!("../../.claude/hooks/ctl-context.py"),
+        },
+        EmbeddedFile {
+            relative_path: "hooks/ctl-gate.py",
+            content: include_str!("../../.claude/hooks/ctl-gate.py"),
+        },
+        EmbeddedFile {
+            relative_path: "settings.json",
+            content: include_str!("../../.claude/settings.json"),
+        },
+    ]
+}
+
+/// opencode integration files, written under `.opencode/`: the gate plugin, the
+/// custom subagent roles, the README, and the workflow skill mirror. (`package.json`
+/// is bun-local — generated separately by `default_opencode_package_json`. The
+/// plugin's `.test.ts` is a dev test, not shipped.)
+pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
+    vec![
+        EmbeddedFile {
+            relative_path: "plugins/ctl-gate.ts",
+            content: include_str!("../../.opencode/plugins/ctl-gate.ts"),
+        },
+        EmbeddedFile {
+            relative_path: "agent/designer.md",
+            content: include_str!("../../.opencode/agent/designer.md"),
+        },
+        EmbeddedFile {
+            relative_path: "agent/oracle.md",
+            content: include_str!("../../.opencode/agent/oracle.md"),
+        },
+        EmbeddedFile {
+            relative_path: "README.md",
+            content: include_str!("../../.opencode/README.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/control-guard/SKILL.md",
+            content: include_str!("../../.opencode/skills/control-guard/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-grill-with-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-prd/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-to-prd/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-tasks/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-tdd-loop/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-tdd-loop/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-handoff/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-handoff/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-architecture-review/SKILL.md"),
+        },
+    ]
+}
+
+/// Minimal `.opencode/package.json` (bun-local, gitignored in this repo) so the
+/// injected gate plugin resolves its opencode dependency.
+pub fn default_opencode_package_json() -> &'static str {
+    "{\n  \"dependencies\": {\n    \"@opencode-ai/plugin\": \"1.17.4\"\n  }\n}\n"
+}
+
+/// Write a set of embedded files under `base_dir`, skipping any that already
+/// exist (never clobber user content). Returns the count newly written.
+fn write_embedded(base_dir: &std::path::Path, files: Vec<EmbeddedFile>) -> anyhow::Result<usize> {
+    let mut count = 0usize;
+    for file in files {
+        let file_path = base_dir.join(file.relative_path);
+        let parent = file_path.parent().unwrap();
+        std::fs::create_dir_all(parent)?;
+        if !file_path.exists() {
+            std::fs::write(&file_path, file.content)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Inject the Claude Code integration into `.claude/` (write-if-absent).
+pub fn inject_claude(project_root: &std::path::Path) -> anyhow::Result<usize> {
+    write_embedded(&project_root.join(".claude"), claude_embedded_files())
+}
+
+/// Inject the opencode integration into `.opencode/` (write-if-absent), plus a
+/// default `package.json` if none exists.
+pub fn inject_opencode(project_root: &std::path::Path) -> anyhow::Result<usize> {
+    let dir = project_root.join(".opencode");
+    let mut count = write_embedded(&dir, opencode_embedded_files())?;
+    let pkg = dir.join("package.json");
+    if !pkg.exists() {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&pkg, default_opencode_package_json())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Merge control-guard autoLoad + hooks into an existing settings.json.
 /// Preserves all other settings the user may have configured.
 fn merge_settings(settings_path: &std::path::Path) -> anyhow::Result<()> {
@@ -219,6 +334,50 @@ mod tests {
                 "ctl init must ship the fixed guide {f}"
             );
         }
+    }
+
+    #[test]
+    fn inject_claude_ships_hooks_and_settings_only() {
+        let d = TmpDir::new("claude");
+        let n = inject_claude(&d.path).unwrap();
+        assert_eq!(n, 3, "claude injects exactly the 3 integration files");
+        for f in ["hooks/ctl-context.py", "hooks/ctl-gate.py", "settings.json"] {
+            assert!(
+                d.path.join(".claude").join(f).exists(),
+                "claude init must ship {f}"
+            );
+        }
+        // The research note is task output, not integration — never shipped.
+        assert!(!d.path.join(".claude/subagent-dispatch.md").exists());
+        // Idempotent: re-running writes nothing new.
+        assert_eq!(inject_claude(&d.path).unwrap(), 0);
+    }
+
+    #[test]
+    fn inject_opencode_ships_plugin_agents_skills_and_package_json() {
+        let d = TmpDir::new("opencode");
+        let n = inject_opencode(&d.path).unwrap();
+        assert!(
+            n >= 6,
+            "opencode injects the plugin, agents, skills, package.json"
+        );
+        for f in [
+            "plugins/ctl-gate.ts",
+            "agent/designer.md",
+            "agent/oracle.md",
+            "README.md",
+            "package.json",
+            "skills/control-guard/SKILL.md",
+        ] {
+            assert!(
+                d.path.join(".opencode").join(f).exists(),
+                "opencode init must ship {f}"
+            );
+        }
+        // The plugin's dev test is not shipped to consumers.
+        assert!(!d.path.join(".opencode/plugins/ctl-gate.test.ts").exists());
+        // Idempotent.
+        assert_eq!(inject_opencode(&d.path).unwrap(), 0);
     }
 
     /// The distribution gap: ctl-review linked guide files that `ctl init` never

@@ -26,8 +26,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize the local task ledger
-    Init,
+    /// Initialize the local task ledger and inject a platform integration
+    Init {
+        /// Which agent platform to wire up. Omit to choose interactively (a TTY
+        /// is required); in a non-interactive shell the flag is mandatory.
+        #[arg(long, value_enum)]
+        platform: Option<PlatformArg>,
+    },
     /// Task lifecycle commands (create through archive)
     Task {
         #[command(subcommand)]
@@ -297,6 +302,19 @@ enum BrainstormCommands {
 enum TaskKindArg {
     Implementation,
     Research,
+}
+
+/// Which agent platform `ctl init` wires up.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PlatformArg {
+    /// Claude Code — governance hooks + settings under `.claude/`
+    Claude,
+    /// opencode — gate plugin, subagent roles, skill mirror under `.opencode/`
+    Opencode,
+    /// OMP — skills, hooks, settings under `.omp/`
+    Omp,
+    /// All of the above
+    All,
 }
 
 impl TaskKindArg {
@@ -1094,7 +1112,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let dry_run = cli.dry_run;
     match &cli.command {
-        Commands::Init => cmd_init(dry_run),
+        Commands::Init { platform } => cmd_init(*platform, dry_run),
         Commands::Task { command } => cmd_task(command, dry_run),
         Commands::Replay { task } => cmd_replay(task.as_deref()),
         Commands::Reconcile => cmd_reconcile(),
@@ -1154,11 +1172,27 @@ fn app_open(dry_run: bool) -> Result<ControlApp> {
     ControlApp::open(&std::env::current_dir()?, dry_run)
 }
 
-fn cmd_init(dry_run: bool) -> Result<()> {
+fn cmd_init(platform: Option<PlatformArg>, dry_run: bool) -> Result<()> {
+    use std::io::IsTerminal;
     let project_root = std::env::current_dir()?;
+
+    // Resolve the platform: an explicit --platform wins; otherwise prompt when
+    // attached to a TTY, and require the flag in a non-interactive shell (CI).
+    let platform = match platform {
+        Some(p) => p,
+        None if std::io::stdin().is_terminal() => prompt_platform()?,
+        None => {
+            return Err(anyhow::anyhow!(
+                "ctl init: --platform is required in a non-interactive shell \
+                 (no TTY to prompt). Choose one of: claude, opencode, omp, all."
+            ));
+        }
+    };
+
     if dry_run {
         println!(
-            "[dry-run] Would initialize local task ledger + inject control-plane skills & hooks"
+            "[dry-run] Would initialize the local task ledger and inject the {} integration.",
+            platform_label(platform)
         );
         return Ok(());
     }
@@ -1200,19 +1234,73 @@ T6_architecture_mismatch = true
         println!("Created default .ctl/config.toml");
     }
 
-    // Inject control-plane skills, hooks, and OMP settings
-    let file_count = crate::infrastructure::skills::inject_all(&project_root)?;
-    if file_count > 0 {
-        println!(
-            "Injected {} file(s) into .omp/ (skills + hooks).",
-            file_count
-        );
-    } else {
-        println!("All control-plane files already present in .omp/.");
-    }
+    // Inject the chosen platform integration(s).
+    inject_platform(platform, &project_root)?;
 
-    println!("Control-plane active: auto-load skill + session hooks configured.");
+    println!("Control-plane active for {}.", platform_label(platform));
     Ok(())
+}
+
+/// Human label for a platform selection (used in init output).
+fn platform_label(p: PlatformArg) -> &'static str {
+    match p {
+        PlatformArg::Claude => "Claude Code (.claude/)",
+        PlatformArg::Opencode => "opencode (.opencode/)",
+        PlatformArg::Omp => "OMP (.omp/)",
+        PlatformArg::All => "all platforms (.claude/ + .opencode/ + .omp/)",
+    }
+}
+
+/// Inject the integration files for the selected platform(s), reporting each.
+fn inject_platform(p: PlatformArg, project_root: &Path) -> Result<()> {
+    use crate::infrastructure::skills;
+    let injected = |n: usize| -> String {
+        if n > 0 {
+            format!("injected {n} file(s)")
+        } else {
+            "already present".to_string()
+        }
+    };
+    if matches!(p, PlatformArg::Omp | PlatformArg::All) {
+        let n = skills::inject_all(project_root)?;
+        println!("  .omp/      {} (skills + hooks + settings)", injected(n));
+    }
+    if matches!(p, PlatformArg::Claude | PlatformArg::All) {
+        let n = skills::inject_claude(project_root)?;
+        println!("  .claude/   {} (governance hooks + settings)", injected(n));
+    }
+    if matches!(p, PlatformArg::Opencode | PlatformArg::All) {
+        let n = skills::inject_opencode(project_root)?;
+        println!(
+            "  .opencode/ {} (gate plugin + agents + skills)",
+            injected(n)
+        );
+    }
+    Ok(())
+}
+
+/// Interactive platform picker (only reached when stdin is a TTY).
+fn prompt_platform() -> Result<PlatformArg> {
+    use std::io::Write as _;
+    println!("Select the agent platform to wire up:");
+    println!("  1) claude    Claude Code  (.claude/)");
+    println!("  2) opencode  opencode     (.opencode/)");
+    println!("  3) omp       OMP          (.omp/)");
+    println!("  4) all       all of the above");
+    print!("Choice [1-4]: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    match line.trim().to_lowercase().as_str() {
+        "1" | "claude" => Ok(PlatformArg::Claude),
+        "2" | "opencode" => Ok(PlatformArg::Opencode),
+        "3" | "omp" => Ok(PlatformArg::Omp),
+        "4" | "all" => Ok(PlatformArg::All),
+        other => Err(anyhow::anyhow!(
+            "Unrecognized choice '{}'. Re-run and pick 1-4, or pass --platform <claude|opencode|omp|all>.",
+            other
+        )),
+    }
 }
 
 /// Resolve a task's gates: explicit `--gates` win; otherwise derive the project
