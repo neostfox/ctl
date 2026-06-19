@@ -87,6 +87,36 @@ code — it plans, governs, and ingests results; an external executor (OMP/openc
 - `ROADMAP.md` — Milestone definitions, exit criteria, and decisions.
 - `schemas/` — JSON Schema contracts (Draft 2020-12, `unevaluatedProperties: false`).
 
+## Agent Workflow Skills
+
+A ctl-native **workflow foundation** lives alongside the control-guard skill. The
+canonical core is `.agent/protocols/workflow-skills.md` (`WORKFLOW_PROTOCOL_VERSION = 1`),
+embedded verbatim in each skill across OMP (`.omp/skills/`) and OpenCode
+(`.opencode/skills/`); a CI drift test (`workflow_protocol_sync` in
+`infrastructure/skills.rs`) refuses to let the copies or the platform-shared phase
+bodies diverge.
+
+```
+grill  → ctl-grill-with-spec   align from first principles (challenge inherited
+                               assumptions; output artifacts, not truth)
+PRD    → ctl-to-prd            synthesize a PRD; separate ObservedBasis /
+                               ConfirmedBasis / OpenUncertainty (draft|confirmed|superseded)
+tasks  → ctl-to-tasks          vertical, independently verifiable slices; each
+                               declares scope, gates, AFK/HITL, blocking uncertainties
+TDD    → ctl-tdd-loop          one behavior, red→green (the `--tdd` / `tdd-red-green`
+                               interlock proves it on the ledger)
+handoff→ ctl-handoff           compact context (builds on `ctl handoff export`)
+```
+
+These are **agent workflow disciplines**, not new governance. They do not prove
+correctness, do not replace gates / audits / evidence, do not create authenticated
+reviewer independence, and do not create L3 tamper evidence. The frameworks are
+placed, not floating: **First Principles** in grill, **Bayesian reasoning** in
+`ctl-diagnose`. External inspiration (Matt Pocock's skills; Trellis PR #335) is L0
+reference material — adapted, never vendored (see `.omp/skills/NOTICE.md`).
+Follow-ups deferred: a `ctl-architecture-review` skill (the `ctl architecture
+review` CLI already exists) and a diagnose-v2 skill.
+
 ## Commands (core subset — run `ctl --help` for the full surface)
 
 The full CLI spans task lifecycle, gates, context, assignment, run/workspace/approval (M4),

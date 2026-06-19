@@ -179,4 +179,8 @@ Suggestion.
 Subtasks: use opencode's native task/todo tracking within the parent's
 `write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
 var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The
-plugin contract is covered by `bun test --cwd .opencode`.
+plugin contract is covered by `bun test --cwd .opencode`. Workflow phases (see
+`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align from first
+principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
+vertical task proposals, `ctl-tdd-loop` for red→green implementation, and
+`ctl-handoff` to compact context for the next agent.
