@@ -115,10 +115,13 @@ impl PathNormalizer {
         let s = path.to_string_lossy().to_lowercase();
         // Carve-outs from the blanket `.ctl` protection: AI-writable control-plane
         // config, treated like `.ctl/spec` (which the gate already exempts). These let
-        // the workflow doc be revised and the legacy scripts dir be retired under
-        // governance instead of requiring a human to bypass the boundary.
+        // the workflow doc be revised, the legacy scripts dir be retired, and the
+        // project config (incl. the [project].default_gates floor that
+        // /ctl-spec-bootstrap records) be written under governance instead of
+        // requiring a human to bypass the boundary. The canonical ledger
+        // (`.ctl/tasks`) is NOT carved out and stays protected.
         let s_fwd = s.replace('\\', "/");
-        for w in [".ctl/workflow.md", ".ctl/scripts"] {
+        for w in [".ctl/config.toml", ".ctl/workflow.md", ".ctl/scripts"] {
             if s_fwd == w || s_fwd.starts_with(&format!("{w}/")) {
                 return false;
             }
@@ -284,6 +287,16 @@ mod tests {
         let dir = unique_dir();
         let norm = PathNormalizer::new(dir.clone());
         assert!(norm.normalize_write(".ctl/scripts").is_ok());
+        cleanup(&dir);
+    }
+    #[test]
+    fn accept_carveout_ctl_config_toml() {
+        // Carved out of .ctl protection — the project config (incl. the
+        // [project].default_gates floor) is AI-writable control-plane config,
+        // so /ctl-spec-bootstrap can record the floor under governance.
+        let dir = unique_dir();
+        let norm = PathNormalizer::new(dir.clone());
+        assert!(norm.normalize_write(".ctl/config.toml").is_ok());
         cleanup(&dir);
     }
     #[test]
