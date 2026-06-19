@@ -5,14 +5,7 @@ description: "Synthesize the current resolved context into a PRD — do NOT re-i
 
 # ctl-to-prd (opencode)
 
-Turn resolved context into a Product Requirements Document. You are **synthesizing what is
-already known**, not restarting discovery: re-interview the user only for information that
-is genuinely missing. The PRD is the durable bridge between alignment (grill) and a set of
-vertical tasks (`ctl-to-tasks`).
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OMP
-copy. Do not edit it here in isolation. opencode-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-to-prd/source.md` by `ctl skills sync`. opencode-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

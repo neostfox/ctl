@@ -3,15 +3,9 @@ name: ctl-handoff
 description: "Compact the current task/session context into a portable handoff another agent or human can safely pick up: task, phase, objective, decisions, modified files, gates run, open uncertainties, next safe action, do-not-do list, environment hazards, adapter/platform, and whether a dispatch binding (CTL_TASK_ID) is active. Triggers when: the session is long, context is high, switching agents/platforms, before AFK, or before a separate governed run. Do NOT trigger for: a quick in-session continuation."
 ---
 
-# ctl-handoff (OMP)
+# ctl-handoff (Claude Code)
 
-Produce a compact handoff so another session, agent, or human can continue safely. ctl
-already exports the **mechanical** half from the ledger; this skill adds the **human-decision**
-half the export cannot derive.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OpenCode
-copy. Do not edit it here in isolation. OMP-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-handoff/source.md` by `ctl skills sync`. Claude Code-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

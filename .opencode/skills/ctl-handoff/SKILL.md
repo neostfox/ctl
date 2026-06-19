@@ -5,13 +5,7 @@ description: "Compact the current task/session context into a portable handoff a
 
 # ctl-handoff (opencode)
 
-Produce a compact handoff so another session, agent, or human can continue safely. ctl
-already exports the **mechanical** half from the ledger; this skill adds the **human-decision**
-half the export cannot derive.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OMP
-copy. Do not edit it here in isolation. opencode-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-handoff/source.md` by `ctl skills sync`. opencode-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

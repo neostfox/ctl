@@ -38,6 +38,11 @@ enum Commands {
         #[command(subcommand)]
         command: TaskCommands,
     },
+    /// Generate the workflow skills from their single source
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommands,
+    },
     /// Rebuild task.json projection(s) from canonical task events
     Replay {
         /// Replay only this task; omit to replay every task
@@ -302,6 +307,17 @@ enum BrainstormCommands {
 enum TaskKindArg {
     Implementation,
     Research,
+}
+
+#[derive(Subcommand)]
+enum SkillsCommands {
+    /// Generate every platform's SKILL.md from `.agent/skills/<skill>/source.md`.
+    /// With --check, verify the on-disk files match (a CI gate) without writing.
+    Sync {
+        /// Verify only: exit non-zero if any generated file is out of date.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// Which agent platform `ctl init` wires up.
@@ -1113,6 +1129,7 @@ pub fn run() -> Result<()> {
     let dry_run = cli.dry_run;
     match &cli.command {
         Commands::Init { platform } => cmd_init(*platform, dry_run),
+        Commands::Skills { command } => cmd_skills(command),
         Commands::Task { command } => cmd_task(command, dry_run),
         Commands::Replay { task } => cmd_replay(task.as_deref()),
         Commands::Reconcile => cmd_reconcile(),
@@ -1280,6 +1297,39 @@ fn inject_platform(p: PlatformArg, project_root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn cmd_skills(command: &SkillsCommands) -> Result<()> {
+    match command {
+        SkillsCommands::Sync { check } => {
+            let project_root = std::env::current_dir()?;
+            let outcome = crate::infrastructure::skill_sync::sync(&project_root, *check)?;
+            if *check {
+                if outcome.stale.is_empty() {
+                    println!("All workflow skills are in sync with their source.");
+                } else {
+                    for s in &outcome.stale {
+                        println!("  stale: {s}");
+                    }
+                    return Err(anyhow::anyhow!(
+                        "{} skill file(s) out of date — run `ctl skills sync`",
+                        outcome.stale.len()
+                    ));
+                }
+            } else if outcome.written.is_empty() {
+                println!("All workflow skills already up to date.");
+            } else {
+                for s in &outcome.written {
+                    println!("  wrote: {s}");
+                }
+                println!(
+                    "Regenerated {} skill file(s) from source.",
+                    outcome.written.len()
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Interactive platform picker (only reached when stdin is a TTY).

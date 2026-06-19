@@ -5,13 +5,7 @@ description: "Periodic read-only architecture review: start from `ctl architectu
 
 # ctl-architecture-review (opencode)
 
-Review architecture **read-only** and hand back candidates, not changes. Start from the mechanical
-compliance check, then add the qualitative judgement a checker can't make. You never refactor here:
-a chosen candidate becomes a *new* governed task.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OMP
-copy. Do not edit it here in isolation. opencode-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-architecture-review/source.md` by `ctl skills sync`. opencode-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

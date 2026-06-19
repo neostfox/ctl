@@ -3,16 +3,9 @@ name: ctl-tdd-loop
 description: "Drive implementation as a strict TDD loop: one behavior, one red-capable test, captured failure evidence, minimal implementation, captured green evidence, refactor only after green. Tests public behavior, not private detail; never claims TDD without red evidence. Triggers when: implementing a behavior change under a task, especially one opted into the ctl tdd-red-green interlock. Do NOT trigger for: pure refactors with no behavior change, docs, or diagnosis (ctl-diagnose)."
 ---
 
-# ctl-tdd-loop (OMP)
+# ctl-tdd-loop (Claude Code)
 
-Implement one behavior at a time, red before green. ctl can **enforce** this: a task created
-with `--tdd` carries the `tdd-red-green` risk trigger and its `finish` is hard-blocked until
-the `cargo_test` gate history shows a FAIL recorded before a PASS — i.e. the test
-demonstrably went red → green. The skill is the discipline; the interlock is the proof.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OpenCode
-copy. Do not edit it here in isolation. OMP-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-tdd-loop/source.md` by `ctl skills sync`. Claude Code-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

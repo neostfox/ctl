@@ -5,15 +5,7 @@ description: "Align before building: grill an ambiguous, broad, or high-risk req
 
 # ctl-grill-with-spec (opencode)
 
-Grill a fuzzy or risky request into alignment **before** any PRD or code. This is the
-first-principles phase: you challenge inherited assumptions and converge on what must be
-true, recording artifacts the next phase can build on. It pairs with the existing
-`ctl-brainstorm` (one-question-at-a-time scoping) — grill clarifies *the problem*;
-brainstorm converges *the task boundary*.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OMP
-copy. Do not edit it here in isolation. opencode-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-grill-with-spec/source.md` by `ctl skills sync`. opencode-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

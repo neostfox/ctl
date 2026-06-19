@@ -5,14 +5,7 @@ description: "Convert a confirmed PRD or plan into ctl task proposals — vertic
 
 # ctl-to-tasks (OMP)
 
-Break a confirmed PRD or plan into **task proposals** control-guard can turn into
-`ctl task create`. The unit is a **vertical slice**: a thin, independently shippable and
-independently verifiable change — not a horizontal "do all the models, then all the
-handlers" layer task.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OpenCode
-copy. Do not edit it here in isolation. OMP-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-to-tasks/source.md` by `ctl skills sync`. OMP-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol

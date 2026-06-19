@@ -3,16 +3,9 @@ name: ctl-to-tasks
 description: "Convert a confirmed PRD or plan into ctl task proposals — vertical slices, each independently verifiable, each declaring objective, read scope, write scope, gates, acceptance evidence, an AFK/HITL label, and blocking uncertainties. Triggers when: a PRD or plan exists and you need to break it into governed tasks. Do NOT trigger for: scoping a single fuzzy request (ctl-brainstorm), or fabricating task state without a plan. Never creates tasks that bypass protected-path controls and never synthesizes completed ctl events from a plan."
 ---
 
-# ctl-to-tasks (OMP)
+# ctl-to-tasks (Claude Code)
 
-Break a confirmed PRD or plan into **task proposals** control-guard can turn into
-`ctl task create`. The unit is a **vertical slice**: a thin, independently shippable and
-independently verifiable change — not a horizontal "do all the models, then all the
-handlers" layer task.
-
-The **managed core** below is the platform-neutral ctl workflow protocol,
-byte-checked by CI against `.agent/protocols/workflow-skills.md` and the OpenCode
-copy. Do not edit it here in isolation. OMP-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-to-tasks/source.md` by `ctl skills sync`. Claude Code-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol
