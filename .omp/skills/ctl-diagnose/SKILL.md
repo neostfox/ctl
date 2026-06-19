@@ -12,6 +12,17 @@ discriminating evidence, confidence→action, root-cause categories A-E). Read i
 adds the evidence-grading and falsification discipline on top, and the loop-breaking capture
 at the end.
 
+## Workflow placement
+
+This is the **diagnose phase** of the ctl workflow foundation
+(`.agent/protocols/workflow-skills.md`): Bayesian reasoning is *placed* here, not
+floating, exactly as the workflow-core specifies (First Principles lives in
+`ctl-grill-with-spec`; Bayesian lives here). The iron rule of that phase — **no fix
+before a red-capable feedback loop** — is the same one enforced below. This skill
+keeps its standalone yao-bayesian lineage (see `NOTICE.md`) and its OMP-specific
+`failure-diagnosis.md` guide, so it is not embedded in the shared workflow-core
+block; it is reached from the workflow phase map by routing.
+
 ## Fact-driven attribution (the hard rule)
 
 Never state a root cause you have not confirmed with a tool. "Probably the environment",

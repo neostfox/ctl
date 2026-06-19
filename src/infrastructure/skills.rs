@@ -62,6 +62,10 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-handoff/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-handoff/SKILL.md"),
         },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-architecture-review/SKILL.md"),
+        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
         // than being regenerated per project by ctl-spec-bootstrap. Closes the
@@ -346,6 +350,18 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             skill: "ctl-handoff",
             platform: "opencode",
             path: ".opencode/skills/ctl-handoff/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "omp",
+            path: ".omp/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-architecture-review/SKILL.md",
             platform_marker: "opencode Integration",
         },
     ]
