@@ -547,8 +547,10 @@ enum TaskCommands {
         /// `tdd-red-green` risk trigger; requires a cargo_test gate.
         #[arg(long)]
         tdd: bool,
-        /// Required gate template IDs; repeat for multiple entries
-        #[arg(long = "gates", required = true)]
+        /// Gate template IDs. If omitted, the gates are derived from the project
+        /// default floor recorded in `.ctl/config.toml` (`[project].default_gates`,
+        /// set by /ctl-spec-bootstrap). Repeat for multiple entries.
+        #[arg(long = "gates")]
         gates: Vec<String>,
         /// Task IDs that must complete before this one (M-d); repeat for multiple
         #[arg(long = "depends-on")]
@@ -573,7 +575,8 @@ enum TaskCommands {
         /// Read scope (default: same as --write-allow); repeat for multiple
         #[arg(long = "read-scope")]
         read_scope: Vec<String>,
-        /// Required gates (default: cargo_check, cargo_test); repeat for multiple
+        /// Gates; if omitted, derived from the project default floor
+        /// (`.ctl/config.toml [project].default_gates`). Repeat for multiple
         #[arg(long = "gates")]
         gates: Vec<String>,
         /// Task IDs that must complete before this one (M-d); repeat for multiple
@@ -1212,6 +1215,108 @@ T6_architecture_mismatch = true
     Ok(())
 }
 
+/// Resolve a task's gates: explicit `--gates` win; otherwise derive the project
+/// default floor recorded in `.ctl/config.toml` by /ctl-spec-bootstrap. Errors
+/// when neither is available — a task must declare at least one gate (the app
+/// layer enforces the same non-empty invariant), and ctl hardcodes no floor.
+fn resolve_task_gates(project_root: &Path, explicit: &[String]) -> Result<Vec<String>> {
+    if !explicit.is_empty() {
+        return Ok(explicit.to_vec());
+    }
+    let derived = read_project_default_gates(project_root);
+    if derived.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No --gates given and no project default gate floor found \
+             (.ctl/config.toml [project].default_gates). Pass --gates, or run \
+             /ctl-spec-bootstrap to record the project gate floor."
+        ));
+    }
+    Ok(derived)
+}
+
+/// Read `[project].default_gates` from `.ctl/config.toml`, if present.
+///
+/// ctl does not hardcode a project gate floor; the ctl-spec-bootstrap skill
+/// derives one per project and records it here. Returns an empty vec when the
+/// file, the `[project]` table, or the key is absent. The config has no general
+/// TOML reader (it is otherwise written/consumed as raw text), so parsing is a
+/// minimal, targeted extraction of the `default_gates = [...]` string array.
+/// Whatever it returns is still validated against the gate-template list by the
+/// caller (`create_task`), so a malformed entry surfaces as an "unknown gate"
+/// error rather than silent misbehavior.
+fn read_project_default_gates(project_root: &Path) -> Vec<String> {
+    let path = project_root.join(".ctl").join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => parse_project_default_gates(&content),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Extract the `default_gates` string array under the `[project]` table.
+/// Supports the single-line form the skill writes
+/// (`default_gates = ["cargo_check", "cargo_test"]`) and a multi-line array.
+/// Tolerant of trailing comments after the closing `]`. Non-string / unquoted
+/// tokens are dropped (the caller validates the remainder).
+fn parse_project_default_gates(content: &str) -> Vec<String> {
+    let mut in_project = false;
+    let mut collecting = false;
+    let mut buf = String::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if !collecting && line.starts_with('[') && line.ends_with(']') {
+            in_project = line == "[project]";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        if collecting {
+            if let Some(close) = line.find(']') {
+                buf.push(' ');
+                buf.push_str(&line[..close]);
+                return extract_quoted_tokens(&buf);
+            }
+            buf.push(' ');
+            buf.push_str(line);
+            continue;
+        }
+        // Look for `default_gates = [ ... ]`.
+        let after_key = match line.strip_prefix("default_gates") {
+            Some(rest) => rest.trim_start(),
+            None => continue,
+        };
+        let after_eq = match after_key.strip_prefix('=') {
+            Some(rest) => rest.trim_start(),
+            None => continue,
+        };
+        let Some(open) = after_eq.find('[') else {
+            continue;
+        };
+        let tail = &after_eq[open + 1..];
+        if let Some(close) = tail.find(']') {
+            return extract_quoted_tokens(&tail[..close]);
+        }
+        buf.push_str(tail);
+        collecting = true;
+    }
+    Vec::new()
+}
+
+/// Split a comma-separated list of double-quoted tokens into the inner strings.
+fn extract_quoted_tokens(inner: &str) -> Vec<String> {
+    inner
+        .split(',')
+        .filter_map(|tok| {
+            let t = tok.trim().strip_prefix('"')?.strip_suffix('"')?;
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        })
+        .collect()
+}
+
 fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
     let app = app_open(dry_run)?;
     match command {
@@ -1236,6 +1341,10 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             {
                 triggers.push(crate::application::TDD_RED_GREEN_TRIGGER.to_string());
             }
+            // Gates: explicit `--gates` win; otherwise derive the project default
+            // floor recorded by /ctl-spec-bootstrap. The app still requires a
+            // non-empty gate set, so a project with no floor must pass `--gates`.
+            let gates = resolve_task_gates(&app.project_root, gates)?;
             let event = app.create_task_with_kind(
                 id,
                 CreateTaskInput {
@@ -1244,7 +1353,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     write_allow,
                     write_deny,
                     risk_triggers: &triggers,
-                    gates,
+                    gates: &gates,
                     depends_on,
                 },
                 kind.to_domain(),
@@ -1279,11 +1388,9 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             } else {
                 read_scope.clone()
             };
-            let gate_list: Vec<String> = if gates.is_empty() {
-                vec!["cargo_check".to_string(), "cargo_test".to_string()]
-            } else {
-                gates.clone()
-            };
+            // Same gate resolution as `create`: explicit `--gates` win, else the
+            // project default floor (no hardcoded list — set by /ctl-spec-bootstrap).
+            let gate_list = resolve_task_gates(&app.project_root, gates)?;
             let empty: Vec<String> = Vec::new();
             app.create_task(
                 &task_id,
@@ -5515,7 +5622,8 @@ fn cmd_hook_spec_status() -> Result<()> {
 mod tests {
     use super::{
         classify_bash, detect_shared_git_op, format_brainstorm_provenance, format_research_output,
-        format_uncertainty_ledger, resolve_active_governance, ActiveTask, GovState,
+        format_uncertainty_ledger, parse_project_default_gates, resolve_active_governance,
+        ActiveTask, GovState,
     };
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
@@ -5942,5 +6050,62 @@ mod tests {
         assert!(!out.contains('%'));
         assert!(!out.to_uppercase().contains("PASS"));
         assert!(!out.to_lowercase().contains("verdict"));
+    }
+
+    // ── project default gate floor parsing ──
+
+    #[test]
+    fn project_gates_single_line() {
+        let cfg = "[project]\ndefault_gates = [\"cargo_check\", \"cargo_test\", \"cargo_clippy\"]\n";
+        assert_eq!(
+            parse_project_default_gates(cfg),
+            vec!["cargo_check", "cargo_test", "cargo_clippy"]
+        );
+    }
+
+    #[test]
+    fn project_gates_multi_line() {
+        let cfg = "[project]\ntype = \"rust\"\ndefault_gates = [\n  \"cargo_check\",\n  \"cargo_test\",\n]\n";
+        assert_eq!(
+            parse_project_default_gates(cfg),
+            vec!["cargo_check", "cargo_test"]
+        );
+    }
+
+    #[test]
+    fn project_gates_trailing_comment_and_no_spaces() {
+        let cfg = "[project]\ndefault_gates=[\"cargo_check\"] # the floor\n";
+        assert_eq!(parse_project_default_gates(cfg), vec!["cargo_check"]);
+    }
+
+    #[test]
+    fn project_gates_absent_when_no_section() {
+        let cfg = "[risk]\nR1_cognitive_overload = true\n";
+        assert!(parse_project_default_gates(cfg).is_empty());
+    }
+
+    #[test]
+    fn project_gates_absent_when_key_missing() {
+        let cfg = "[project]\ntype = \"rust\"\n";
+        assert!(parse_project_default_gates(cfg).is_empty());
+    }
+
+    #[test]
+    fn project_gates_empty_array_yields_none() {
+        let cfg = "[project]\ndefault_gates = []\n";
+        assert!(parse_project_default_gates(cfg).is_empty());
+    }
+
+    #[test]
+    fn project_gates_only_read_from_project_table() {
+        // A `default_gates` under a different table must be ignored.
+        let cfg = "[other]\ndefault_gates = [\"cargo_test\"]\n\n[project]\ntype = \"rust\"\n";
+        assert!(parse_project_default_gates(cfg).is_empty());
+    }
+
+    #[test]
+    fn project_gates_stop_at_next_table() {
+        let cfg = "[project]\ndefault_gates = [\"cargo_check\"]\n\n[severity]\nR1 = \"warning\"\n";
+        assert_eq!(parse_project_default_gates(cfg), vec!["cargo_check"]);
     }
 }
