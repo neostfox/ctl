@@ -66,6 +66,10 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-architecture-review/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-architecture-review/SKILL.md"),
         },
+        EmbeddedFile {
+            relative_path: "skills/ctl-cli-reference/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-cli-reference/SKILL.md"),
+        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
         // than being regenerated per project by ctl-spec-bootstrap. Closes the
