@@ -3962,6 +3962,7 @@ fn check_milestone_scope() -> Result<()> {
             "run",
             "schedule",
             "schema",
+            "skills",
             "task",
             "telemetry",
             "uncertainty",

@@ -1,51 +1,55 @@
-# Release Notes — ctl v0.0.3
+# Release Notes — ctl v0.0.4
 
-Follows **v0.0.2** (published 2026-06-16). `ctl --version` reports the built
-version from `CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml`
-(enforced by `release.yml`), and the npm `@ai-dev/ctl` meta-package plus its five
-platform packages carry the matching version.
+Follows **v0.0.3**. `ctl --version` reports the built version from
+`CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
+`release.yml`), and the npm `@ai-dev/ctl` meta-package plus its five platform
+packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
 
-## Included since 0.0.2
+## Included since 0.0.3
 
-- **OpenCode executor adapter + governed session** — `ctl run ingest --adapter
-  opencode`, `.opencode/plugins/ctl-gate.ts` gate plugin (Bun-tested in CI).
-- **Shared adapter conformance suite** — one contract asserted over every
-  registered adapter (`omp`, `opencode`); a half-wired adapter fails CI.
-- **Single managed control-guard protocol core + CI drift check** — the canonical
-  protocol (`.agent/protocols/control-guard.md`) is embedded verbatim in each
-  platform skill; drift fails CI.
-- **`ctl adapter list / status / doctor`** (adapter-doctor-v1) — read-only
-  diagnostics along two axes: `contract.*` (the runtime twin of the conformance
-  suite) and `platform.*` (skill presence, managed-protocol drift reusing the CI
-  checker, plugin/hook/config presence, opencode Bun tests under `--verify`).
-  Factual per-check status (`PASS / FAIL / WARN / UNKNOWN / NOT_TRACKED`) and
-  counts — **no composite health score**.
-- **Same-task E2E parity** (adapter-same-task-e2e-v1) — a deterministic,
-  model-free harness (`scripts/adapter_parity_e2e.sh`) drives the identical task
-  lifecycle through both adapters and confirms parity across lifecycle,
-  write-scope enforcement, evidence source, gate binding, audit, finish/archive,
-  and adapter-doctor before/after. See `ADAPTER_PARITY_E2E.md`.
-- **Executor policy version bound into `policy_hash`** — see below.
+- **Project default gate floor.** `ctl task create` / `ctl task quick` no longer
+  require `--gates`; when omitted they derive the floor from
+  `.ctl/config.toml [project].default_gates`. There is no hardcoded floor in ctl —
+  the `ctl-spec-bootstrap` skill analyzes the project and records the floor (it
+  mirrors what the project enforces: correctness + lint + formatting gates). A
+  project with no floor and no `--gates` errors clearly.
+- **Full Claude Code support.** `ctl init --platform <claude|opencode|omp|all>`
+  selects the integration to inject (interactive when no flag + TTY; the flag is
+  required in a non-interactive shell). `.claude/` now ships the governance hooks,
+  the control-guard entry/router, the six workflow skills + cli-reference, a
+  `CLAUDE.md` managed block with **read-only subagent dispatch routing**, and a
+  read-only `ctl-oracle` diagnostician agent.
+- **Single-sourced workflow skills + `ctl skills sync`.** Each workflow skill has
+  one source at `.agent/skills/<skill>/source.md` (frontmatter + shared body +
+  per-platform integration); `ctl skills sync` generates every platform's
+  `SKILL.md`, and `ctl skills sync --check` fails CI on drift. The managed core
+  stays byte-identical to the canonical protocol and the body identical across
+  platforms by construction.
+- **`ctl-cli-reference` skill** — a lifecycle-focused reference for the ctl CLI so
+  agents read docs instead of probing `--help`.
+- **`ctl prd init`** (PRD scaffold), **`ctl ralph`** (bounded read-only safety
+  supervisor for unattended runs — never spawns an executor or writes code), and
+  **`ctl handoff export`** (read-only portable task snapshot).
+- **TTL-gated run-lease expiry** and **`ctl repair --cross-ledger`** (detect/repair
+  task↔run inconsistencies; preview by default, `--apply` to act).
+- **M6 shared-`.git` hardening** — destructive git ops are denied while a run is
+  active.
+- **`.claude/config.toml` carve-out** — the project config is AI-writable under
+  governance (the canonical `.ctl/tasks` ledger stays protected); the
+  `PlatformSkill` model is decoupled from the executor-adapter registry so Claude
+  Code can host a drift-checked control-guard without being an adapter.
 
 ## Behavior notes
 
-- **Executor policy version in `policy_hash`.** `policy_hash` now folds in
-  `EXECUTOR_POLICY_VERSION` (the run-manifest contract + ingest scope check +
-  `validate_output` generation). Bumping it makes prior gate/audit evidence
-  stale (its `policy_hash` no longer matches `finish`'s recomputed value),
-  forcing re-run under the new executor policy. Replay is unaffected — recorded
-  hashes are read, never recomputed.
-- **Legacy model-backed resolved uncertainties.** A `model` oracle is ADVISORY
-  and **cannot** resolve an unknown; new model-backed resolve is rejected at the
-  command layer. Ledgers written before that rule may contain model-backed
-  `resolved` uncertainties — they remain replayable (append-only) and are
-  **disclosed as ADVISORY**, never as external proof.
-- **Durability.** Events are appended with an explicit `flush()` + `sync_all()`
-  (fsync) per line; a torn trailing record (e.g. from a crash mid-append) is
-  detected on read and repaired explicitly via `ctl repair` (dry-run by default,
-  `--apply` to truncate the torn tail) and surfaced by `ctl doctor`.
+- **Subagent dispatch under ctl (`.claude/subagent-dispatch.md`).** Read-only work
+  (investigation, search, research) is dispatched to read-only subagents; **writes
+  stay inline** in the main agent, which alone carries the active task's
+  `CTL_TASK_ID` binding and routes its tool calls through the gate. Whether a
+  subagent's tool calls reach the PreToolUse gate at all is a **host** behavior
+  that ctl does not control and treats as unverified; writable subagent roles are
+  therefore deferred. This is a disclosed posture, not a proof.
 
 ## Known limitations / non-claims
 

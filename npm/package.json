@@ -1,6 +1,6 @@
 {
   "name": "@ai-dev/ctl",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "AI Dev Control Plane CLI — deterministic task lifecycle, boundary enforcement, and gate validation",
   "bin": {
     "ctl": "./bin/ctl.js"
@@ -10,11 +10,11 @@
     "platforms/"
   ],
   "optionalDependencies": {
-    "@ai-dev/ctl-win32-x64-msvc": "0.0.3",
-    "@ai-dev/ctl-darwin-x64": "0.0.3",
-    "@ai-dev/ctl-darwin-arm64": "0.0.3",
-    "@ai-dev/ctl-linux-x64-gnu": "0.0.3",
-    "@ai-dev/ctl-linux-arm64-gnu": "0.0.3"
+    "@ai-dev/ctl-win32-x64-msvc": "0.0.4",
+    "@ai-dev/ctl-darwin-x64": "0.0.4",
+    "@ai-dev/ctl-darwin-arm64": "0.0.4",
+    "@ai-dev/ctl-linux-x64-gnu": "0.0.4",
+    "@ai-dev/ctl-linux-arm64-gnu": "0.0.4"
   },
   "keywords": [
     "ai",
