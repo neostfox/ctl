@@ -219,6 +219,29 @@ pub struct RepairOutcome {
     pub result: String,
 }
 
+/// GO / NO-GO verdict for the ralph unattended-supervisor loop
+/// (ralph-safe-run-v1). `go == true` means it is still safe to continue without
+/// a human; otherwise `blockers` lists every reason attention is due. Purely
+/// advisory and read-only — it never mutates and never spawns.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RalphVerdict {
+    pub go: bool,
+    pub blockers: Vec<String>,
+}
+
+/// Outcome of an explicit run-lease TTL-expiry attempt
+/// (capability-lease-ttl-enforce-v1). `outcome` is one of `expired`,
+/// `would_expire` (preview), `within_ttl` (refused — not stale), `not_active`,
+/// or `no_lease`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LeaseExpiryReport {
+    pub run_id: String,
+    pub outcome: String,
+    pub age_secs: Option<u64>,
+    pub ttl_secs: Option<u64>,
+    pub detail: String,
+}
+
 impl ControlApp {
     pub fn init(project_root: &Path) -> Result<Self> {
         let store = FileEventStore::init(project_root)?;
@@ -1977,6 +2000,58 @@ impl ControlApp {
         }))
     }
 
+    /// Read-only GO / NO-GO safety evaluation for an unattended (ralph)
+    /// supervisor loop: is it still safe to continue without a human? Composes
+    /// this session's guards — task hold/terminality, cross-ledger consistency,
+    /// shared-`.git` locks, and drift (next-action) — into one verdict. Appends
+    /// nothing; spawns nothing. The supervisor halts the moment this returns a
+    /// NO-GO; it is the envelope around an external run, never the executor.
+    pub fn ralph_safety_check(&self, task_id: &str) -> Result<RalphVerdict> {
+        let mut blockers = Vec::new();
+
+        let state = self.replay_task(task_id)?;
+        if state.is_held {
+            blockers.push("task is held — resolve the hold before resuming".to_string());
+        }
+        if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
+            blockers.push(format!(
+                "task is terminal ({:?}) — nothing left to supervise",
+                state.phase
+            ));
+        }
+
+        let cross_ledger = self.cross_ledger_findings()?;
+        if !cross_ledger.is_empty() {
+            blockers.push(format!(
+                "{} cross-ledger inconsistency(ies) — run `ctl repair --cross-ledger`",
+                cross_ledger.len()
+            ));
+        }
+
+        let risk = crate::infrastructure::workspace::scan_shared_git_risk(&self.project_root);
+        if risk.any() {
+            blockers.push(format!(
+                "shared .git lock present: {}",
+                risk.descriptions().join("; ")
+            ));
+        }
+
+        // Drift: anything other than Pass means a human decision is due.
+        let na = self.next_action(task_id)?;
+        if !matches!(na.action, crate::domain::drift::NextActionKind::Pass) {
+            blockers.push(format!(
+                "drift next-action is {} ({})",
+                na.action.as_str(),
+                na.rationale
+            ));
+        }
+
+        Ok(RalphVerdict {
+            go: blockers.is_empty(),
+            blockers,
+        })
+    }
+
     // ── Queries ──
 
     pub fn get_status(&self, task_id: &str) -> Result<TaskState> {
@@ -2555,6 +2630,10 @@ impl ControlApp {
     pub fn workspace_apply(&self, task_id: &str) -> Result<Event> {
         // Expire any stale leases before applying
         let _ = self.expire_stale_leases(task_id);
+        // Record expiry of any stale approvals before the approval gate below, so
+        // the ledger reflects the transition rather than the gate lazily reading a
+        // still-"granted" approval as invalid (mirrors lease expiry above).
+        let _ = self.expire_stale_approvals(task_id);
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::InProgress {
             return Err(anyhow!(
@@ -2621,7 +2700,7 @@ impl ControlApp {
             });
             if !has_valid_approval {
                 return Err(anyhow!(
-                    "High-risk change '{}' on '{}' requires valid approval (not expired). Rule: APPROVAL-001. Grant with: control approval grant --id {} --request <request_id>",
+                    "High-risk change '{}' on '{}' requires valid approval (not expired). Rule: APPROVAL-001. Grant with: ctl approval grant --id {} --request <request_id>",
                     risk_type, path, task_id
                 ));
             }
@@ -3472,6 +3551,110 @@ impl ControlApp {
         self.append_run_event_locked(&store, run_id, event)
     }
 
+    /// Explicitly expire a run's lease **iff** it is past its wall-clock TTL
+    /// (capability-lease-ttl-enforce-v1). Operator-invoked only — TTL is never
+    /// auto-expired in a read path (that would make replay non-deterministic;
+    /// it stays report-only in `recover`). This is the explicit, recorded
+    /// counterpart: it refuses to touch a within-TTL or non-Active lease, and on
+    /// `apply` appends a single `lease_expired` event. It does NOT terminate the
+    /// run or any process — winding the run down is a separate `run recover
+    /// --abort`. Preview unless `apply`.
+    pub fn expire_run_lease(&self, run_id: &str, apply: bool) -> Result<LeaseExpiryReport> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.expire_run_lease_at(run_id, now, apply)
+    }
+
+    /// Testable core of [`expire_run_lease`] with an injected `now_epoch`.
+    fn expire_run_lease_at(
+        &self,
+        run_id: &str,
+        now_epoch: u64,
+        apply: bool,
+    ) -> Result<LeaseExpiryReport> {
+        let store = self.run_store()?;
+        let run = self.replay_run(run_id)?;
+        let mut report = LeaseExpiryReport {
+            run_id: run_id.to_string(),
+            outcome: String::new(),
+            age_secs: None,
+            ttl_secs: None,
+            detail: String::new(),
+        };
+
+        let lease = match &run.lease {
+            Some(l) => l,
+            None => {
+                report.outcome = "no_lease".to_string();
+                report.detail = "run holds no native lease (legacy or never started)".to_string();
+                return Ok(report);
+            }
+        };
+        report.ttl_secs = Some(lease.ttl_seconds);
+
+        if lease.status != crate::domain::lease::LeaseStatus::Active {
+            report.outcome = "not_active".to_string();
+            report.detail = format!(
+                "lease is already {} — nothing to expire",
+                lease.status.token()
+            );
+            return Ok(report);
+        }
+
+        // Wall-clock age from the lease_created event's occurred_at in THIS run's
+        // stream — the same source `recover_report` uses for `lease_stale`.
+        let events = store.read_for_run(run_id)?;
+        let created_epoch = event_occurred_at_by_seq(&events, lease.created_at_seq)
+            .and_then(|s| parse_iso8601_to_epoch(&s));
+        report.age_secs = created_epoch.map(|c| now_epoch.saturating_sub(c));
+
+        let stale = created_epoch
+            .map(|c| ttl_exceeded(now_epoch, c, lease.ttl_seconds))
+            .unwrap_or(false);
+        if !stale {
+            report.outcome = "within_ttl".to_string();
+            report.detail = format!(
+                "lease within TTL (age {}s ≤ ttl {}s) — refusing to expire a fresh lease",
+                report.age_secs.unwrap_or(0),
+                lease.ttl_seconds
+            );
+            return Ok(report);
+        }
+
+        if !apply {
+            report.outcome = "would_expire".to_string();
+            report.detail = format!(
+                "lease is past TTL (age {}s > ttl {}s) — re-run with --apply to record lease_expired",
+                report.age_secs.unwrap_or(0),
+                lease.ttl_seconds
+            );
+            return Ok(report);
+        }
+
+        // Apply: append a single lease_expired under the per-run lock.
+        let lease_id = lease.lease_id.clone();
+        let _lock = if self.dry_run {
+            None
+        } else {
+            Some(store.lock_run(run_id)?)
+        };
+        let event = self.build_run_event(
+            run_id,
+            "lease_expired",
+            serde_json::json!({ "lease_id": lease_id, "reason": "ttl_exceeded" }),
+        )?;
+        self.append_run_event_locked(&store, run_id, event)?;
+        report.outcome = "expired".to_string();
+        report.detail = format!(
+            "recorded lease_expired (age {}s > ttl {}s)",
+            report.age_secs.unwrap_or(0),
+            lease.ttl_seconds
+        );
+        Ok(report)
+    }
+
     // ── M6: crash recovery (slice 2) — read-only detection + explicit abort ──
 
     /// Crash-recovery snapshot of every `Running` run: whether its isolated
@@ -3988,6 +4171,44 @@ impl ControlApp {
                         });
                         let event = self.build_event(task_id, "lease_expired", payload)?;
                         self.validate_and_append(&event)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `approval_expired` for any granted approval whose TTL has elapsed.
+    ///
+    /// Mirrors `expire_stale_leases`. Without this, an expired approval was only
+    /// ever *read* as invalid at the apply gate (lazy invalidation) and the ledger
+    /// never recorded the expiry transition — the `approval_expired` event and the
+    /// `ApprovalStatus::Expired` state were reachable only via replay/tests.
+    /// Idempotent: once expired, `is_granted()` is false, so a subsequent call
+    /// skips it (no duplicate event). The schema for `approval_expired` permits
+    /// only `request_id`, so no `reason` field is emitted.
+    fn expire_stale_approvals(&self, task_id: &str) -> Result<()> {
+        let state = self.replay_task(task_id)?;
+        let events = self.store.read_for_task(task_id)?;
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        for approval in state.pending_approvals.values() {
+            if !approval.is_granted() {
+                continue;
+            }
+            if let Some(granted_seq) = approval.granted_at_seq {
+                if let Some(granted_at_str) = event_occurred_at_by_seq(&events, granted_seq) {
+                    if let Some(granted_epoch) = parse_iso8601_to_epoch(&granted_at_str) {
+                        if now_epoch.saturating_sub(granted_epoch) > approval.ttl_seconds {
+                            let payload = serde_json::json!({
+                                "request_id": approval.request_id,
+                            });
+                            let event = self.build_event(task_id, "approval_expired", payload)?;
+                            self.validate_and_append(&event)?;
+                        }
                     }
                 }
             }
@@ -4517,6 +4738,13 @@ fn epoch_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
         (time_secs % 3600) / 60,
         time_secs % 60,
     )
+}
+
+/// True iff a lease created at `created_epoch` is past its `ttl` at `now_epoch`.
+/// Pure (the wall clock is read by the caller) so it is unit-testable; mirrors
+/// the staleness check in `recover_report` (strictly greater than the TTL).
+fn ttl_exceeded(now_epoch: u64, created_epoch: u64, ttl: u64) -> bool {
+    now_epoch.saturating_sub(created_epoch) > ttl
 }
 
 /// Parse a simple ISO 8601 UTC string (YYYY-MM-DDTHH:MM:SSZ) to Unix epoch seconds.
@@ -6074,6 +6302,146 @@ mod tests {
         );
     }
 
+    // ── ralph safety supervisor (ralph-safe-run-v1) ──
+
+    #[test]
+    fn ralph_safety_go_on_clean_active_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(v.go, "clean active task is GO, blockers: {:?}", v.blockers);
+    }
+
+    #[test]
+    fn ralph_safety_nogo_on_terminal_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.cancel_task("t1").unwrap();
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(!v.go);
+        assert!(
+            v.blockers.iter().any(|b| b.contains("terminal")),
+            "blockers: {:?}",
+            v.blockers
+        );
+    }
+
+    #[test]
+    fn ralph_safety_nogo_on_cross_ledger_drift() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        // A stranded/orphan run anywhere is a global cross-ledger inconsistency.
+        seed_running_run(&app, "ghost-task", &["other"]);
+        let v = app.ralph_safety_check("t1").unwrap();
+        assert!(!v.go);
+        assert!(
+            v.blockers.iter().any(|b| b.contains("cross-ledger")),
+            "blockers: {:?}",
+            v.blockers
+        );
+    }
+
+    // ── run-lease TTL expiry (capability-lease-ttl-enforce-v1) ──
+
+    #[test]
+    fn ttl_exceeded_is_strictly_greater() {
+        assert!(ttl_exceeded(100, 0, 50)); // age 100 > 50
+        assert!(!ttl_exceeded(40, 0, 50)); // age 40 < 50
+        assert!(!ttl_exceeded(50, 0, 50)); // age 50 == 50 (not strictly greater)
+        assert!(!ttl_exceeded(0, 1000, 50)); // now before created → age 0 (saturating)
+    }
+
+    /// Seed a Running run carrying a genuine native lease (lease_created +
+    /// lease_used + run_started), satisfying the run reducer's binding rules.
+    fn seed_run_with_native_lease(app: &ControlApp, run_id: &str, task_id: &str, ttl: u64) {
+        let ev = |app: &ControlApp, ty: &str, p: serde_json::Value| {
+            let e = app.build_run_event(run_id, ty, p).unwrap();
+            app.append_run_event(run_id, e).unwrap();
+        };
+        ev(
+            app,
+            "run_created",
+            serde_json::json!({"task_id": task_id, "adapter": "omp", "write_allow": ["src"],
+                "write_deny": [], "gates": ["cargo_check"]}),
+        );
+        ev(
+            app,
+            "lease_created",
+            serde_json::json!({"lease_id": "L1", "run_id": run_id, "resource_path": "src",
+                "action": "write", "ttl_seconds": ttl, "max_uses": 100,
+                "task_id": task_id, "adapter": "omp", "scopes": ["src"]}),
+        );
+        ev(app, "lease_used", serde_json::json!({"lease_id": "L1"}));
+        ev(
+            app,
+            "run_started",
+            serde_json::json!({"worktree_path": format!(".ctl/runs/{run_id}/worktree"), "lease_id": "L1"}),
+        );
+    }
+
+    const FAR_FUTURE: u64 = 10_000_000_000; // year ~2286 — well past any lease TTL
+
+    #[test]
+    fn expire_lease_records_lease_expired_when_stale() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        let report = app.expire_run_lease_at("r1", FAR_FUTURE, true).unwrap();
+        assert_eq!(report.outcome, "expired", "{}", report.detail);
+        // The lease is now terminally Expired.
+        let run = app.replay_run("r1").unwrap();
+        assert_eq!(
+            run.lease.unwrap().status,
+            crate::domain::lease::LeaseStatus::Expired
+        );
+    }
+
+    #[test]
+    fn expire_lease_preview_does_not_mutate() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        let before = app.replay_run("r1").unwrap().last_seq;
+        let report = app.expire_run_lease_at("r1", FAR_FUTURE, false).unwrap();
+        assert_eq!(report.outcome, "would_expire", "{}", report.detail);
+        assert_eq!(
+            app.replay_run("r1").unwrap().last_seq,
+            before,
+            "preview must not append"
+        );
+        assert_eq!(
+            app.replay_run("r1").unwrap().lease.unwrap().status,
+            crate::domain::lease::LeaseStatus::Active
+        );
+    }
+
+    #[test]
+    fn expire_lease_refuses_within_ttl() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_run_with_native_lease(&app, "r1", "t1", 3600);
+        // now before created → age 0 → not stale.
+        let report = app.expire_run_lease_at("r1", 1, false).unwrap();
+        assert_eq!(report.outcome, "within_ttl", "{}", report.detail);
+    }
+
+    #[test]
+    fn expire_lease_no_native_lease() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        seed_running_run(&app, "t1", &["src"]); // legacy run, no native lease
+        let runs = app.run_store().unwrap().run_ids().unwrap();
+        let report = app.expire_run_lease_at(&runs[0], FAR_FUTURE, true).unwrap();
+        assert_eq!(report.outcome, "no_lease", "{}", report.detail);
+    }
+
     #[test]
     fn create_run_requires_in_progress_task() {
         let dir = TempDir::new();
@@ -6457,6 +6825,57 @@ mod tests {
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].lease_status, "REVOKED");
         assert!(report[0].lease_nonactive);
+    }
+
+    #[test]
+    fn expire_stale_approvals_records_approval_expired_and_is_idempotent() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "t", &["src"]);
+
+        // Request and grant an approval, but backdate the grant far past its TTL
+        // so the wall-clock expiry check fires deterministically.
+        let req = app
+            .approval_request(
+                "t",
+                "high-risk edit",
+                serde_json::json!({ "high_risk_files": ["src/x.rs"] }),
+                1,
+            )
+            .unwrap();
+        let request_id = req.payload["request_id"].as_str().unwrap().to_string();
+
+        let mut granted = app
+            .build_event(
+                "t",
+                "approval_granted",
+                serde_json::json!({ "request_id": request_id }),
+            )
+            .unwrap();
+        granted.occurred_at = "2020-01-01T00:00:00Z".to_string();
+        app.validate_and_append(&granted).unwrap();
+        app.rebuild_task_view("t").unwrap();
+
+        // Precondition: the approval reads as Granted before expiry runs.
+        let before = app.replay_task("t").unwrap();
+        assert_eq!(
+            before.pending_approvals[&request_id].status,
+            crate::domain::approval::ApprovalStatus::Granted
+        );
+        let seq_before = before.last_seq;
+
+        // Expiry records an explicit approval_expired event and transitions state.
+        app.expire_stale_approvals("t").unwrap();
+        let after = app.replay_task("t").unwrap();
+        assert_eq!(
+            after.pending_approvals[&request_id].status,
+            crate::domain::approval::ApprovalStatus::Expired
+        );
+        assert_eq!(after.last_seq, seq_before + 1);
+
+        // Idempotent: a second pass appends nothing (the approval is no longer granted).
+        app.expire_stale_approvals("t").unwrap();
+        assert_eq!(app.replay_task("t").unwrap().last_seq, seq_before + 1);
     }
 
     // ── M6: crash recovery (slice 2) ────────────────────────────────────────

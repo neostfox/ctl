@@ -4,7 +4,7 @@
 ## Project Identity
 
 - **Name**: `ai-dev-control-plane`
-- **Binary**: `control` (Rust CLI, `src/main.rs` → `cli::run()`)
+- **Binary**: `ctl` (Rust CLI, `src/main.rs` → `cli::run()`)
 - **Purpose**: Local-first, deterministic AI development control layer. Governs task lifecycle, boundary enforcement, and gate validation for AI-assisted coding.
 - **NOT**: A model executor, remote orchestration platform, daemon, or web service.
 
@@ -18,9 +18,11 @@ src/
   infrastructure/
     store/          → FileEventStore (events.jsonl read/append, task.json projection)
     boundary/       → PathNormalizer (reject escape, UNC, symlinks, protected paths)
-    gates/          → GateTemplate registry + M0 stub runner
+    gates/          → GateTemplate registry + live gate runner (cargo_check/test/fmt/clippy)
+    workspace/      → worktree isolation, diff/apply changesets (M4)
+    skills/         → embedded skills/hooks injected by `ctl init`
     schema_validator.rs → JSON Schema validation against schemas/
-  adapters/manual/  → Reserved for M3 manual adapter
+  adapters/         → manual (M3), omp + opencode (M4) executor adapters
 ```
 
 **Dependency direction** (inviolable):
@@ -47,7 +49,7 @@ control.json   = reconcile projection — per-task board + M5 drift/next-action 
 
 ## Milestone Gate
 
-Current milestone scope: **M0–M3**.
+Current scope (0.0.3): **M0–M6 shipped + hard review layer (M-a…M-g) + V1 cognitive layer**.
 
 | Milestone | Focus | Key Constraint |
 |-----------|-------|----------------|
@@ -55,19 +57,26 @@ Current milestone scope: **M0–M3**.
 | M1 | Local task ledger | `events.jsonl` CRUD lifecycle |
 | M2 | Validation, boundary, archive | Scope check, gate runner, finish interlock |
 | M3 | Manual closed-loop MVP | `manual` adapter, assignment/evidence flow |
+| M4 | Isolated single-executor run | worktree + scoped lease + approval; omp/opencode adapters |
+| M5 | Explainable control loop | telemetry evidence, drift engine, `ctl board`, `next-action` |
+| M6 | Restricted multi-agent | AgentRun aggregate, concurrent runs, crash/merge recovery, lease wiring |
+| M-a…M-g | Hard review layer | multi-active gate, `control.json`, cross-task overlap/deps, dispatch binding, hard review gate, commit interlock |
+| V1 | Cognitive layer | brainstorm / uncertainty / research / handoff / prd / ralph (record-and-disclose) |
 
-**Hard stops** (ARCHITECTURE_GUARDRAILS.md):
-- M3 before any auto-agent execution.
-- No async runtime, HTTP client, database, Web UI, or daemon before M3.
-- No `AgentRun` aggregate before M6.
+**Invariant (unchanged across all milestones)**: `ctl` NEVER spawns an executor or writes
+code — it plans, governs, and ingests results; an external executor (OMP/opencode) drives runs.
+
+**Standing hard stops** (ARCHITECTURE_GUARDRAILS.md):
+- No async runtime, HTTP client, database, Web UI, or daemon in the `ctl` core.
+- Dependencies stay minimal (see Forbidden below).
 
 ## Key Conventions
 
 1. **Events**: Strict ascending `seq`, idempotent `command_id`, schema `control.event-envelope.v1`.
 2. **Reducer**: Pure function `apply(&mut TaskState, &Event)`. No side effects. State machine: `Planning → Ready → InProgress → Review → Completed` (plus `Cancelled`).
 3. **Hold**: Orthogonal to phase. Violation, gate failure, or human pause triggers hold. No `start`/`submit`/`finish` while held.
-4. **Gates**: Only predefined templates (`cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`). M0 does NOT execute gates — runner is stubbed.
-5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git/`, `.ctl/tasks/*/events.jsonl`, `schemas/`, `Cargo.toml`).
+4. **Gates**: Only predefined templates (`cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
+5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md` and `.ctl/scripts`.
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
 
 ## Spec & Documentation
@@ -78,20 +87,22 @@ Current milestone scope: **M0–M3**.
 - `ROADMAP.md` — Milestone definitions, exit criteria, and decisions.
 - `schemas/` — JSON Schema contracts (Draft 2020-12, `unevaluatedProperties: false`).
 
-## Commands (M0–M1 Surface)
+## Commands (core subset — run `ctl --help` for the full surface)
+
+The full CLI spans task lifecycle, gates, context, assignment, run/workspace/approval (M4),
+schedule/agent-report (M6), telemetry/drift/next-action (M5), review/apply (hard gate), and the
+V1 layer (brainstorm/uncertainty/research/handoff/prd/ralph). Core entry points:
 
 ```text
 ctl init
 ctl task create --id <id> --objective <text> --read-scope <path> --write-allow <path> --gates <gate>
-ctl task revise --id <id> [boundary fields]
-ctl task ready --id <id>
-ctl task status --id <id>
-ctl replay [--task <id>]
-ctl validate
-ctl doctor
+ctl task quick --write-allow <path>          # fuse create+ready+start
+ctl task ready|start|submit|finish|archive --id <id>
+ctl gate run --id <id> --gate <template>
+ctl board [--json]                            # cross-task control board
+ctl replay [--task <id>] | ctl validate | ctl doctor
 ctl schema validate --file <path>
-ctl boundary check --path <path>
-ctl boundary explain --path <path>
+ctl boundary check|explain --path <path>
 ctl architecture check
 ```
 
@@ -99,8 +110,8 @@ ctl architecture check
 
 - Modifying `events.jsonl` entries in-place (append-only).
 - Writing `task.json` by hand or via agent.
-- Adding dependencies beyond: `clap`, `serde`/`serde_json`, `anyhow`. (See DEP-001..DEP-004.)
-- Introducing `tokio`, `reqwest`, or any async runtime before M3.
+- Adding dependencies beyond: `clap`, `serde`/`serde_json`, `anyhow`, `sha2`, and `libc` (unix-only, for process-group signalling). (See DEP-001..DEP-004.)
+- Introducing `tokio`, `reqwest`, or any async runtime into the `ctl` core.
 - Skipping phase transitions (e.g., `Planning → InProgress` without `Ready`).
 
 Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
