@@ -307,7 +307,7 @@ enum TaskKindArg {
 /// Which agent platform `ctl init` wires up.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PlatformArg {
-    /// Claude Code — governance hooks + settings under `.claude/`
+    /// Claude Code — governance hooks, settings + workflow skills under `.claude/`
     Claude,
     /// opencode — gate plugin, subagent roles, skill mirror under `.opencode/`
     Opencode,
@@ -1267,7 +1267,10 @@ fn inject_platform(p: PlatformArg, project_root: &Path) -> Result<()> {
     }
     if matches!(p, PlatformArg::Claude | PlatformArg::All) {
         let n = skills::inject_claude(project_root)?;
-        println!("  .claude/   {} (governance hooks + settings)", injected(n));
+        println!(
+            "  .claude/   {} (hooks + settings + workflow skills)",
+            injected(n)
+        );
     }
     if matches!(p, PlatformArg::Opencode | PlatformArg::All) {
         let n = skills::inject_opencode(project_root)?;

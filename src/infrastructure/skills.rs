@@ -159,6 +159,36 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "settings.json",
             content: include_str!("../../.claude/settings.json"),
         },
+        // Workflow skill mirror (Claude Code format): same managed core + phase
+        // body as the OMP/opencode copies, drift-checked by workflow_protocol_sync.
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-grill-with-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-prd/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-to-prd/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-to-tasks/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-tdd-loop/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-tdd-loop/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-handoff/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-handoff/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-architecture-review/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-architecture-review/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-cli-reference/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
+        },
     ]
 }
 
@@ -337,11 +367,22 @@ mod tests {
     }
 
     #[test]
-    fn inject_claude_ships_hooks_and_settings_only() {
+    fn inject_claude_ships_hooks_settings_and_workflow_skills() {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
-        assert_eq!(n, 3, "claude injects exactly the 3 integration files");
-        for f in ["hooks/ctl-context.py", "hooks/ctl-gate.py", "settings.json"] {
+        assert_eq!(n, 10, "claude injects 3 integration files + 7 skills");
+        for f in [
+            "hooks/ctl-context.py",
+            "hooks/ctl-gate.py",
+            "settings.json",
+            "skills/ctl-grill-with-spec/SKILL.md",
+            "skills/ctl-to-prd/SKILL.md",
+            "skills/ctl-to-tasks/SKILL.md",
+            "skills/ctl-tdd-loop/SKILL.md",
+            "skills/ctl-handoff/SKILL.md",
+            "skills/ctl-architecture-review/SKILL.md",
+            "skills/ctl-cli-reference/SKILL.md",
+        ] {
             assert!(
                 d.path.join(".claude").join(f).exists(),
                 "claude init must ship {f}"
@@ -527,6 +568,44 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             path: ".opencode/skills/ctl-architecture-review/SKILL.md",
             platform_marker: "opencode Integration",
         },
+        // Claude Code mirror: same managed core + phase body, only the
+        // `## Claude Code Integration` section differs (drift-checked below).
+        WorkflowSkill {
+            skill: "ctl-grill-with-spec",
+            platform: "claude",
+            path: ".claude/skills/ctl-grill-with-spec/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-prd",
+            platform: "claude",
+            path: ".claude/skills/ctl-to-prd/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-to-tasks",
+            platform: "claude",
+            path: ".claude/skills/ctl-to-tasks/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-tdd-loop",
+            platform: "claude",
+            path: ".claude/skills/ctl-tdd-loop/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-handoff",
+            platform: "claude",
+            path: ".claude/skills/ctl-handoff/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-architecture-review",
+            platform: "claude",
+            path: ".claude/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
     ]
 }
 
@@ -549,11 +628,15 @@ pub fn workflow_phase_body(skill: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("workflow-core end marker not found"))?;
     // Cut at whichever platform integration heading is present. These exact
     // headings are emitted by every workflow skill.
-    let cut = ["\n## OMP Integration", "\n## opencode Integration"]
-        .iter()
-        .filter_map(|h| after.find(h))
-        .min()
-        .unwrap_or(after.len());
+    let cut = [
+        "\n## OMP Integration",
+        "\n## opencode Integration",
+        "\n## Claude Code Integration",
+    ]
+    .iter()
+    .filter_map(|h| after.find(h))
+    .min()
+    .unwrap_or(after.len());
     Ok(normalize_protocol(&after[..cut]))
 }
 
@@ -1012,6 +1095,13 @@ mod workflow_protocol_sync {
                 omp, oc,
                 "{skill}: phase body drifted between OMP and OpenCode"
             );
+            // The Claude Code mirror (when present) must share the same body.
+            if let Some(claude) = per_platform.get("claude") {
+                assert_eq!(
+                    omp, claude,
+                    "{skill}: phase body drifted between OMP and Claude Code"
+                );
+            }
             assert!(!omp.is_empty(), "{skill}: phase body is empty");
         }
     }
