@@ -7099,6 +7099,32 @@ mod tests {
     }
 
     #[test]
+    fn finish_drops_run_from_recover_report() {
+        // run-finish-emit-v1: the production finish path (now reachable via
+        // `ctl run finish`) drives a Running run to Completed and out of the open
+        // run / recovery view — the B2 fix (a prod run can finally reach Finished).
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let r = seed_running_run(&app, "t", &["src"]);
+        assert_eq!(
+            app.recover_report().unwrap().len(),
+            1,
+            "a Running run shows as open before finish"
+        );
+        app.finish_run(&r).unwrap();
+        assert_eq!(app.replay_run(&r).unwrap().phase, RunPhase::Completed);
+        assert!(
+            app.recover_report().unwrap().is_empty(),
+            "a finished run is no longer open/stranded"
+        );
+        // Reducer guard: finishing an already-terminal run is rejected.
+        assert!(
+            app.finish_run(&r).is_err(),
+            "only a Running run can be finished"
+        );
+    }
+
+    #[test]
     fn orphaned_worktrees_lists_terminal_run_leftover() {
         let dir = TempDir::new();
         let app = ControlApp::init(dir.path()).unwrap();

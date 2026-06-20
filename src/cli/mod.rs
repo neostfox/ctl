@@ -920,6 +920,17 @@ enum RunCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Finish a Running run aggregate (M6): record `run_finished` so the run
+    /// reaches Completed on its ledger and stops showing as an open/stranded run
+    /// in recovery. Revokes the lease and cleans up the worktree if still present.
+    /// The reducer enforces the guard: only a Running run can be finished. This is
+    /// the production caller `run_finished` previously lacked (the symmetric
+    /// counterpart to `run recover --abort`).
+    Finish {
+        /// Run id to finish.
+        #[arg(long)]
+        run: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2512,6 +2523,14 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                     println!("Re-run with --apply to record lease_expired.");
                 }
             }
+        }
+        RunCommands::Finish { run } => {
+            app.finish_run(run)?;
+            println!(
+                "Finished run '{}' — phase is now Completed; lease revoked and worktree \
+                 cleaned up if present. It no longer shows as an open run in recovery.",
+                run
+            );
         }
     }
     Ok(())
