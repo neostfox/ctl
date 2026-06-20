@@ -723,6 +723,15 @@ pub fn platform_skill_for(adapter: &str) -> Option<&'static PlatformSkill> {
         .find(|p| p.adapter == Some(adapter))
 }
 
+/// The platform wiring identified by display `label`, regardless of whether it
+/// backs an executor adapter. Unlike [`platform_skill_for`] — which keys on the
+/// adapter and so cannot reach a platform with `adapter: None` — this finds
+/// platforms like Claude Code, so `ctl adapter doctor` can diagnose their host
+/// wiring (the runtime gaps the drift tests, which check skill TEXT, don't see).
+pub fn platform_skill_by_label(label: &str) -> Option<&'static PlatformSkill> {
+    platform_skills().iter().find(|p| p.label == label)
+}
+
 /// Normalize protocol text for comparison: LF endings, trailing per-line
 /// whitespace stripped, leading/trailing blank lines trimmed — tolerant of
 /// insertion whitespace, strict on content.

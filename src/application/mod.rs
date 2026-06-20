@@ -4549,15 +4549,28 @@ pub fn adapter_status_diagnostic(
     crate::adapters::AdapterDiagnostic::new(adapter_name, resolved, checks)
 }
 
-/// Diagnose every registered adapter (registry order). Factual report only.
+/// Diagnose every registered adapter (registry order), plus the Claude Code hook
+/// platform when this project wires it. Factual report only.
 pub fn adapter_doctor_report(
     project_root: &std::path::Path,
     verify: bool,
 ) -> crate::adapters::AdapterDoctorReport {
-    let adapters = crate::adapters::supported_adapters()
-        .iter()
-        .map(|name| adapter_status_diagnostic(project_root, name, verify))
-        .collect();
+    let mut adapters: Vec<crate::adapters::AdapterDiagnostic> =
+        crate::adapters::supported_adapters()
+            .iter()
+            .map(|name| adapter_status_diagnostic(project_root, name, verify))
+            .collect();
+    // Claude Code is a hook/skills platform, not an executor adapter
+    // (`adapter: None`), so it is absent from `supported_adapters()` and the loop
+    // above never reaches it — yet it carries the most runtime wiring (gate +
+    // context hooks + a PreToolUse matcher). When this project wires Claude
+    // (`.claude/` present) surface that wiring as a non-adapter diagnostic so the
+    // runtime gaps the drift tests (skill TEXT only) cannot observe (D2) become
+    // visible. Absent `.claude/` → Claude is not this project's platform, so the
+    // report is left exactly as before.
+    if project_root.join(".claude").is_dir() {
+        adapters.push(claude_platform_diagnostic(project_root));
+    }
     crate::adapters::AdapterDoctorReport::new(adapters)
 }
 
@@ -4574,6 +4587,120 @@ fn presence_check(
     } else {
         AdapterCheck::new(name, missing, format!("missing: {rel}"))
     }
+}
+
+/// The PreToolUse matcher the Claude gate must register — exactly the mutating
+/// tools `ctl-gate.py` claims to govern. (Bash fails open and Task is unmatched
+/// by design; those are platform boundaries, not matcher gaps — see
+/// `.claude/subagent-dispatch.md`.)
+const CLAUDE_PRETOOLUSE_MATCHER: &str = "Write|Edit|MultiEdit|Bash";
+
+/// Evaluate the `.claude/settings.json` PreToolUse matcher from its raw content.
+/// Pure (string in, status + detail out) so the parse/verdict logic is unit
+/// tested without touching the filesystem.
+///
+/// PASS when a PreToolUse hook group registers exactly the expected matcher;
+/// WARN when settings exist but no matching PreToolUse hook is wired (mutating
+/// tools may be ungated); UNKNOWN when settings are absent or unparseable
+/// (cannot evaluate). Never FAIL — Claude is an optional hook platform, so a
+/// wiring gap is surfaced, not made fatal.
+fn evaluate_pretooluse_matcher(
+    settings_json: Option<&str>,
+) -> (crate::adapters::CheckStatus, String) {
+    use crate::adapters::CheckStatus;
+    let content = match settings_json {
+        Some(c) => c,
+        None => {
+            return (
+                CheckStatus::Unknown,
+                "missing: .claude/settings.json — cannot evaluate PreToolUse matcher".to_string(),
+            )
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                CheckStatus::Unknown,
+                ".claude/settings.json is not valid JSON — cannot evaluate matcher".to_string(),
+            )
+        }
+    };
+    let matchers: Vec<String> = json
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(|g| g.get("matcher").and_then(|m| m.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if matchers.iter().any(|m| m == CLAUDE_PRETOOLUSE_MATCHER) {
+        (
+            CheckStatus::Pass,
+            format!("PreToolUse gates {CLAUDE_PRETOOLUSE_MATCHER}"),
+        )
+    } else if matchers.is_empty() {
+        (
+            CheckStatus::Warn,
+            "no PreToolUse hook registered in .claude/settings.json — mutating tools may be ungated"
+                .to_string(),
+        )
+    } else {
+        (
+            CheckStatus::Warn,
+            format!(
+                "PreToolUse matcher(s) {matchers:?} do not equal {CLAUDE_PRETOOLUSE_MATCHER:?} — some mutating tools may be ungated"
+            ),
+        )
+    }
+}
+
+/// Read `.claude/settings.json` and check its PreToolUse matcher.
+fn claude_pretooluse_matcher_check(root: &std::path::Path) -> crate::adapters::AdapterCheck {
+    let content = std::fs::read_to_string(root.join(".claude").join("settings.json")).ok();
+    let (status, detail) = evaluate_pretooluse_matcher(content.as_deref());
+    crate::adapters::AdapterCheck::new("platform.claude_pretooluse_matcher", status, detail)
+}
+
+/// Diagnose the Claude Code hook platform: gate/context hooks + settings present
+/// and the PreToolUse matcher correct. `resolved = false` — Claude hosts a
+/// control-guard but is NOT a resolvable executor adapter, so this keeps
+/// `adapter: None` intact (Claude never enters `supported_adapters()` or
+/// `adapter_for`). Missing files are WARN, never FAIL: a project may legitimately
+/// not wire Claude.
+fn claude_platform_diagnostic(root: &std::path::Path) -> crate::adapters::AdapterDiagnostic {
+    use crate::adapters::{AdapterDiagnostic, CheckStatus};
+    // Source the gate-hook path from the single platform registry (it is keyed by
+    // label since Claude's `adapter` is None); fall back to the canonical path so
+    // the check still runs if the row is ever renamed.
+    let gate_hook = crate::infrastructure::skills::platform_skill_by_label("Claude Code")
+        .map(|ps| ps.entry_point)
+        .unwrap_or(".claude/hooks/ctl-gate.py");
+    let checks = vec![
+        presence_check(
+            root,
+            "platform.claude_gate_hook_present",
+            gate_hook,
+            CheckStatus::Warn,
+        ),
+        presence_check(
+            root,
+            "platform.claude_context_hook_present",
+            ".claude/hooks/ctl-context.py",
+            CheckStatus::Warn,
+        ),
+        presence_check(
+            root,
+            "platform.claude_settings_present",
+            ".claude/settings.json",
+            CheckStatus::Warn,
+        ),
+        claude_pretooluse_matcher_check(root),
+    ];
+    AdapterDiagnostic::new("claude", false, checks)
 }
 
 /// Platform-integration checks for one adapter. An adapter with no registered
@@ -8036,7 +8163,7 @@ mod tests {
 mod adapter_doctor_tests {
     //! adapter-doctor-v1 platform-integration assembly, exercised against the
     //! real repo root (the dogfooding checkout ships every platform file).
-    use super::{adapter_doctor_report, adapter_status_diagnostic};
+    use super::{adapter_doctor_report, adapter_status_diagnostic, evaluate_pretooluse_matcher};
     use crate::adapters::{supported_adapters, CheckStatus};
     use std::path::PathBuf;
 
@@ -8057,10 +8184,12 @@ mod adapter_doctor_tests {
     #[test]
     fn doctor_over_repo_root_has_no_failures_and_is_factual() {
         let report = adapter_doctor_report(&repo_root(), false);
-        assert_eq!(report.total, supported_adapters().len());
+        // The supported executor adapters + the Claude hook platform (the repo
+        // wires `.claude/`, so its non-adapter diagnostic is appended).
+        assert_eq!(report.total, supported_adapters().len() + 1);
         assert_eq!(
             report.healthy, report.total,
-            "no adapter should FAIL in-repo"
+            "no adapter or platform should FAIL in-repo"
         );
         assert_eq!(report.failed, 0);
         // Bun plugin tests must NOT be run by default → at least one NOT_TRACKED.
@@ -8135,6 +8264,74 @@ mod adapter_doctor_tests {
             status_of(&diag, "platform.opencode_bun_tests").status,
             CheckStatus::NotTracked,
             "--verify must attempt the Bun suite"
+        );
+    }
+
+    // ── Claude hook-platform diagnostic (claude-doctor-hookcheck-v1) ──────────
+
+    #[test]
+    fn claude_platform_diagnostic_passes_in_repo() {
+        // The repo wires `.claude/`, so the report carries a non-adapter Claude
+        // diagnostic: resolved=false, every wiring check PASS, and crucially no
+        // FAIL (an optional hook platform must never fail the doctor).
+        let report = adapter_doctor_report(&repo_root(), false);
+        let claude = report
+            .adapters
+            .iter()
+            .find(|d| d.adapter == "claude")
+            .expect("Claude diagnostic present when .claude/ is wired");
+        assert!(
+            !claude.resolved,
+            "Claude is a hook platform, not a resolvable adapter"
+        );
+        assert!(
+            !claude.has_failures(),
+            "an optional hook platform never FAILs the report"
+        );
+        for n in [
+            "platform.claude_gate_hook_present",
+            "platform.claude_context_hook_present",
+            "platform.claude_settings_present",
+            "platform.claude_pretooluse_matcher",
+        ] {
+            assert_eq!(
+                status_of(claude, n).status,
+                CheckStatus::Pass,
+                "{n} holds in-repo"
+            );
+        }
+    }
+
+    #[test]
+    fn pretooluse_matcher_pass_when_expected_matcher_registered() {
+        let json = r#"{"hooks":{"PreToolUse":[{"matcher":"Write|Edit|MultiEdit|Bash",
+            "hooks":[{"type":"command","command":"python x"}]}]}}"#;
+        let (status, _) = evaluate_pretooluse_matcher(Some(json));
+        assert_eq!(status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn pretooluse_matcher_warns_on_wrong_or_absent_matcher() {
+        // A different matcher leaves some mutating tools ungated → WARN (visible),
+        // not a fabricated PASS.
+        let wrong = r#"{"hooks":{"PreToolUse":[{"matcher":"Write|Edit"}]}}"#;
+        assert_eq!(
+            evaluate_pretooluse_matcher(Some(wrong)).0,
+            CheckStatus::Warn
+        );
+        // No PreToolUse hook at all → WARN.
+        let none = r#"{"hooks":{"SessionStart":[]}}"#;
+        assert_eq!(evaluate_pretooluse_matcher(Some(none)).0, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn pretooluse_matcher_unknown_when_unevaluable() {
+        // Absent settings or malformed JSON cannot be evaluated → UNKNOWN, never
+        // a silent PASS and never a FAIL.
+        assert_eq!(evaluate_pretooluse_matcher(None).0, CheckStatus::Unknown);
+        assert_eq!(
+            evaluate_pretooluse_matcher(Some("{not json")).0,
+            CheckStatus::Unknown
         );
     }
 }
