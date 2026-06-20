@@ -4127,6 +4127,8 @@ fn check_milestone_scope() -> Result<()> {
             "boundary",
             "brainstorm",
             "context",
+            "decisions",
+            "dispatch",
             "doctor",
             "drift",
             "gate",
