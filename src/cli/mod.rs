@@ -5105,9 +5105,53 @@ fn classify_bash_segment(segment: &str) -> &'static str {
         || cmd.starts_with("cargo clippy")
     {
         "cargo_build"
+    } else if is_bash_write_segment(cmd) {
+        "bash_write"
     } else {
         "bash_other"
     }
+}
+
+/// Best-effort detection of a shell segment that writes files. ctl cannot
+/// path-scope shell writes, so a positive result only RECLASSIFIES the segment
+/// so the gate can require an active task (closing the "idle bash write" gap) —
+/// it is NOT a `write_allow` boundary. Conservative by design: a redirect
+/// appended to a git/cargo command is not reclassified, and obfuscation
+/// (eval/base64/here-doc/quoted `>`) can still hide a write. Mirrors the
+/// operator-splitting caveat on [`classify_bash`].
+fn is_bash_write_segment(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first,
+        "tee" | "cp" | "mv" | "dd" | "install" | "truncate" | "ln"
+    ) || cmd.starts_with("sed -i")
+        || cmd.starts_with("sed --in-place")
+    {
+        return true;
+    }
+    segment_has_file_redirect(cmd)
+}
+
+/// True if the segment contains an output redirection to a FILE (`>` / `>>`),
+/// excluding fd-duplication forms (`>&`, `2>&1`) which target no file.
+fn segment_has_file_redirect(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'>' {
+            let after = if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                i + 2
+            } else {
+                i + 1
+            };
+            let dup = after < bytes.len() && bytes[after] == b'&';
+            if !dup && !cmd[after..].trim_start().is_empty() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Classify a bash command for gating. Compound commands (`a && b`, `a; b`,
@@ -5117,7 +5161,8 @@ fn classify_bash_segment(segment: &str) -> &'static str {
 /// still obscure intent (eval, base64, env-indirection); this discourages and
 /// audits casual composition, it is not a hard security boundary.
 fn classify_bash(command: &str) -> &'static str {
-    let (mut push, mut deps, mut commit, mut build) = (false, false, false, false);
+    let (mut push, mut deps, mut commit, mut write, mut build) =
+        (false, false, false, false, false);
     // Split on shell control/grouping operators so a restricted action inside a
     // compound or substitution (`$(..)`, backticks) becomes its own segment.
     for segment in command.split([';', '\n', '&', '|', '(', ')', '`']) {
@@ -5125,17 +5170,21 @@ fn classify_bash(command: &str) -> &'static str {
             "git_push" => push = true,
             "cargo_deps" => deps = true,
             "git_commit" => commit = true,
+            "bash_write" => write = true,
             "cargo_build" => build = true,
             _ => {}
         }
     }
-    // Most restrictive wins: step-up actions first, then commit window, then build.
+    // Most restrictive wins: step-up actions, then commit window, then a file
+    // write (needs an active task), then build, else other.
     if push {
         "git_push"
     } else if deps {
         "cargo_deps"
     } else if commit {
         "git_commit"
+    } else if write {
+        "bash_write"
     } else if build {
         "cargo_build"
     } else {
@@ -5542,6 +5591,29 @@ fn cmd_hook_gate(
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
+                "bash_write" => {
+                    // Best-effort: this command appears to write files (a redirection
+                    // or a file-mutating verb). ctl cannot path-scope a shell write,
+                    // so this is NOT a write_allow check — it only requires an active
+                    // in_progress task, closing the gap where Write/Edit are denied
+                    // while idle but a bash write would otherwise slip through. The
+                    // path-scoped Write/Edit tools remain the governed way to make
+                    // in-scope edits; a determined shell can still obscure a write.
+                    let allow = matches!(&state, GovState::InProgress { .. });
+                    let output = serde_json::json!({
+                        "allowed": allow,
+                        "state": gov_state_str(&state),
+                        "reason": if allow {
+                            "bash write allowed under active task — NOT path-scope-checked against write_allow"
+                        } else {
+                            "bash appears to write files but there is no active in_progress task"
+                        },
+                        "remedy": if allow { "" } else {
+                            "start a ctl task (create + ready + start), or use the path-scoped Write/Edit tool"
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
                 _ => {
                     // bash_other — allow in InProgress/Completed, warn in Idle
                     let allow = !matches!(&state, GovState::Ungoverned);
@@ -5919,6 +5991,44 @@ mod tests {
     fn subshell_and_backtick_segments_are_scanned() {
         assert_eq!(classify_bash("echo $(git push)"), "git_push");
         assert_eq!(classify_bash("x=`git push`"), "git_push");
+    }
+
+    #[test]
+    fn write_commands_classify_as_bash_write() {
+        // Output redirection to a file, and common file-mutating commands, are
+        // reclassified so the gate can require an active task. Best-effort only.
+        assert_eq!(classify_bash("echo hi > src/x.rs"), "bash_write");
+        assert_eq!(classify_bash("cat a >> b.txt"), "bash_write");
+        assert_eq!(classify_bash("tee out.txt"), "bash_write");
+        assert_eq!(classify_bash("cp a b"), "bash_write");
+        assert_eq!(classify_bash("mv a b"), "bash_write");
+        assert_eq!(classify_bash("sed -i s/a/b/ f"), "bash_write");
+        assert_eq!(classify_bash("dd if=a of=b"), "bash_write");
+        assert_eq!(classify_bash("ln -s a b"), "bash_write");
+    }
+
+    #[test]
+    fn read_only_bash_is_not_a_write() {
+        // No file redirect and a non-mutating verb stays bash_other; fd-duplication
+        // (`2>&1`) targets no file and must not be mistaken for a write.
+        assert_eq!(classify_bash("grep foo bar"), "bash_other");
+        assert_eq!(classify_bash("cat src/x.rs"), "bash_other");
+        assert_eq!(classify_bash("ls -la 2>&1"), "bash_other");
+        assert_eq!(classify_bash("echo hello"), "bash_other");
+    }
+
+    #[test]
+    fn restricted_verbs_outrank_bash_write_but_write_outranks_build() {
+        // A write composed with a stricter action keeps the stricter class…
+        assert_eq!(classify_bash("cp a b && git push"), "git_push");
+        assert_eq!(classify_bash("echo x > f && cargo add serde"), "cargo_deps");
+        assert_eq!(classify_bash("echo x > f ; git commit -m y"), "git_commit");
+        // …but a write outranks a plain build (a write needs an active task; a
+        // build is allowed even when idle).
+        assert_eq!(classify_bash("cp a b && cargo test"), "bash_write");
+        // A redirect appended to a cargo/git command is NOT reclassified (kept
+        // conservative so `cargo test > log` stays buildable when idle).
+        assert_eq!(classify_bash("cargo test > log.txt"), "cargo_build");
     }
 
     #[test]
