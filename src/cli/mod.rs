@@ -930,6 +930,30 @@ enum RunCommands {
         /// Run id to finish.
         #[arg(long)]
         run: String,
+        /// Host-reported model id (record-and-disclose; host-attested).
+        #[arg(long)]
+        model: Option<String>,
+        /// Host-reported provider (host-attested).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Path to the instruction artifact; ctl records its sha256 (host-attested).
+        #[arg(long)]
+        instruction_artifact: Option<String>,
+        /// Path to the context artifact; ctl records its sha256 (host-attested).
+        #[arg(long)]
+        context_artifact: Option<String>,
+        /// Path to the output artifact; ctl records its sha256 (host-attested).
+        #[arg(long)]
+        output_artifact: Option<String>,
+        /// Host-reported run start timestamp, ISO 8601 (host-attested).
+        #[arg(long)]
+        started_at: Option<String>,
+        /// Host-reported run end timestamp, ISO 8601 (host-attested).
+        #[arg(long)]
+        ended_at: Option<String>,
+        /// Host-reported process exit code (host-attested).
+        #[arg(long)]
+        exit_code: Option<i64>,
     },
 }
 
@@ -2524,11 +2548,31 @@ fn cmd_run(command: &RunCommands, dry_run: bool) -> Result<()> {
                 }
             }
         }
-        RunCommands::Finish { run } => {
-            app.finish_run(run)?;
+        RunCommands::Finish {
+            run,
+            model,
+            provider,
+            instruction_artifact,
+            context_artifact,
+            output_artifact,
+            started_at,
+            ended_at,
+            exit_code,
+        } => {
+            let prov = crate::application::RunProvenanceInput {
+                model: model.clone(),
+                provider: provider.clone(),
+                instruction_artifact: instruction_artifact.clone(),
+                context_artifact: context_artifact.clone(),
+                output_artifact: output_artifact.clone(),
+                started_at: started_at.clone(),
+                ended_at: ended_at.clone(),
+                exit_code: *exit_code,
+            };
+            app.finish_run_with_provenance(run, &prov)?;
             println!(
-                "Finished run '{}' — phase is now Completed; lease revoked and worktree \
-                 cleaned up if present. It no longer shows as an open run in recovery.",
+                "Finished run '{}' — phase Completed; recorded host-attested provenance where \
+                 supplied (record-and-disclose). Lease revoked and worktree cleaned up if present.",
                 run
             );
         }

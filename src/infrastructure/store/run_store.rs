@@ -197,6 +197,16 @@ impl RunEventStore {
             "gate_results": state.gate_results,
             "touched_files": state.touched_files,
             "last_seq": state.last_seq,
+            // Host-attested run provenance (record-and-disclose; null when the
+            // host did not supply it). NOT ctl-verified — see AgentRunState.
+            "model": state.model,
+            "provider": state.provider,
+            "instruction_hash": state.instruction_hash,
+            "context_hash": state.context_hash,
+            "output_hash": state.output_hash,
+            "started_at": state.started_at,
+            "ended_at": state.ended_at,
+            "exit_code": state.exit_code,
         });
         let run_dir = self.run_dir(run_id);
         fs::create_dir_all(&run_dir)?;
@@ -230,7 +240,6 @@ fn validate_run_id(run_id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::domain::run::RunPhase;
-    use std::collections::{BTreeSet, HashMap, HashSet};
 
     fn make_tmp_dir() -> PathBuf {
         // `generate_uuid` mixes a nanosecond clock with a process-global atomic
@@ -367,22 +376,16 @@ mod tests {
         let tmp = make_tmp_dir();
         let store = RunEventStore::init(&tmp).unwrap();
 
+        // Set only the fields this projection test cares about; `..new()` fills
+        // the rest (incl. optional provenance) so new fields don't break it.
         let state = AgentRunState {
-            run_id: "run-view".to_string(),
             task_id: "task-1".to_string(),
             adapter: "test".to_string(),
             phase: RunPhase::Running,
             worktree_path: Some("/tmp/wt".to_string()),
             lease_id: Some("lease-1".to_string()),
-            lease: None,
-            write_allow: BTreeSet::new(),
-            write_deny: BTreeSet::new(),
-            gates: BTreeSet::new(),
-            gate_results: HashMap::new(),
-            touched_files: BTreeSet::new(),
-            history: Vec::new(),
             last_seq: 5,
-            processed_commands: HashSet::new(),
+            ..AgentRunState::new("run-view")
         };
 
         store.write_run_view("run-view", &state).unwrap();

@@ -106,6 +106,25 @@ fn gate_went_red_before_green(events: &[Event], gate_id: &str) -> bool {
     false
 }
 
+/// Host-supplied provenance for `ctl run finish` (run-attestation-fields-v1).
+/// Record-and-disclose: ctl records these host-attested values and sha256-hashes
+/// the artifact files it is given — it does NOT verify what actually ran. Every
+/// field is optional; a run may finish with none.
+#[derive(Debug, Clone, Default)]
+pub struct RunProvenanceInput {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    /// Path to the instruction artifact; ctl records its sha256.
+    pub instruction_artifact: Option<String>,
+    /// Path to the context artifact; ctl records its sha256.
+    pub context_artifact: Option<String>,
+    /// Path to the output artifact; ctl records its sha256.
+    pub output_artifact: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub exit_code: Option<i64>,
+}
+
 /// M6 crash-recovery snapshot of one `Running` run (see [`ControlApp::recover_report`]).
 /// `worktree_exists == false` marks an inconsistent run whose isolation
 /// workspace is gone — a recovery-abort candidate.
@@ -3484,7 +3503,44 @@ impl ControlApp {
     /// Finish a Running run (→ Completed), freeing its write scope so an
     /// overlapping run may then start. Best-effort worktree cleanup.
     pub fn finish_run(&self, run_id: &str) -> Result<Event> {
-        self.terminate_run(run_id, "run_finished", serde_json::json!({}))
+        self.finish_run_with_provenance(run_id, &RunProvenanceInput::default())
+    }
+
+    /// Finish a run, recording host-attested provenance (run-attestation-fields-v1).
+    /// ctl sha256-hashes each supplied artifact file and stores the host-reported
+    /// model/provider/timestamps/exit alongside — record-and-disclose, NOT a
+    /// verified claim of what ran. Absent fields are simply not recorded.
+    pub fn finish_run_with_provenance(
+        &self,
+        run_id: &str,
+        prov: &RunProvenanceInput,
+    ) -> Result<Event> {
+        let mut payload = serde_json::Map::new();
+        let mut put = |k: &str, v: Option<&String>| {
+            if let Some(s) = v.filter(|s| !s.is_empty()) {
+                payload.insert(k.to_string(), serde_json::json!(s));
+            }
+        };
+        put("model", prov.model.as_ref());
+        put("provider", prov.provider.as_ref());
+        put("started_at", prov.started_at.as_ref());
+        put("ended_at", prov.ended_at.as_ref());
+        // Hash the artifacts ctl is given (any readable path — these are the
+        // host's transient files; only the digest is recorded, never the path).
+        for (key, path) in [
+            ("instruction_hash", &prov.instruction_artifact),
+            ("context_hash", &prov.context_artifact),
+            ("output_hash", &prov.output_artifact),
+        ] {
+            if let Some(p) = path.as_ref().filter(|s| !s.is_empty()) {
+                let hash = hash_file(std::path::Path::new(p))?;
+                payload.insert(key.to_string(), serde_json::json!(hash));
+            }
+        }
+        if let Some(code) = prov.exit_code {
+            payload.insert("exit_code".to_string(), serde_json::json!(code));
+        }
+        self.terminate_run(run_id, "run_finished", serde_json::Value::Object(payload))
     }
 
     /// Mark a run failed (→ Failed) with a reason. Frees its write scope.
@@ -7122,6 +7178,38 @@ mod tests {
             app.finish_run(&r).is_err(),
             "only a Running run can be finished"
         );
+    }
+
+    #[test]
+    fn finish_run_with_provenance_hashes_artifacts_and_records_host_attested_values() {
+        // run-attestation-fields-v1: ctl sha256-hashes the supplied artifact and
+        // records host-reported fields; absent fields stay unset.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let r = seed_running_run(&app, "t", &["src"]);
+        let art = dir.path().join("instruction.txt");
+        std::fs::write(&art, b"do the thing").unwrap();
+        let prov = RunProvenanceInput {
+            model: Some("claude-opus-4-8".into()),
+            instruction_artifact: Some(art.to_string_lossy().into_owned()),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        app.finish_run_with_provenance(&r, &prov).unwrap();
+        let state = app.replay_run(&r).unwrap();
+        assert_eq!(state.phase, RunPhase::Completed);
+        assert_eq!(state.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(state.exit_code, Some(0));
+        // ctl recorded the artifact's sha256 (64 hex chars), never the path.
+        let h = state
+            .instruction_hash
+            .as_deref()
+            .expect("instruction hash recorded");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        // Unsupplied provenance is simply absent.
+        assert!(state.provider.is_none());
+        assert!(state.context_hash.is_none());
     }
 
     #[test]

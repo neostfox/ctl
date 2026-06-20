@@ -81,6 +81,38 @@
       "description": "Last processed sequence number.",
       "type": "integer",
       "minimum": 0
+    },
+    "model": {
+      "description": "Host-reported model id, recorded at run_finished. Host-attested (record-and-disclose), not ctl-verified.",
+      "type": ["string", "null"]
+    },
+    "provider": {
+      "description": "Host-reported provider, recorded at run_finished. Host-attested.",
+      "type": ["string", "null"]
+    },
+    "instruction_hash": {
+      "description": "sha256 of the instruction artifact ctl was given at run_finished. Host-attested.",
+      "type": ["string", "null"]
+    },
+    "context_hash": {
+      "description": "sha256 of the context artifact ctl was given at run_finished. Host-attested.",
+      "type": ["string", "null"]
+    },
+    "output_hash": {
+      "description": "sha256 of the output artifact ctl was given at run_finished. Host-attested.",
+      "type": ["string", "null"]
+    },
+    "started_at": {
+      "description": "Host-reported run start timestamp (ISO 8601). Host-attested.",
+      "type": ["string", "null"]
+    },
+    "ended_at": {
+      "description": "Host-reported run end timestamp (ISO 8601). Host-attested.",
+      "type": ["string", "null"]
+    },
+    "exit_code": {
+      "description": "Host-reported process exit code, recorded at run_finished. Host-attested.",
+      "type": ["integer", "null"]
     }
   },
   "required": [

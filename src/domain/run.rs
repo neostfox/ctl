@@ -92,6 +92,35 @@ pub struct AgentRunState {
     pub last_seq: i64,
     /// Idempotency: processed command_ids.
     pub processed_commands: HashSet<String>,
+    // ── Host-attested run provenance (run-attestation-fields-v1) ──────────────
+    // Recorded at `run_finished` from host-supplied values (record-and-disclose:
+    // the executor host supplies these and ctl hashes/stores them — they are NOT
+    // ctl-verified facts). All optional; a run may finish without any of them.
+    // `#[serde(default)]` keeps older run.json projections deserializing cleanly.
+    /// Model id the host reported (e.g. "claude-opus-4-8"). Host-attested.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Provider the host reported (e.g. "anthropic"). Host-attested.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// sha256 of the instruction artifact ctl was given. Host-attested.
+    #[serde(default)]
+    pub instruction_hash: Option<String>,
+    /// sha256 of the context artifact ctl was given. Host-attested.
+    #[serde(default)]
+    pub context_hash: Option<String>,
+    /// sha256 of the output artifact ctl was given. Host-attested.
+    #[serde(default)]
+    pub output_hash: Option<String>,
+    /// Host-reported run start timestamp (ISO 8601). Host-attested.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Host-reported run end timestamp (ISO 8601). Host-attested.
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    /// Host-reported process exit code. Host-attested.
+    #[serde(default)]
+    pub exit_code: Option<i64>,
 }
 
 impl AgentRunState {
@@ -112,6 +141,14 @@ impl AgentRunState {
             history: Vec::new(),
             last_seq: 0,
             processed_commands: HashSet::new(),
+            model: None,
+            provider: None,
+            instruction_hash: None,
+            context_hash: None,
+            output_hash: None,
+            started_at: None,
+            ended_at: None,
+            exit_code: None,
         }
     }
 }
@@ -379,6 +416,25 @@ pub fn apply_run(state: &mut AgentRunState, event: &Event) -> Result<(), String>
                 ));
             }
             state.phase = RunPhase::Completed;
+            // Host-attested provenance (record-and-disclose): record each field
+            // only if the host supplied it; absent fields stay None. These are
+            // host-supplied values ctl stored — NOT ctl-verified facts.
+            let opt_str = |k: &str| {
+                event
+                    .payload
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            state.model = opt_str("model");
+            state.provider = opt_str("provider");
+            state.instruction_hash = opt_str("instruction_hash");
+            state.context_hash = opt_str("context_hash");
+            state.output_hash = opt_str("output_hash");
+            state.started_at = opt_str("started_at");
+            state.ended_at = opt_str("ended_at");
+            state.exit_code = event.payload.get("exit_code").and_then(|v| v.as_i64());
         }
         "run_failed" => {
             // run_failed can occur from Running or Queued
@@ -612,6 +668,77 @@ mod tests {
         let e = make_event("r1", 5, "run_finished", json!({}));
         apply_run(&mut state, &e).unwrap();
         assert_eq!(state.phase, RunPhase::Completed);
+    }
+
+    fn run_to_running(run_id: &str) -> AgentRunState {
+        let mut state = AgentRunState::new(run_id);
+        apply_run(
+            &mut state,
+            &make_event(
+                run_id,
+                1,
+                "run_created",
+                json!({"task_id": "t", "adapter": "omp"}),
+            ),
+        )
+        .unwrap();
+        apply_run(
+            &mut state,
+            &make_event(
+                run_id,
+                2,
+                "run_started",
+                json!({"worktree_path": ".wt", "lease_id": "l1"}),
+            ),
+        )
+        .unwrap();
+        state
+    }
+
+    #[test]
+    fn run_finished_records_host_attested_provenance() {
+        // run-attestation-fields-v1: run_finished carries host-supplied provenance
+        // (record-and-disclose). The reducer records each field onto the run state.
+        let mut state = run_to_running("r1");
+        apply_run(
+            &mut state,
+            &make_event(
+                "r1",
+                3,
+                "run_finished",
+                json!({
+                    "model": "claude-opus-4-8",
+                    "provider": "anthropic",
+                    "instruction_hash": "aaa",
+                    "context_hash": "bbb",
+                    "output_hash": "ccc",
+                    "started_at": "2026-06-20T00:00:00Z",
+                    "ended_at": "2026-06-20T00:05:00Z",
+                    "exit_code": 0
+                }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(state.phase, RunPhase::Completed);
+        assert_eq!(state.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(state.provider.as_deref(), Some("anthropic"));
+        assert_eq!(state.instruction_hash.as_deref(), Some("aaa"));
+        assert_eq!(state.context_hash.as_deref(), Some("bbb"));
+        assert_eq!(state.output_hash.as_deref(), Some("ccc"));
+        assert_eq!(state.started_at.as_deref(), Some("2026-06-20T00:00:00Z"));
+        assert_eq!(state.ended_at.as_deref(), Some("2026-06-20T00:05:00Z"));
+        assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[test]
+    fn run_finished_provenance_is_optional_and_backward_compatible() {
+        // An empty run_finished payload (the prior shape) leaves provenance None.
+        let mut state = run_to_running("r2");
+        apply_run(&mut state, &make_event("r2", 3, "run_finished", json!({}))).unwrap();
+        assert_eq!(state.phase, RunPhase::Completed);
+        assert!(state.model.is_none());
+        assert!(state.instruction_hash.is_none());
+        assert!(state.exit_code.is_none());
     }
 
     #[test]
