@@ -166,6 +166,22 @@ function recordDecision(
   );
 }
 
+/**
+ * Record an ALLOWED subagent dispatch as a canonical `subagent_dispatched` event
+ * (`ctl dispatch record`), bound to the active parent task. role/adapter are host
+ * LABELS (unattested); ctl records what it was told was dispatched, never what
+ * ran. Fire-and-forget and best-effort — a missed attestation must never block or
+ * delay the spawn — and skipped when no parent task is bound (CTL_TASK_ID unset).
+ */
+function recordDispatch(agentType: string): void {
+  const task = process.env.CTL_TASK_ID?.trim();
+  if (!task) return;
+  void ctl(
+    ["dispatch", "record", "--task", task, "--role", agentType || "task", "--adapter", "omp"],
+    "dispatch-record",
+  );
+}
+
 export default function (pi: HookAPI): void {
 
   // ═══════════════════════════════════════════
@@ -319,8 +335,9 @@ export default function (pi: HookAPI): void {
       };
     }
 
-    // ── Post-gate: record subagent spawn times ──
+    // ── Post-gate: attest the dispatch + record subagent spawn times ──
     if (tool === "task" && gate.allowed) {
+      recordDispatch(agentType ?? "task");
       const tasks = input.tasks as Array<{ id?: string }> | undefined;
       if (Array.isArray(tasks)) {
         const now = Date.now();

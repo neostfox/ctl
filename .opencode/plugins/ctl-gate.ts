@@ -146,6 +146,24 @@ export function buildRecordArgs(input: {
 }
 
 /**
+ * Build the `ctl dispatch record` argv for an ALLOWED subagent spawn. Pure +
+ * array form. role is a host LABEL (unattested) and adapter is fixed to this
+ * platform; ctl records what it was told was dispatched, never verifies it ran.
+ */
+export function buildDispatchArgs(input: { taskId: string; role: string }): string[] {
+  return [
+    "dispatch",
+    "record",
+    "--task",
+    input.taskId.trim(),
+    "--role",
+    input.role,
+    "--adapter",
+    "opencode",
+  ];
+}
+
+/**
  * Render the active-task system context — scope, phase, and task id per active
  * task. Returns null when there is no active task, so the plugin never
  * fabricates task context out of an empty ledger.
@@ -173,6 +191,8 @@ export interface CtlRunner {
   context(): Promise<ContextResult | null>;
   /** Append a decision record (best-effort; never throws). */
   recordDecision(args: string[]): Promise<void>;
+  /** Record a subagent dispatch as a canonical event (best-effort; never throws). */
+  recordDispatch(args: string[]): Promise<void>;
 }
 
 /** Emit a one-line diagnostic so ctl failures are observable, not swallowed. */
@@ -239,6 +259,10 @@ export const realCtlRunner: CtlRunner = {
     // advisory decision log must never break the gate it observes.
     await runCtl(args, "record-decision");
   },
+  async recordDispatch(args) {
+    // Best-effort: a missed dispatch attestation must never break the spawn.
+    await runCtl(args, "dispatch-record");
+  },
 };
 
 /** Wire the opencode hooks over a [`CtlRunner`]. Exported for testing. */
@@ -291,6 +315,17 @@ export function createHooks(runner: CtlRunner) {
       if (!gate.allowed) {
         const remedy = gate.remedy ? `\n💡 ${gate.remedy}` : "";
         throw new Error(`ctl gate [${gate.state}]: ${gate.reason}${remedy}`);
+      }
+
+      // Attestation V1: an ALLOWED subagent dispatch bound to a parent task is
+      // recorded as a canonical `subagent_dispatched` event. Best-effort and
+      // non-blocking (recordDispatch never throws). Skipped when no parent task
+      // is bound (CTL_TASK_ID unset) — there is nothing to attribute it to.
+      const dispatchTask = process.env.CTL_TASK_ID?.trim();
+      if (gi.ctlTool === "task" && dispatchTask) {
+        await runner.recordDispatch(
+          buildDispatchArgs({ taskId: dispatchTask, role: gi.agentType ?? "task" }),
+        );
       }
     },
 

@@ -15,6 +15,7 @@ import {
   buildContextMessage,
   shouldRecord,
   buildRecordArgs,
+  buildDispatchArgs,
   createHooks,
   type CtlRunner,
   type GateResult,
@@ -36,6 +37,7 @@ const allow: CtlRunner = {
   gate: async () => ({ allowed: true, state: "in_progress", reason: "" }),
   context: async () => null,
   recordDecision: noRecord,
+  recordDispatch: noRecord,
 };
 const deny: CtlRunner = {
   gate: async () => ({
@@ -46,23 +48,34 @@ const deny: CtlRunner = {
   }),
   context: async () => null,
   recordDecision: noRecord,
+  recordDispatch: noRecord,
 };
 const down: CtlRunner = {
   gate: async () => null,
   context: async () => null,
   recordDecision: noRecord,
+  recordDispatch: noRecord,
 };
 
-/** A runner that returns a fixed verdict and captures every recordDecision argv. */
-function recordingRunner(gate: GateResult | null): { runner: CtlRunner; calls: string[][] } {
+/** A runner returning a fixed verdict that captures recordDecision + recordDispatch argvs. */
+function recordingRunner(gate: GateResult | null): {
+  runner: CtlRunner;
+  calls: string[][];
+  dispatchCalls: string[][];
+} {
   const calls: string[][] = [];
+  const dispatchCalls: string[][] = [];
   return {
     calls,
+    dispatchCalls,
     runner: {
       gate: async () => gate,
       context: async () => null,
       recordDecision: async (args) => {
         calls.push(args);
+      },
+      recordDispatch: async (args) => {
+        dispatchCalls.push(args);
       },
     },
   };
@@ -224,6 +237,97 @@ test("hook does NOT record an ordinary allow", async () => {
   const h = createHooks(runner);
   await h["tool.execute.before"]({ tool: "write" }, { args: { filePath: ".opencode/x" } });
   expect(calls.length).toBe(0);
+});
+
+/** Run `fn` with CTL_TASK_ID set to `id` (or unset when undefined), then restore. */
+async function withTaskId(id: string | undefined, fn: () => Promise<void>): Promise<void> {
+  const saved = process.env.CTL_TASK_ID;
+  if (id === undefined) delete process.env.CTL_TASK_ID;
+  else process.env.CTL_TASK_ID = id;
+  try {
+    await fn();
+  } finally {
+    if (saved === undefined) delete process.env.CTL_TASK_ID;
+    else process.env.CTL_TASK_ID = saved;
+  }
+}
+
+test("buildDispatchArgs: array form — ctl dispatch record with trimmed task, role, adapter", () => {
+  expect(buildDispatchArgs({ taskId: "  t-7  ", role: "designer" })).toEqual([
+    "dispatch",
+    "record",
+    "--task",
+    "t-7",
+    "--role",
+    "designer",
+    "--adapter",
+    "opencode",
+  ]);
+});
+
+test("hook records a dispatch on an ALLOWED task spawn bound to a parent task", async () => {
+  const { runner, dispatchCalls } = recordingRunner({
+    allowed: true,
+    state: "in_progress",
+    reason: "",
+  });
+  const h = createHooks(runner);
+  await withTaskId("t-42", () =>
+    h["tool.execute.before"]({ tool: "task" }, { args: { subagent_type: "designer" } }),
+  );
+  expect(dispatchCalls.length).toBe(1);
+  expect(dispatchCalls[0]).toEqual([
+    "dispatch",
+    "record",
+    "--task",
+    "t-42",
+    "--role",
+    "designer",
+    "--adapter",
+    "opencode",
+  ]);
+});
+
+test("hook does NOT record a dispatch when no parent task is bound", async () => {
+  const { runner, dispatchCalls } = recordingRunner({
+    allowed: true,
+    state: "in_progress",
+    reason: "",
+  });
+  const h = createHooks(runner);
+  await withTaskId(undefined, () =>
+    h["tool.execute.before"]({ tool: "task" }, { args: { subagent_type: "designer" } }),
+  );
+  expect(dispatchCalls.length).toBe(0);
+});
+
+test("hook does NOT record a dispatch for a non-task tool", async () => {
+  const { runner, dispatchCalls } = recordingRunner({
+    allowed: true,
+    state: "in_progress",
+    reason: "",
+  });
+  const h = createHooks(runner);
+  await withTaskId("t-42", () =>
+    h["tool.execute.before"]({ tool: "write" }, { args: { filePath: ".opencode/x" } }),
+  );
+  expect(dispatchCalls.length).toBe(0);
+});
+
+test("hook does NOT record a dispatch when the task spawn is denied", async () => {
+  const { runner, dispatchCalls } = recordingRunner({
+    allowed: false,
+    state: "idle",
+    reason: "no active task",
+  });
+  const h = createHooks(runner);
+  await withTaskId("t-42", async () => {
+    const err = await caught(() =>
+      h["tool.execute.before"]({ tool: "task" }, { args: { subagent_type: "designer" } }),
+    );
+    expect(err).not.toBeNull(); // denied → throws before recording a dispatch
+  });
+  expect(dispatchCalls.length).toBe(0);
 });
 
 test("REAL exported plugin hook fails closed when ctl is unreachable", async () => {
