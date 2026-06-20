@@ -1,6 +1,6 @@
 {
   "name": "@ai-dev/ctl-linux-x64-gnu",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "ctl binary for Linux x64 (GNU)",
   "files": ["ctl"],
   "os": ["linux"],

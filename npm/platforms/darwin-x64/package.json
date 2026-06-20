@@ -1,6 +1,6 @@
 {
   "name": "@ai-dev/ctl-darwin-x64",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "ctl binary for macOS x64",
   "files": ["ctl"],
   "os": ["darwin"],

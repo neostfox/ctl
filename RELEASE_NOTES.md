@@ -1,13 +1,13 @@
-# Release Notes — ctl v0.0.4
+# Release Notes — ctl v0.0.5
 
-Follows **v0.0.3**. `ctl --version` reports the built version from
+Follows **v0.0.4**. `ctl --version` reports the built version from
 `CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
 `release.yml`), and the npm `@ai-dev/ctl` meta-package plus its five platform
 packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
 
-## Unreleased — record-and-disclose hardening (since 0.0.4)
+## Included since 0.0.4 — record-and-disclose hardening
 
 Deliverables of the orchestration-trust audit
 (`brainstorms/orchestration-trust-audit-v1.md`). **None of this is cryptographic
