@@ -80,3 +80,23 @@ jobs:
       # .opencode is a dot-dir (bun's default scan skips it), so run with it as cwd.
       - name: opencode plugin tests
         run: bun test --cwd .opencode
+
+  # The Claude Code gate/context hooks are a supported integration surface, so
+  # their contract is a required check — not optional. The suite is stdlib
+  # unittest over a mocked `ctl` (deterministic, no model, no network): it pins
+  # per-tool fail-closed/open, the ungoverned Task boundary, decision-log
+  # recording, and the honest SessionStart wording.
+  claude-hooks:
+    name: claude gate hooks (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: claude python hook tests
+        run: python -m unittest discover -s .claude/hooks -p "test_*.py"

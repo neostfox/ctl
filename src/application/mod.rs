@@ -4569,7 +4569,7 @@ pub fn adapter_doctor_report(
     // visible. Absent `.claude/` → Claude is not this project's platform, so the
     // report is left exactly as before.
     if project_root.join(".claude").is_dir() {
-        adapters.push(claude_platform_diagnostic(project_root));
+        adapters.push(claude_platform_diagnostic(project_root, verify));
     }
     crate::adapters::AdapterDoctorReport::new(adapters)
 }
@@ -4671,7 +4671,10 @@ fn claude_pretooluse_matcher_check(root: &std::path::Path) -> crate::adapters::A
 /// `adapter: None` intact (Claude never enters `supported_adapters()` or
 /// `adapter_for`). Missing files are WARN, never FAIL: a project may legitimately
 /// not wire Claude.
-fn claude_platform_diagnostic(root: &std::path::Path) -> crate::adapters::AdapterDiagnostic {
+fn claude_platform_diagnostic(
+    root: &std::path::Path,
+    verify: bool,
+) -> crate::adapters::AdapterDiagnostic {
     use crate::adapters::{AdapterDiagnostic, CheckStatus};
     // Source the gate-hook path from the single platform registry (it is keyed by
     // label since Claude's `adapter` is None); fall back to the canonical path so
@@ -4699,8 +4702,66 @@ fn claude_platform_diagnostic(root: &std::path::Path) -> crate::adapters::Adapte
             CheckStatus::Warn,
         ),
         claude_pretooluse_matcher_check(root),
+        // The python hook test suite: NOT_TRACKED by default, run under --verify
+        // (mirrors the opencode Bun check). Pins the per-tool gate contract.
+        claude_python_tests_check(root, verify),
     ];
     AdapterDiagnostic::new("claude", false, checks)
+}
+
+/// The Claude python hook test suite (`.claude/hooks/test_*.py`). NOT_TRACKED
+/// unless `verify`; under `--verify` it is actually run (UNKNOWN if the test
+/// files are absent or Python is unavailable — never a silent PASS).
+fn claude_python_tests_check(
+    project_root: &std::path::Path,
+    verify: bool,
+) -> crate::adapters::AdapterCheck {
+    use crate::adapters::{AdapterCheck, CheckStatus};
+    const TEST_FILE: &str = ".claude/hooks/test_ctl_gate.py";
+    let name = "platform.claude_hook_tests";
+    if !project_root.join(TEST_FILE).exists() {
+        return AdapterCheck::new(name, CheckStatus::Unknown, format!("missing: {TEST_FILE}"));
+    }
+    if !verify {
+        return AdapterCheck::new(
+            name,
+            CheckStatus::NotTracked,
+            "python hook tests not run by default; pass --verify to execute",
+        );
+    }
+    match run_claude_python_tests(project_root) {
+        Ok(true) => AdapterCheck::new(name, CheckStatus::Pass, "python hook tests passed"),
+        Ok(false) => AdapterCheck::new(
+            name,
+            CheckStatus::Fail,
+            "python hook tests reported failures",
+        ),
+        Err(e) => AdapterCheck::new(
+            name,
+            CheckStatus::Unknown,
+            format!("python unavailable: {e}"),
+        ),
+    }
+}
+
+/// Run `python -m unittest discover` over `.claude/hooks` — a FIXED command (not
+/// arbitrary shell). Returns whether the suite passed; errors only if Python
+/// cannot be launched.
+fn run_claude_python_tests(project_root: &std::path::Path) -> Result<bool> {
+    let output = std::process::Command::new("python")
+        .args([
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            ".claude/hooks",
+            "-p",
+            "test_*.py",
+        ])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| anyhow!("failed to launch python: {e}"))?;
+    Ok(output.status.success())
 }
 
 /// Platform-integration checks for one adapter. An adapter with no registered
@@ -8163,7 +8224,10 @@ mod tests {
 mod adapter_doctor_tests {
     //! adapter-doctor-v1 platform-integration assembly, exercised against the
     //! real repo root (the dogfooding checkout ships every platform file).
-    use super::{adapter_doctor_report, adapter_status_diagnostic, evaluate_pretooluse_matcher};
+    use super::{
+        adapter_doctor_report, adapter_status_diagnostic, claude_python_tests_check,
+        evaluate_pretooluse_matcher,
+    };
     use crate::adapters::{supported_adapters, CheckStatus};
     use std::path::PathBuf;
 
@@ -8332,6 +8396,26 @@ mod adapter_doctor_tests {
         assert_eq!(
             evaluate_pretooluse_matcher(Some("{not json")).0,
             CheckStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn claude_hook_tests_not_tracked_without_verify() {
+        // The python suite is opt-in: NOT_TRACKED by default (never a silent PASS).
+        assert_eq!(
+            claude_python_tests_check(&repo_root(), false).status,
+            CheckStatus::NotTracked
+        );
+    }
+
+    #[test]
+    fn claude_hook_tests_attempted_under_verify() {
+        // Under --verify the suite is actually attempted: PASS / FAIL / UNKNOWN
+        // (python unavailable) — but never NOT_TRACKED.
+        assert_ne!(
+            claude_python_tests_check(&repo_root(), true).status,
+            CheckStatus::NotTracked,
+            "--verify must attempt the python hook suite"
         );
     }
 }
