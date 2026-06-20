@@ -7,6 +7,44 @@ packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
 
+## Unreleased — record-and-disclose hardening (since 0.0.4)
+
+Deliverables of the orchestration-trust audit
+(`brainstorms/orchestration-trust-audit-v1.md`). **None of this is cryptographic
+proof** — every new record is *host-attested evidence*, disclosed as such; the
+audit's "Do Not Claim" list still holds (no authenticated principal, no signed
+envelopes — those need dependencies the guardrail forbids).
+
+- **Honest per-tool/per-platform gate disclosure.** The Claude SessionStart
+  message and the boundary sections (here / README / DESIGN) now state the truth:
+  `Write`/`Edit`/`MultiEdit` fail **closed** when ctl is unavailable, but Claude
+  `Bash` fails **open** and the **`Task` tool is not gated by PreToolUse at all**
+  (a Claude platform boundary — U-1 — not a TODO).
+- **Gate decision log (non-canonical).** All three host hooks now call
+  `ctl hook record-decision` on a deny or a `bash_write` allow, appending to
+  `.ctl/decisions.jsonl`; **`ctl decisions`** views it behind a NON-CANONICAL
+  banner — advisory evidence, never a task event, not hash-chained, not covered by
+  `ctl validate`.
+- **Claude hook coverage.** First automated tests for the Claude python hooks
+  (per-tool fail-closed/open, the ungoverned `Task` boundary, decision-log
+  recording, the honest SessionStart wording). They run in CI (a `claude-hooks`
+  job) and under **`ctl adapter doctor --verify`** (`platform.claude_hook_tests`).
+  `ctl adapter doctor` also gained a Claude hook-platform check
+  (`gate.py`/`context.py`/`settings.json` present + the PreToolUse matcher), with
+  no change to Claude's non-adapter status.
+- **Runs reach Finished.** **`ctl run finish`** is the production caller
+  `run_finished` previously lacked — a run now reaches Completed and drops out of
+  recovery instead of looking forever open.
+- **Run provenance (host-attested).** `ctl run finish` records optional
+  `model`/`provider`/`started_at`/`ended_at`/`exit_code` and the sha256 of supplied
+  instruction/context/output artifacts onto the run — recorded by ctl, **not
+  verified**.
+- **Subagent dispatch attestation (host-attested).** A new canonical
+  `subagent_dispatched` task event records role/adapter/parent + artifact hashes
+  via **`ctl dispatch record`** (viewable with **`ctl dispatch list`**). OMP and
+  OpenCode auto-record an allowed subagent spawn; **Claude cannot** (U-1), by
+  design. role/adapter are host labels; ctl records what it was told, not what ran.
+
 ## Included since 0.0.3
 
 - **Project default gate floor.** `ctl task create` / `ctl task quick` no longer

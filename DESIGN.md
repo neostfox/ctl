@@ -31,11 +31,12 @@
 - **M5（可解释控制闭环）**：`telemetry.jsonl` 证据索引（`ctl telemetry add`）、`control.json` reconcile 决策投影（`ctl board`）、确定性 drift 引擎（`ctl drift compute/explain`）、`ctl next-action` 建议（pass/ask/stop/replan/rescope，只读、不发事件）。
 - **M6（并发执行切片 1–3 + lease 接线）**：`ctl schedule plan/validate/run` 将校验过的计划首个并行安全组激活为并发 **AgentRun 聚合**（run-store，`domain/run.rs`），各自隔离 worktree + scoped lease；`ctl agent-report`、`ctl run merge-candidate/recover/expire-lease`；共享 `.git` 写操作硬化。**从不 spawn 执行器**。
 - **V1 认知层（record-and-disclose）**：`ctl brainstorm`（来源溯源）、`ctl uncertainty`（未知项账本 + oracle 证据，`model` oracle 仅顾问性、命令层拒绝以其 resolve）、`ctl research`（spike/研究任务）、`ctl handoff export`、`ctl prd init`、`ctl ralph`（无人值守安全监督，只读 dead-man switch）。
+- **归因层（attestation / record-and-disclose，0.0.4 后）**：`ctl run finish` 为 `run_finished` 补上生产调用方（run 终达 Completed，不再永远 open）；`ctl run finish` 记录 host-attested run 溯源（`model`/`provider`/起止时间/`exit_code` + 供给制品的 sha256，**仅记录不验证**）；新增 canonical `subagent_dispatched` 任务事件 + `ctl dispatch record`/`list`，OMP / OpenCode 在放行子智能体派发时自动记录（Claude 受 U-1 限制不可）；非 canonical gate 决策日志 `.ctl/decisions.jsonl` + `ctl decisions`（三宿主 hook 经 `ctl hook record-decision` 记录 deny / bash_write）；Claude hook 测试（CI + `adapter doctor --verify`）与 Claude hook 平台 doctor 检查。**全部 host-attested 证据，非密码学证明——审计的「Do Not Claim」仍然成立。**
 
 **规划中 / 愿景（下文有描述但尚未实现）**
 
 - Codex adapter（manual / omp / opencode 已实现，Codex 仍为兼容目标）。
-- 经认证的执行主体（authenticated principal）、L3 级事件日志（签名 / 防篡改）、OS 级写沙箱。
+- 经认证的执行主体（authenticated principal）、L3 级事件日志（签名 / 防篡改）、OS 级写沙箱。**这三项需引入签名 / OIDC / 沙箱依赖，受当前依赖红线（仅 `clap`/`serde`/`anyhow`/`sha2`/`libc`，禁 HTTP client）限制——须先有意识地修订 ARCHITECTURE_GUARDRAILS.md 才能动工。**
 - 任务级多 run 镜像状态（`run_scheduled` / `run_launched` / `run_merged` reducer 已就绪并测试，但生产路径以 run 聚合为唯一事实源，未启用任务级镜像——详见 ROADMAP「已知缺口」）。
 
 **当前激活平台**：OMP（原生 hook）+ Claude Code（PreToolUse / SessionStart hook）+ opencode（`.opencode/plugins/ctl-gate.ts` 插件：`tool.execute.before` 门禁 + `experimental.chat.system.transform` 上下文注入；另带 `opencode` 执行器 adapter）。`.cursor / .pi` 与 Trellis 旧体系已移除；skills 单一来源内嵌于 `ctl` 二进制，经 `ctl init` 注入 `.omp/`（`.claude/`、`.opencode/` 为随仓库直接维护的集成）。
