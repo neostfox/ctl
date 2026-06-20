@@ -83,7 +83,8 @@
         "uncertainty_recorded",
         "uncertainty_disposition_recorded",
         "evidence_recorded",
-        "research_artifact_recorded"
+        "research_artifact_recorded",
+        "subagent_dispatched"
       ]
     },
     "payload": {
@@ -1487,6 +1488,76 @@
               },
               "source_run_id": {
                 "description": "Claimed originating run id, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "trust_level": {
+                "description": "Pinned content trust level. Only 'content_l0' is permitted.",
+                "type": "string",
+                "enum": ["content_l0"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "subagent_dispatched" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Attestation V1: a subagent dispatch recorded on the parent task ledger. Record-and-disclose, L0 content: role/adapter are host-supplied labels and the instruction/context/output hashes are computed by ctl from supplied artifacts; recording never asserts what actually ran.",
+            "required": ["role", "adapter", "trust_level"],
+            "properties": {
+              "role": {
+                "description": "Host-supplied subagent role/type label (unattested).",
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter": {
+                "description": "Host-supplied adapter label (unattested).",
+                "type": "string",
+                "minLength": 1
+              },
+              "parent_run": {
+                "description": "Claimed originating run id, if any. Never attested in V1.",
+                "type": "string",
+                "minLength": 1
+              },
+              "instruction_path": {
+                "description": "Normalized repo-relative path to the instruction artifact. Hashed by ctl.",
+                "type": "string",
+                "minLength": 1
+              },
+              "instruction_hash": {
+                "description": "SHA-256 of the instruction artifact at record time.",
+                "type": "string",
+                "minLength": 1
+              },
+              "context_path": {
+                "description": "Normalized repo-relative path to the context artifact. Hashed by ctl.",
+                "type": "string",
+                "minLength": 1
+              },
+              "context_hash": {
+                "description": "SHA-256 of the context artifact at record time.",
+                "type": "string",
+                "minLength": 1
+              },
+              "output_path": {
+                "description": "Normalized repo-relative path to the output artifact. Hashed by ctl.",
+                "type": "string",
+                "minLength": 1
+              },
+              "output_hash": {
+                "description": "SHA-256 of the output artifact at record time.",
                 "type": "string",
                 "minLength": 1
               },

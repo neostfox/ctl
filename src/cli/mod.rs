@@ -250,6 +250,11 @@ enum Commands {
         #[command(subcommand)]
         command: ResearchCommands,
     },
+    /// Attestation (V1): record subagent dispatches on the parent task ledger.
+    Dispatch {
+        #[command(subcommand)]
+        command: DispatchCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -521,6 +526,44 @@ enum ResearchCommands {
         id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DispatchCommands {
+    /// Record a subagent dispatch on the parent task. Host-attested: ctl hashes
+    /// any supplied artifact (`sha2`) and records the role/adapter labels — it
+    /// records what it was told was dispatched, never verifies what ran.
+    Record {
+        /// Parent task id the dispatch belongs to.
+        #[arg(long)]
+        task: String,
+        /// Host-supplied subagent role/type label (unattested).
+        #[arg(long)]
+        role: String,
+        /// Host-supplied adapter label (unattested).
+        #[arg(long)]
+        adapter: String,
+        /// Claimed originating run id, if any (never attested in V1).
+        #[arg(long)]
+        run: Option<String>,
+        /// Path to the instruction artifact; ctl records its sha256.
+        #[arg(long)]
+        instruction_artifact: Option<String>,
+        /// Path to the context artifact; ctl records its sha256.
+        #[arg(long)]
+        context_artifact: Option<String>,
+        /// Path to the output artifact; ctl records its sha256.
+        #[arg(long)]
+        output_artifact: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List the subagent dispatches recorded on a task (fact-only disclosure).
+    List {
+        /// Task id whose dispatches to show.
+        #[arg(long)]
+        task: String,
     },
 }
 
@@ -1230,6 +1273,7 @@ pub fn run() -> Result<()> {
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
+        Commands::Dispatch { command } => cmd_dispatch(command),
     }
 }
 
@@ -3411,6 +3455,69 @@ fn cmd_research(command: &ResearchCommands) -> Result<()> {
                 Some(view) => print!("{}", format_research_output(&view)),
                 None if *json => println!("null"),
                 None => println!("Task '{}' is not a research task (no research output).", id),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_dispatch(command: &DispatchCommands) -> Result<()> {
+    match command {
+        DispatchCommands::Record {
+            task,
+            role,
+            adapter,
+            run,
+            instruction_artifact,
+            context_artifact,
+            output_artifact,
+            dry_run,
+        } => {
+            let app = app_open(*dry_run)?;
+            let event = app.record_subagent_dispatch(
+                task,
+                role,
+                adapter,
+                run.as_deref(),
+                instruction_artifact.as_deref(),
+                context_artifact.as_deref(),
+                output_artifact.as_deref(),
+            )?;
+            println!(
+                "Recorded subagent dispatch on task '{}' at seq {} — role={}, adapter={} \
+                 (host-attested: ctl records what it was told was dispatched, not what ran).",
+                task, event.seq, role, adapter
+            );
+        }
+        DispatchCommands::List { task } => {
+            let app = app_open(false)?;
+            let state = app.replay_task(task)?;
+            if state.dispatches.is_empty() {
+                println!("No subagent dispatches recorded on task '{}'.", task);
+                return Ok(());
+            }
+            println!(
+                "Subagent dispatches on task '{}' (host-attested — ctl records what it was \
+                 told, never verifies what ran):",
+                task
+            );
+            for (i, d) in state.dispatches.iter().enumerate() {
+                let run = d
+                    .parent_run
+                    .as_ref()
+                    .map(|r| format!(" run={r}"))
+                    .unwrap_or_default();
+                println!("  {}. role={} adapter={}{}", i + 1, d.role, d.adapter, run);
+                for (label, art) in [
+                    ("instruction", &d.instruction),
+                    ("context", &d.context),
+                    ("output", &d.output),
+                ] {
+                    if let Some(a) = art {
+                        println!("       {label}: {} @ {}", a.path, a.hash);
+                    }
+                }
+                println!("       recorded_by={} (unattested label)", d.recorded_by);
             }
         }
     }

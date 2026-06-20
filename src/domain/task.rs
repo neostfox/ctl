@@ -334,6 +334,30 @@ pub struct Evidence {
     pub recorded_by: String,
 }
 
+/// Attestation V1: a subagent dispatch recorded on the parent task ledger.
+/// Record-and-disclose: `role`/`adapter` are host-supplied LABELS (unattested,
+/// like `recorded_by`), and the instruction/context/output artifacts are
+/// file-backed (ctl-computed hash). ctl records what it was told ran — it does
+/// NOT verify what actually ran. L0 content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Dispatch {
+    /// Host-supplied subagent role/type label (unattested).
+    pub role: String,
+    /// Host-supplied adapter label (unattested).
+    pub adapter: String,
+    /// The run this dispatch belonged to, if any (host-supplied).
+    pub parent_run: Option<String>,
+    /// sha256-bound instruction artifact, if supplied.
+    pub instruction: Option<ArtifactRef>,
+    /// sha256-bound context artifact, if supplied.
+    pub context: Option<ArtifactRef>,
+    /// sha256-bound output artifact, if supplied.
+    pub output: Option<ArtifactRef>,
+    /// The envelope actor at record time (an unattested principal — never a
+    /// forgeable payload field).
+    pub recorded_by: String,
+}
+
 /// Freshness of a recorded evidence artifact, derived against the working tree.
 /// Discloses only whether the file still matches what was recorded — never
 /// whether the evidence content is valid.
@@ -569,6 +593,10 @@ pub struct TaskState {
     /// record order. Default empty; absent in old streams, which replay unchanged.
     #[serde(default)]
     pub research_artifacts: Vec<ResearchArtifact>,
+    /// Attestation V1: subagent dispatches recorded on this task, in record order.
+    /// Default empty; absent in old streams, which replay unchanged.
+    #[serde(default)]
+    pub dispatches: Vec<Dispatch>,
     /// M4: Capability leases keyed by lease_id.
     pub leases: HashMap<String, LeaseState>,
     /// M4: Pending/approved/denied approval requests keyed by request_id.
@@ -602,6 +630,7 @@ impl TaskState {
             evidences: Vec::new(),
             task_kind: TaskKind::Implementation,
             research_artifacts: Vec::new(),
+            dispatches: Vec::new(),
             leases: HashMap::new(),
             pending_approvals: HashMap::new(),
             history: Vec::new(),
@@ -1828,6 +1857,43 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 source_run_id,
             });
         }
+        // ── Attestation V1: record a subagent dispatch on the parent task ──
+        "subagent_dispatched" => {
+            check_trust_level(&event.payload)?;
+            // Terminal-is-terminal: a completed/cancelled task's disclosed record
+            // must not change after the fact.
+            if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
+                return Err(format!(
+                    "subagent_dispatched: task is '{}'; a terminal task cannot record \
+                     further dispatches",
+                    state.phase.as_str()
+                ));
+            }
+            // role/adapter are host-supplied labels (unattested) — required so a
+            // dispatch always names what was dispatched. The three artifacts are
+            // optional (record-and-disclose), each a (path, hash) pair with no
+            // half pairs.
+            let role = require_str(&event.payload, "role")?;
+            let adapter = require_str(&event.payload, "adapter")?;
+            let parent_run = optional_str(&event.payload, "parent_run");
+            let instruction = decode_artifact(
+                &event.payload,
+                "instruction_path",
+                "instruction_hash",
+                false,
+            )?;
+            let context = decode_artifact(&event.payload, "context_path", "context_hash", false)?;
+            let output = decode_artifact(&event.payload, "output_path", "output_hash", false)?;
+            state.dispatches.push(Dispatch {
+                role,
+                adapter,
+                parent_run,
+                instruction,
+                context,
+                output,
+                recorded_by: event.actor.clone(),
+            });
+        }
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }
 
@@ -1877,5 +1943,95 @@ mod scope_tests {
         assert!(scopes_overlap("src", "src/auth"));
         assert!(scopes_overlap("src/auth", "src"));
         assert!(scopes_overlap("src/auth", "src/auth"));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::domain::event::Event;
+
+    fn dispatch_event(task_id: &str, seq: i64, payload: serde_json::Value) -> Event {
+        Event {
+            schema: "control.event-envelope.v1".to_string(),
+            event_id: format!("evt-{seq}"),
+            command_id: format!("cmd-{seq}"),
+            task_id: task_id.to_string(),
+            seq,
+            occurred_at: "2026-06-20T00:00:00Z".to_string(),
+            actor: "human".to_string(),
+            event_type: "subagent_dispatched".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn subagent_dispatched_records_host_attested_dispatch() {
+        // subagent-dispatch-record-v1: the reducer records a dispatch onto the
+        // parent task. role/adapter are host labels; the artifact is path+hash.
+        let mut state = TaskState::new("t");
+        let ev = dispatch_event(
+            "t",
+            1,
+            serde_json::json!({
+                "role": "designer",
+                "adapter": "opencode",
+                "parent_run": "run-1",
+                "instruction_path": "src/x.md",
+                "instruction_hash": "aaa",
+                "trust_level": "content_l0"
+            }),
+        );
+        apply(&mut state, &ev).unwrap();
+        assert_eq!(state.dispatches.len(), 1);
+        let d = &state.dispatches[0];
+        assert_eq!(d.role, "designer");
+        assert_eq!(d.adapter, "opencode");
+        assert_eq!(d.parent_run.as_deref(), Some("run-1"));
+        let instr = d.instruction.as_ref().expect("instruction recorded");
+        assert_eq!(instr.path, "src/x.md");
+        assert_eq!(instr.hash, "aaa");
+        assert!(d.context.is_none() && d.output.is_none());
+        // recorded_by is the envelope actor (an unattested label), never a payload field.
+        assert_eq!(d.recorded_by, "human");
+    }
+
+    #[test]
+    fn subagent_dispatched_requires_role_and_adapter() {
+        let mut state = TaskState::new("t");
+        let ev = dispatch_event(
+            "t",
+            1,
+            serde_json::json!({"adapter": "opencode", "trust_level": "content_l0"}),
+        );
+        assert!(apply(&mut state, &ev).is_err(), "role is required");
+    }
+
+    #[test]
+    fn subagent_dispatched_rejected_on_terminal_task() {
+        // Terminal-is-terminal: a completed task's record must not change.
+        let mut state = TaskState::new("t");
+        state.phase = Phase::Completed;
+        let ev = dispatch_event(
+            "t",
+            1,
+            serde_json::json!({"role": "x", "adapter": "y", "trust_level": "content_l0"}),
+        );
+        assert!(apply(&mut state, &ev).is_err());
+    }
+
+    #[test]
+    fn subagent_dispatched_rejects_half_artifact_pair() {
+        // A path without its hash (or vice-versa) is rejected — no half pairs.
+        let mut state = TaskState::new("t");
+        let ev = dispatch_event(
+            "t",
+            1,
+            serde_json::json!({
+                "role": "x", "adapter": "y", "trust_level": "content_l0",
+                "instruction_path": "src/x.md"
+            }),
+        );
+        assert!(apply(&mut state, &ev).is_err());
     }
 }

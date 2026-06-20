@@ -1281,6 +1281,49 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// Record a subagent dispatch on the parent task (subagent-dispatch-record-v1).
+    /// Record-and-disclose: `role`/`adapter` are host-supplied labels and each
+    /// supplied artifact is sha256-hashed by ctl (`hash_evidence`); this records
+    /// what the host said it dispatched — it never asserts what actually ran.
+    /// Absent artifacts are simply not recorded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_subagent_dispatch(
+        &self,
+        task_id: &str,
+        role: &str,
+        adapter: &str,
+        parent_run: Option<&str>,
+        instruction_artifact: Option<&str>,
+        context_artifact: Option<&str>,
+        output_artifact: Option<&str>,
+    ) -> Result<Event> {
+        let mut payload = serde_json::json!({
+            "role": role,
+            "adapter": adapter,
+            "trust_level": crate::domain::task::BRAINSTORM_TRUST_LEVEL,
+        });
+        if let Some(run) = parent_run.filter(|s| !s.is_empty()) {
+            payload["parent_run"] = serde_json::json!(run);
+        }
+        for (path_key, hash_key, artifact) in [
+            ("instruction_path", "instruction_hash", instruction_artifact),
+            ("context_path", "context_hash", context_artifact),
+            ("output_path", "output_hash", output_artifact),
+        ] {
+            if let Some(p) = artifact.filter(|s| !s.is_empty()) {
+                let (rel, hash) = self.hash_evidence(p)?;
+                payload[path_key] = serde_json::json!(rel);
+                payload[hash_key] = serde_json::json!(hash);
+            }
+        }
+        let event = self.build_event(task_id, "subagent_dispatched", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
     /// Resolve evidence/artifact freshness against the working tree: ABSENT if
     /// the file is gone, STALE if its hash drifted, CURRENT if it matches. Never
     /// asserts the content is valid — only whether the file still matches what was
@@ -7210,6 +7253,36 @@ mod tests {
         // Unsupplied provenance is simply absent.
         assert!(state.provider.is_none());
         assert!(state.context_hash.is_none());
+    }
+
+    #[test]
+    fn record_subagent_dispatch_records_host_attested_dispatch() {
+        // subagent-dispatch-record-v1: the dispatch is appended to the task ledger
+        // (passing envelope-schema validation) with the artifact ctl-hashed.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        inprogress_task(&app, "t", &["src"]);
+        std::fs::write(dir.path().join("instruction.txt"), b"the instruction").unwrap();
+        app.record_subagent_dispatch(
+            "t",
+            "designer",
+            "opencode",
+            Some("run-1"),
+            Some("instruction.txt"),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = app.replay_task("t").unwrap();
+        assert_eq!(state.dispatches.len(), 1);
+        let d = &state.dispatches[0];
+        assert_eq!(d.role, "designer");
+        assert_eq!(d.adapter, "opencode");
+        assert_eq!(d.parent_run.as_deref(), Some("run-1"));
+        let instr = d.instruction.as_ref().expect("instruction recorded");
+        assert_eq!(instr.hash.len(), 64);
+        assert!(instr.hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(d.context.is_none() && d.output.is_none());
     }
 
     #[test]
