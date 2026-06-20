@@ -32,6 +32,9 @@ export interface GateResult {
   reason: string;
   task_id?: string;
   remedy?: string;
+  /** Gate hint: log this verdict even if allowed (e.g. a never-path-scoped
+   *  bash_write). Denies are logged regardless of this flag. */
+  record?: boolean;
 }
 
 export interface ActiveTask {
@@ -108,6 +111,41 @@ export function buildGateArgs(input: {
 }
 
 /**
+ * Whether a verdict belongs in the non-canonical decision log: every DENY, plus
+ * any allow the gate explicitly flags (`record === true`, e.g. a bash_write that
+ * is never path-scoped against write_allow). Pure, so the policy is unit-tested.
+ */
+export function shouldRecord(gate: GateResult): boolean {
+  return !gate.allowed || gate.record === true;
+}
+
+/**
+ * Build the `ctl hook record-decision` argv for a verdict. Pure, and the ARRAY
+ * form (never a shell string) so a path/command with spaces or quotes stays one
+ * argument. The recorded object is labeled non-canonical by `ctl` on write.
+ */
+export function buildRecordArgs(input: {
+  tool: string;
+  gate: GateResult;
+  path?: string;
+  command?: string;
+  taskId?: string;
+}): string[] {
+  const record: Record<string, unknown> = {
+    source: "opencode",
+    tool: input.tool,
+    allowed: input.gate.allowed === true,
+    state: input.gate.state,
+    reason: input.gate.reason,
+  };
+  if (input.command) record.command = input.command;
+  else if (input.path) record.path = input.path;
+  const task = input.gate.task_id || input.taskId?.trim();
+  if (task) record.task_id = task;
+  return ["hook", "record-decision", "--data", JSON.stringify(record)];
+}
+
+/**
  * Render the active-task system context — scope, phase, and task id per active
  * task. Returns null when there is no active task, so the plugin never
  * fabricates task context out of an empty ledger.
@@ -133,6 +171,8 @@ export function buildContextMessage(active: ActiveTask[] | undefined): string | 
 export interface CtlRunner {
   gate(args: string[]): Promise<GateResult | null>;
   context(): Promise<ContextResult | null>;
+  /** Append a decision record (best-effort; never throws). */
+  recordDecision(args: string[]): Promise<void>;
 }
 
 /** Emit a one-line diagnostic so ctl failures are observable, not swallowed. */
@@ -187,11 +227,17 @@ export const realCtlRunner: CtlRunner = {
       reason: (parsed.reason as string) ?? "",
       task_id: parsed.task_id as string | undefined,
       remedy: parsed.remedy as string | undefined,
+      record: parsed.record === true,
     };
   },
   async context() {
     const args = ["hook", "context"];
     return parseJson<ContextResult>(await runCtl(args, "context"), "context", args);
+  },
+  async recordDecision(args) {
+    // Best-effort: runCtl logs and swallows any error (returns null). The
+    // advisory decision log must never break the gate it observes.
+    await runCtl(args, "record-decision");
   },
 };
 
@@ -225,6 +271,21 @@ export function createHooks(runner: CtlRunner) {
           );
         }
         return;
+      }
+
+      // Record denies + flagged allows (e.g. bash_write) to the non-canonical
+      // decision log before acting — a deny throws below, a bash_write allow
+      // proceeds. Best-effort: recordDecision never throws.
+      if (shouldRecord(gate)) {
+        await runner.recordDecision(
+          buildRecordArgs({
+            tool: input.tool,
+            gate,
+            path: gi.path,
+            command: gi.command,
+            taskId: process.env.CTL_TASK_ID,
+          }),
+        );
       }
 
       if (!gate.allowed) {

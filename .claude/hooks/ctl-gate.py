@@ -31,6 +31,41 @@ def allow() -> None:
     sys.exit(0)
 
 
+def record_decision(tool: str, ti: dict, verdict: dict) -> None:
+    """Append blocked/flagged tool calls to the NON-CANONICAL .ctl/decisions.jsonl.
+
+    Records every DENY (allowed != true) and any verdict the gate flags with
+    record=true (e.g. a bash_write ALLOW, which is never path-scoped against
+    write_allow). This turns "what the gate blocked/flagged" into auditable
+    evidence. Best-effort: a logging failure must NEVER block or delay the
+    tool call, so every error here is swallowed.
+    """
+    allowed = verdict.get("allowed") is True
+    if allowed and verdict.get("record") is not True:
+        return
+    record = {
+        "source": "claude",
+        "tool": tool,
+        "allowed": allowed,
+        "state": verdict.get("state", ""),
+        "reason": verdict.get("reason", ""),
+    }
+    if tool == "Bash":
+        record["command"] = ti.get("command", "")
+    else:
+        record["path"] = ti.get("file_path", "")
+    task = verdict.get("task_id") or os.environ.get("CTL_TASK_ID", "").strip()
+    if task:
+        record["task_id"] = task
+    try:
+        subprocess.run(
+            ["ctl", "hook", "record-decision", "--data", json.dumps(record)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        pass  # advisory log only — never fail the tool on a logging error
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -77,6 +112,10 @@ def main() -> None:
         if tool in FAIL_CLOSED_TOOLS:
             deny("ctl gate returned unparseable output — failing closed.")
         allow()
+
+    # Record denies + flagged allows before acting (a bash_write ALLOW must be
+    # logged before the allow() exit below).
+    record_decision(tool, ti, verdict)
 
     if verdict.get("allowed") is True:
         allow()

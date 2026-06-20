@@ -17,6 +17,9 @@ interface GateResult {
   reason: string;
   task_id?: string;
   remedy?: string;
+  /** Gate hint: log this verdict even if allowed (e.g. a never-path-scoped
+   *  bash_write). Denies are logged regardless of this flag. */
+  record?: boolean;
 }
 
 // ── Subagent timeout tracking ──────────────────────────────────────────
@@ -120,11 +123,47 @@ async function checkGate(
       reason: (parsed.reason as string) ?? "",
       task_id: parsed.task_id as string | undefined,
       remedy: parsed.remedy as string | undefined,
+      record: parsed.record === true,
     };
   } catch (err) {
     logCtlError("gate-parse", args, err as NodeJS.ErrnoException, raw);
     return null;
   }
+}
+
+/**
+ * Append a blocked/flagged tool call to the NON-CANONICAL .ctl/decisions.jsonl
+ * via `ctl hook record-decision`. Records every DENY and any verdict the gate
+ * flags with record=true (e.g. a bash_write ALLOW, never path-scoped). Turns
+ * "what the gate blocked/flagged" into auditable evidence.
+ *
+ * Fire-and-forget and best-effort: this never blocks or delays the tool call,
+ * and any failure is swallowed by `ctl()` — an advisory log must not break the
+ * gate it observes.
+ */
+function recordDecision(
+  tool: string,
+  gate: GateResult,
+  path?: string,
+  command?: string,
+): void {
+  const allowed = gate.allowed === true;
+  if (allowed && gate.record !== true) return;
+  const record: Record<string, unknown> = {
+    source: "omp",
+    tool,
+    allowed,
+    state: gate.state,
+    reason: gate.reason,
+  };
+  if (command) record.command = command;
+  else if (path) record.path = path;
+  const task = gate.task_id || process.env.CTL_TASK_ID?.trim();
+  if (task) record.task_id = task;
+  void ctl(
+    ["hook", "record-decision", "--data", JSON.stringify(record)],
+    "record-decision",
+  );
 }
 
 export default function (pi: HookAPI): void {
@@ -267,6 +306,10 @@ export default function (pi: HookAPI): void {
       }
       return; // read-only / non-mutating — allow
     }
+
+    // Record denies + flagged allows to the non-canonical decision log before
+    // acting (a deny returns below; a bash_write allow proceeds). Best-effort.
+    recordDecision(tool, gate, path, command);
 
     if (!gate.allowed) {
       const remedy = gate.remedy ? `\n💡 ${gate.remedy}` : "";

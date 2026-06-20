@@ -126,6 +126,18 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// View the NON-CANONICAL gate-decision log (`.ctl/decisions.jsonl`):
+    /// advisory records of blocked/flagged tool calls written by the host gate
+    /// hooks. These are evidence, NOT canonical task events — not hash-chained
+    /// and not covered by `ctl validate`.
+    Decisions {
+        /// Show at most the N most-recent records (0 = all)
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Output the raw JSONL records instead of a formatted table
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Run commands (M3 manual + M4 OMP)
     Run {
         #[command(subcommand)]
@@ -1158,6 +1170,7 @@ pub fn run() -> Result<()> {
         Commands::Audit { id } => cmd_audit(id),
         Commands::Report => cmd_report(),
         Commands::Board { json } => cmd_board(*json),
+        Commands::Decisions { limit, json } => cmd_decisions(*limit, *json),
         Commands::Run { command } => cmd_run(command, dry_run),
         Commands::Workspace { command } => cmd_workspace(command, dry_run),
         Commands::Approval { command } => cmd_approval(command, dry_run),
@@ -5603,6 +5616,12 @@ fn cmd_hook_gate(
                     let output = serde_json::json!({
                         "allowed": allow,
                         "state": gov_state_str(&state),
+                        // A bash write is never path-scoped against write_allow, so
+                        // every attempt — allowed or denied — is noteworthy. Flag it
+                        // for the decision log; denies elsewhere are logged by the
+                        // host hook on `allowed == false`, but a bash_write ALLOW
+                        // would otherwise be invisible, so mark it explicitly.
+                        "record": true,
                         "reason": if allow {
                             "bash write allowed under active task — NOT path-scope-checked against write_allow"
                         } else {
@@ -5676,6 +5695,20 @@ fn cmd_hook_gate(
     Ok(())
 }
 
+/// Build one decision-log entry from a host hook's JSON `data`, stamping the
+/// wall-clock `ts` and an explicit `canonical: false` label. The label is
+/// stamped here (not left to the caller) so every record in `decisions.jsonl`
+/// self-identifies as non-canonical advisory evidence — never a task event.
+/// Pure (no IO) so the stamping contract is unit-tested directly.
+fn decision_entry(data: &str, ts: u64) -> Result<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(data)?;
+    let mut entry = parsed.as_object().cloned().unwrap_or_default();
+    // Stamped last so they always win over any hook-supplied keys of the same name.
+    entry.insert("ts".to_string(), serde_json::json!(ts));
+    entry.insert("canonical".to_string(), serde_json::json!(false));
+    Ok(serde_json::Value::Object(entry))
+}
+
 fn cmd_hook_record_decision(data: &str) -> Result<()> {
     let project_root = std::env::current_dir()?;
     let decisions_dir = project_root.join(".ctl");
@@ -5683,15 +5716,11 @@ fn cmd_hook_record_decision(data: &str) -> Result<()> {
 
     let decisions_path = decisions_dir.join("decisions.jsonl");
 
-    // Validate it's valid JSON
-    let parsed: serde_json::Value = serde_json::from_str(data)?;
-
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    let mut entry = parsed.as_object().cloned().unwrap_or_default();
-    entry.insert("ts".to_string(), serde_json::json!(ts));
-    let entry = serde_json::Value::Object(entry);
+    // `decision_entry` validates that `data` is valid JSON and stamps the label.
+    let entry = decision_entry(data, ts)?;
 
     use std::io::Write;
     let mut file = fs::OpenOptions::new()
@@ -5702,6 +5731,100 @@ fn cmd_hook_record_decision(data: &str) -> Result<()> {
 
     let output = serde_json::json!({ "recorded": true });
     println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+/// Shorten `s` to at most `max` characters, marking truncation with an ellipsis.
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// Format one decision record as a single human-readable line. A record that
+/// does not parse as JSON is shown verbatim (flagged), never dropped — a
+/// malformed advisory record must stay visible rather than silently disappear.
+fn format_decision_line(line: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return format!("  [?unparseable] {line}"),
+    };
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mark = match v.get("allowed").and_then(|x| x.as_bool()) {
+        Some(true) => "ALLOW",
+        Some(false) => "DENY ",
+        None => "?    ",
+    };
+    let ts = v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
+    let source = get("source");
+    let tool = get("tool");
+    let path = get("path");
+    let target = if path.is_empty() {
+        ellipsize(&get("command"), 60)
+    } else {
+        path
+    };
+    let reason = ellipsize(&get("reason"), 80);
+    format!("  [{mark}] ts={ts} {source}/{tool}  {target}  — {reason}")
+}
+
+/// Render the gate-decision log for `ctl decisions`. Pure (lines in, string out)
+/// so selection + formatting are unit-tested without IO. `lines` are the raw
+/// JSONL records oldest-first; the `limit` most-recent are shown (0 = all). The
+/// non-canonical banner is emitted on every (non-JSON) invocation so a reader
+/// can never mistake this log for canonical truth.
+fn format_decisions(lines: &[String], limit: usize, json: bool) -> String {
+    let records: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    let start = if limit == 0 {
+        0
+    } else {
+        records.len().saturating_sub(limit)
+    };
+    let shown = &records[start..];
+
+    if json {
+        // Raw JSONL passthrough of the selected window (still the non-canonical
+        // records — each line already carries `"canonical": false`).
+        return shown
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let mut out = String::new();
+    out.push_str("⚠ NON-CANONICAL gate-decision log (.ctl/decisions.jsonl)\n");
+    out.push_str("  Advisory records of blocked/flagged tool calls from the host gate hooks.\n");
+    out.push_str(
+        "  Evidence, NOT canonical task events · not hash-chained · not covered by `ctl validate`.\n",
+    );
+
+    if records.is_empty() {
+        out.push_str("\n  (no decisions recorded yet)");
+        return out;
+    }
+
+    out.push_str(&format!(
+        "\n  showing {} of {} record(s):\n\n",
+        shown.len(),
+        records.len()
+    ));
+    for line in shown {
+        out.push_str(&format_decision_line(line));
+        out.push('\n');
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+fn cmd_decisions(limit: usize, json: bool) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let path = project_root.join(".ctl").join("decisions.jsonl");
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    println!("{}", format_decisions(&lines, limit, json));
     Ok(())
 }
 
@@ -5835,9 +5958,10 @@ fn cmd_hook_spec_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bash, detect_shared_git_op, format_brainstorm_provenance, format_research_output,
-        format_uncertainty_ledger, parse_project_default_gates, resolve_active_governance,
-        ActiveTask, GovState,
+        classify_bash, decision_entry, detect_shared_git_op, ellipsize,
+        format_brainstorm_provenance, format_decision_line, format_decisions,
+        format_research_output, format_uncertainty_ledger, parse_project_default_gates,
+        resolve_active_governance, ActiveTask, GovState,
     };
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
@@ -6360,5 +6484,95 @@ mod tests {
     fn project_gates_stop_at_next_table() {
         let cfg = "[project]\ndefault_gates = [\"cargo_check\"]\n\n[severity]\nR1 = \"warning\"\n";
         assert_eq!(parse_project_default_gates(cfg), vec!["cargo_check"]);
+    }
+
+    // ── decision log (.ctl/decisions.jsonl) — non-canonical gate evidence ──────
+
+    #[test]
+    fn decision_entry_stamps_non_canonical_label_and_ts() {
+        // Every record must self-identify as non-canonical and carry a timestamp,
+        // while preserving the hook-supplied fields verbatim.
+        let v = decision_entry(
+            r#"{"source":"claude","tool":"write","allowed":false,"reason":"outside write_allow"}"#,
+            1700,
+        )
+        .expect("valid json");
+        assert_eq!(v.get("canonical").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(v.get("ts").and_then(|x| x.as_u64()), Some(1700));
+        assert_eq!(v.get("source").and_then(|x| x.as_str()), Some("claude"));
+        assert_eq!(v.get("allowed").and_then(|x| x.as_bool()), Some(false));
+    }
+
+    #[test]
+    fn decision_entry_label_cannot_be_forged_by_the_hook() {
+        // A hook that tries to mark its record canonical:true must not win — the
+        // stamp is applied last so the log can never claim canonical status.
+        let v = decision_entry(r#"{"canonical":true,"ts":1}"#, 9000).expect("valid json");
+        assert_eq!(v.get("canonical").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(v.get("ts").and_then(|x| x.as_u64()), Some(9000));
+    }
+
+    #[test]
+    fn decision_entry_rejects_invalid_json() {
+        assert!(decision_entry("not json", 1).is_err());
+    }
+
+    #[test]
+    fn format_decisions_always_labels_non_canonical() {
+        let lines = vec![
+            r#"{"source":"claude","tool":"bash","allowed":false,"reason":"git commit only in commit window","ts":1}"#.to_string(),
+        ];
+        let out = format_decisions(&lines, 50, false);
+        assert!(out.contains("NON-CANONICAL"));
+        assert!(out.contains("not covered by `ctl validate`"));
+        assert!(out.contains("[DENY ]"));
+        assert!(out.contains("claude/bash"));
+    }
+
+    #[test]
+    fn format_decisions_empty_log_is_stated_not_blank() {
+        let out = format_decisions(&[], 50, false);
+        assert!(out.contains("NON-CANONICAL"));
+        assert!(out.contains("(no decisions recorded yet)"));
+    }
+
+    #[test]
+    fn format_decisions_limit_shows_most_recent() {
+        let lines: Vec<String> = (0..5)
+            .map(|i| format!(r#"{{"tool":"bash","allowed":true,"reason":"r{i}","ts":{i}}}"#))
+            .collect();
+        let out = format_decisions(&lines, 2, false);
+        assert!(out.contains("showing 2 of 5 record(s)"));
+        // The two most-recent (ts=3, ts=4) are shown; the oldest is not.
+        assert!(out.contains("ts=4") && out.contains("ts=3"));
+        assert!(!out.contains("ts=0"));
+    }
+
+    #[test]
+    fn format_decisions_json_mode_is_raw_passthrough_no_banner() {
+        let lines = vec![
+            r#"{"tool":"bash","allowed":true,"ts":1}"#.to_string(),
+            r#"{"tool":"write","allowed":false,"ts":2}"#.to_string(),
+        ];
+        let out = format_decisions(&lines, 0, true);
+        assert!(!out.contains("NON-CANONICAL"));
+        assert_eq!(out.lines().count(), 2);
+        assert!(out.contains(r#""tool":"write""#));
+    }
+
+    #[test]
+    fn format_decision_line_keeps_unparseable_records_visible() {
+        // A malformed advisory record must be shown (flagged), never dropped.
+        let out = format_decision_line("{ broken");
+        assert!(out.contains("?unparseable"));
+        assert!(out.contains("{ broken"));
+    }
+
+    #[test]
+    fn ellipsize_marks_truncation_only_when_needed() {
+        assert_eq!(ellipsize("short", 10), "short");
+        let long = ellipsize("abcdefghij", 5);
+        assert!(long.ends_with('…'));
+        assert_eq!(long.chars().count(), 5);
     }
 }

@@ -13,8 +13,11 @@ import {
   extractGateInput,
   buildGateArgs,
   buildContextMessage,
+  shouldRecord,
+  buildRecordArgs,
   createHooks,
   type CtlRunner,
+  type GateResult,
 } from "./ctl-gate.ts";
 import CtlGate from "./ctl-gate.ts";
 
@@ -27,9 +30,12 @@ async function caught(fn: () => Promise<unknown>): Promise<Error | null> {
   }
 }
 
+const noRecord = async () => {};
+
 const allow: CtlRunner = {
   gate: async () => ({ allowed: true, state: "in_progress", reason: "" }),
   context: async () => null,
+  recordDecision: noRecord,
 };
 const deny: CtlRunner = {
   gate: async () => ({
@@ -39,8 +45,28 @@ const deny: CtlRunner = {
     remedy: "ctl task revise --id ...",
   }),
   context: async () => null,
+  recordDecision: noRecord,
 };
-const down: CtlRunner = { gate: async () => null, context: async () => null };
+const down: CtlRunner = {
+  gate: async () => null,
+  context: async () => null,
+  recordDecision: noRecord,
+};
+
+/** A runner that returns a fixed verdict and captures every recordDecision argv. */
+function recordingRunner(gate: GateResult | null): { runner: CtlRunner; calls: string[][] } {
+  const calls: string[][] = [];
+  return {
+    calls,
+    runner: {
+      gate: async () => gate,
+      context: async () => null,
+      recordDecision: async (args) => {
+        calls.push(args);
+      },
+    },
+  };
+}
 
 test("isMutating: write/edit/patch/bash/task are mutating; read-only is not", () => {
   for (const t of ["write", "edit", "patch", "bash", "task"]) expect(isMutating(t)).toBe(true);
@@ -120,6 +146,84 @@ test("context hook injects nothing when the ledger has no active task", async ()
   const out = { system: [] as string[] };
   await h["experimental.chat.system.transform"]({}, out);
   expect(out.system.length).toBe(0);
+});
+
+test("shouldRecord: denies and record-flagged allows are logged; plain allows are not", () => {
+  const base = { state: "in_progress", reason: "" };
+  expect(shouldRecord({ allowed: false, ...base })).toBe(true); // any deny
+  expect(shouldRecord({ allowed: true, record: true, ...base })).toBe(true); // bash_write allow
+  expect(shouldRecord({ allowed: true, ...base })).toBe(false); // ordinary allow
+  expect(shouldRecord({ allowed: true, record: false, ...base })).toBe(false);
+});
+
+test("buildRecordArgs: array form, source=opencode, carries path/command + task_id", () => {
+  const denyArgs = buildRecordArgs({
+    tool: "write",
+    gate: { allowed: false, state: "in_progress", reason: "outside write_allow", task_id: "t-9" },
+    path: "src/x.rs",
+  });
+  expect(denyArgs.slice(0, 3)).toEqual(["hook", "record-decision", "--data"]);
+  const payload = JSON.parse(denyArgs[3]);
+  expect(payload).toMatchObject({
+    source: "opencode",
+    tool: "write",
+    allowed: false,
+    state: "in_progress",
+    reason: "outside write_allow",
+    path: "src/x.rs",
+    task_id: "t-9",
+  });
+
+  // bash records `command`, not `path`; taskId falls back to the dispatch arg.
+  const bashArgs = buildRecordArgs({
+    tool: "bash",
+    gate: { allowed: true, record: true, state: "in_progress", reason: "bash write allowed" },
+    command: "echo hi > src/x.rs",
+    taskId: "t-env",
+  });
+  const bashPayload = JSON.parse(bashArgs[3]);
+  expect(bashPayload.command).toBe("echo hi > src/x.rs");
+  expect(bashPayload.path).toBeUndefined();
+  expect(bashPayload.task_id).toBe("t-env");
+});
+
+test("hook records a DENY before throwing", async () => {
+  const { runner, calls } = recordingRunner({
+    allowed: false,
+    state: "in_progress",
+    reason: "outside write_allow",
+  });
+  const h = createHooks(runner);
+  const err = await caught(() =>
+    h["tool.execute.before"]({ tool: "write" }, { args: { filePath: "src/x" } }),
+  );
+  expect(err).not.toBeNull(); // still blocks
+  expect(calls.length).toBe(1);
+  expect(calls[0].slice(0, 2)).toEqual(["hook", "record-decision"]);
+  expect(JSON.parse(calls[0][3])).toMatchObject({ allowed: false, tool: "write", path: "src/x" });
+});
+
+test("hook records a bash_write ALLOW (record=true) and still allows it", async () => {
+  const { runner, calls } = recordingRunner({
+    allowed: true,
+    record: true,
+    state: "in_progress",
+    reason: "bash write allowed under active task — NOT path-scope-checked",
+  });
+  const h = createHooks(runner);
+  const err = await caught(() =>
+    h["tool.execute.before"]({ tool: "bash" }, { args: { command: "echo hi > src/x.rs" } }),
+  );
+  expect(err).toBeNull(); // allowed
+  expect(calls.length).toBe(1);
+  expect(JSON.parse(calls[0][3])).toMatchObject({ allowed: true, tool: "bash", command: "echo hi > src/x.rs" });
+});
+
+test("hook does NOT record an ordinary allow", async () => {
+  const { runner, calls } = recordingRunner({ allowed: true, state: "in_progress", reason: "within write_allow" });
+  const h = createHooks(runner);
+  await h["tool.execute.before"]({ tool: "write" }, { args: { filePath: ".opencode/x" } });
+  expect(calls.length).toBe(0);
 });
 
 test("REAL exported plugin hook fails closed when ctl is unreachable", async () => {
