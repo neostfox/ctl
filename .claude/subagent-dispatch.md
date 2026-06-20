@@ -16,8 +16,10 @@ subagent cannot reliably carry the active-task binding, and it is undocumented
 whether its tool calls even reach the PreToolUse gate. Inline (main-agent) writes
 are therefore the safe default. **Recommendation:** dispatch read-only
 *research/exploration* to subagents now (safe); keep **writes inline** by default
-(mirror Codex `dispatch_mode: inline`); only enable writable `.claude` subagents
-after the open uncertainty below is resolved **in a sandbox**.
+(mirror Codex `dispatch_mode: inline`). The blocking uncertainty (U-1) is now
+**resolved against write-dispatch**: Claude Code's PreToolUse cannot gate the
+`Task`/subagent tool, so writable `.claude` subagents stay deferred **by design**,
+not pending a sandbox probe (see *Resolved — U-1* below).
 
 ## ObservedBasis (what was read in this repo)
 
@@ -55,22 +57,43 @@ Verified via the `claude-code-guide` agent against code.claude.com/docs:
   subagents; keep *coordinated multi-file edits* in the main agent. Inline writing
   already matches this guidance.
 
-## OpenUncertainty (unresolved — must not be hidden)
+## Resolved — U-1 (2026-06-20): PreToolUse cannot gate subagent dispatch
 
-- **Do subagent Write/Edit/Bash tool calls trigger the `.claude` PreToolUse
-  hook?** Undocumented; the claude-code-guide agent could not confirm it from the
-  docs. This is the **blocking** unknown:
-  - If **no** → subagent writes bypass `ctl-gate.py` entirely → ungoverned writes.
-  - If **yes** → the hook still reads `CTL_TASK_ID` from its own process env, which
-    a subagent cannot set for the harness-spawned hook (and `Write`/`Edit` don't
-    run through a shell), so the call cannot carry the right `--task` binding and
-    risks `multiple_active` / wrong-task attribution.
-- **Can subagents spawn nested subagents?** Undocumented.
-- A live probe to settle the first point was **declined by a built-in subagent**
-  on safety grounds (it refused to attempt an out-of-scope write in the live
-  governed repo). Observation: built-in subagents apply independent judgment and
-  may refuse governance-sensitive writes — a further reason write-dispatch is not
-  "free". The probe should be run in a **throwaway sandbox checkout**, not here.
+The previously-blocking unknown was settled by a read-only `claude-code-guide`
+spike during the 0.0.5 orchestration-trust audit. Recorded as uncertainty `U-1`
+**RESOLVED** on task `orchestration-trust-audit-v1` (external-authority evidence
+`E-1`); see that report's Addendum (`brainstorms/orchestration-trust-audit-v1.md`).
+
+> **Do a subagent's Write/Edit/Bash tool calls trigger the `.claude` PreToolUse
+> hook (and does PreToolUse fire for the Task/subagent-spawn tool)? — CONFIRMED
+> NO.** Per the official Claude Code hooks docs:
+>
+> - PreToolUse does **not** match the `Task` / `Agent` / `Skill` tools — adding
+>   `Task` to the `settings.json` matcher is an **inert no-op**. (Agent lifecycle
+>   has a separate `SubagentStart` event whose deny capability is undocumented.)
+> - A spawned subagent's own `Write`/`Edit`/`Bash` calls run in an **isolated
+>   context** and do **not** trigger the parent session's PreToolUse hooks; the
+>   subagent uses its own frontmatter hooks, and `CTL_TASK_ID` propagation into a
+>   subagent's hook environment is unspecified (assume not).
+
+**Consequence — a platform boundary, not a TODO.** Claude↔OpenCode subagent-gating
+parity is **structurally impossible via PreToolUse**: OpenCode's session-level
+plugin can gate the `task` tool; Claude's PreToolUse model cannot. This *validates*
+the design above — subagent writes were never reachable by the gate, so keeping
+**writes inline in the main agent is the correct mitigation, not a stopgap**.
+Writable `.claude` subagent roles therefore stay deferred **by design**. (The
+`ctl-gate.py` regression tests pin the corollary: the hook never consults `ctl`
+for a `Task` tool call — `test_ctl_gate.py::test_task_tool_is_ungoverned_and_never_reaches_ctl`.)
+
+## OpenUncertainty (still open — must not be hidden)
+
+- **Can subagents spawn nested subagents, and does the `SubagentStart` event
+  expose a deny capability?** Undocumented.
+- A live in-repo probe of the (now-resolved) gating question was **declined by a
+  built-in subagent** on safety grounds — built-in subagents apply independent
+  judgment and may refuse governance-sensitive writes, a further reason
+  write-dispatch is not "free". Any future writable-role experiment belongs in a
+  **throwaway sandbox checkout**, not here.
 
 ## Why writing stays in the main agent (answer)
 
