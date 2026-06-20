@@ -26,7 +26,7 @@
 - 事件溯源任务账本：`events.jsonl` 为唯一事实源，`task.json` 为可重建投影；存储根为 **`.ctl/`**（由 `.trellis/` 迁移，后者已整体退役）。
 - 分层 Rust（`domain` 纯 reducer / `application` / `infrastructure` / `cli` / `adapters`）。`domain` 纯度与依赖方向由 `ctl architecture check` 的 `check_modules`（实现位于 `src/cli/mod.rs`，扫描 `src/domain/` 顶层 `.rs` 文件）**机器强制**（禁止 `use crate::{infrastructure,cli,adapters,application}` 与 `std::{fs,io,net,process,time}`）。
 - 路径边界（`PathNormalizer`）、gate 模板（`cargo_check/test/fmt/clippy`）、受控执行状态机（Planning→Ready→InProgress→Review→Completed，正交 hold）。phase 机器串统一为 serde `in_progress`（`Phase::as_str()` 为唯一来源）。
-- 运行时治理 hook：**OMP**（`.omp/hooks/pre/ctl-context.ts`）与 **Claude Code**（`.claude/hooks/ctl-gate.py`，PreToolUse）。写操作越界 **fail-closed**；`ctl` 不可用时写工具拦截而非放行。
+- 运行时治理 hook：**OMP**（`.omp/hooks/pre/ctl-context.ts`）、**Claude Code**（`.claude/hooks/ctl-gate.py`，PreToolUse）与 **OpenCode**（`.opencode/plugins/ctl-gate.ts`）。越界写入被拦截，但 **fail-closed 按工具/平台分级**：路径作用域的 Write/Edit/MultiEdit 在 `ctl` 不可用时 fail-closed；**Claude Code 的 Bash fail-open**（不锁死 shell、不做路径作用域检查），其 **Task/子智能体派发不被 PreToolUse 匹配**（U-1 平台边界，非待办）；OpenCode 的 `task` 与 Bash 经会话级插件 fail-closed。
 - **M4**：worktree 隔离 + run-scoped lease + approval 流程（`ctl workspace / approval / run`）；manual + omp + opencode 执行器 adapter（`ctl adapter list/status/doctor`）。
 - **M5（可解释控制闭环）**：`telemetry.jsonl` 证据索引（`ctl telemetry add`）、`control.json` reconcile 决策投影（`ctl board`）、确定性 drift 引擎（`ctl drift compute/explain`）、`ctl next-action` 建议（pass/ask/stop/replan/rescope，只读、不发事件）。
 - **M6（并发执行切片 1–3 + lease 接线）**：`ctl schedule plan/validate/run` 将校验过的计划首个并行安全组激活为并发 **AgentRun 聚合**（run-store，`domain/run.rs`），各自隔离 worktree + scoped lease；`ctl agent-report`、`ctl run merge-candidate/recover/expire-lease`；共享 `.git` 写操作硬化。**从不 spawn 执行器**。

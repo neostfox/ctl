@@ -152,12 +152,13 @@ proposal → approval → scoped lease → implement → audit_hold
 四条硬约束撑起整个系统：
 
 - **事件溯源**：`events.jsonl` 是唯一事实源（append-only）；`task.json` / `control.json` 都是 replay 出来的投影。外部只能提交 evidence，由控制层验证后才生成 canonical event。
-- **写入边界 fail-closed**：每个任务声明允许读写的路径；`ctl` 不可用时 hook **拦截写操作而非放行**——不可执行的边界绝不静默放行。
+- **写入边界 fail-closed（按工具/平台分级）**：每个任务声明允许读写的路径；`ctl` 不可用时**路径作用域的写工具（Write/Edit/MultiEdit）拦截而非放行**——不可执行的边界绝不静默放行（Bash / 子智能体派发的精确边界见下方诚实声明）。
 - **确定性验收**：gate 是固定模板（无任意 shell），通过才允许 `in_progress → review → completed`。
 - **审计是权限状态，不是提示**：命中 schema / scope / 受保护路径 / 批量变更触发器后立即进入只读 `audit_hold`，由控制层独立核对，而非靠实现者自述「我做完了」。
 
 > **边界的诚实声明（这是机制护栏，不是密码学安全边界）：**
-> - **写入边界是 agent 工具 hook 层的 fail-closed 拦截，不是 OS 沙箱。** 它治理经 OMP / Claude Code hook 路由的写操作；一个不经 hook 的进程不受此边界约束。它是「可执行、可审计的边界」，不是内核级隔离。
+> - **写入边界是 agent 工具 hook 层的拦截，不是 OS 沙箱。** 它治理经 OMP / OpenCode / Claude Code hook 路由的写操作；一个不经 hook 的进程不受此边界约束。它是「可执行、可审计的边界」，不是内核级隔离。
+> - **fail-closed 是按工具、按平台分级的，不是一刀切。** 路径作用域的 Write/Edit/MultiEdit 在 `ctl` 不可用时 fail-closed（拦截）。但 **Claude Code 的 Bash 在 `ctl` 出错/超时时 fail-open**（绝不锁死 shell，故 bash 不是硬写边界——且不做路径作用域检查，应优先用 Write/Edit 做范围内修改）；其 **Task / 子智能体派发不被 PreToolUse 门禁匹配**（U-1 平台边界，非待办——见 `.claude/subagent-dispatch.md`：只派发只读子智能体、写操作留在主 agent）。OMP / OpenCode 的 `task` 派发经会话级插件门禁，OpenCode 的 Bash 亦 fail-closed。
 > - **`hash` 是内容/制品 hash（`tree_hash` / `policy_hash` / `evidence_hash`），保证的是信封完整性，不是内部声明的可信度。** 事件未做密码学签名；`actor` 是来源标签，不是被验证的身份主体。事件日志**不是 L3 防篡改证据**（无 hash chain / 签名 / 外部锚定）；它保证的是单写者顺序与信封完整性，不是抗对手篡改。
 > - **尚无 authenticated principal。** 「reviewer ≠ implementer」靠 `actor` 标签区分：审计 / 审批由不同的 `CTL_ACTOR` 标签（如 `ctl-review`）记录在账本上，但这只是**审阅者角色标签，不是被证明的独立身份主体**。不要把它读作「已证明的独立审批」。
 > - **并发多-run orchestration 仍是 experimental。** 单写者保证对每个 task / run 账本成立，但跨账本（task ↔ run）写入不是事务化的：崩溃可能留下不一致，由 `ctl doctor` 检出并给出手工恢复指引（控制层不自动改写状态）。

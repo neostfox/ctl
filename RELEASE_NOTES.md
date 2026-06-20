@@ -46,10 +46,14 @@ This is a factual changelog. It contains no scores or quality grades.
 - **Subagent dispatch under ctl (`.claude/subagent-dispatch.md`).** Read-only work
   (investigation, search, research) is dispatched to read-only subagents; **writes
   stay inline** in the main agent, which alone carries the active task's
-  `CTL_TASK_ID` binding and routes its tool calls through the gate. Whether a
-  subagent's tool calls reach the PreToolUse gate at all is a **host** behavior
-  that ctl does not control and treats as unverified; writable subagent roles are
-  therefore deferred. This is a disclosed posture, not a proof.
+  `CTL_TASK_ID` binding and routes its tool calls through the gate. The **U-1 spike
+  (2026-06-20) resolved** the previously-open host question against us: on Claude
+  Code, PreToolUse does **not** match the `Task`/`Agent` tool, and a spawned
+  subagent's own `Write`/`Edit`/`Bash` run in an isolated context that does **not**
+  inherit the parent gate. So Claude↔OpenCode subagent-gating parity is a **platform
+  structural boundary, not a TODO** — keeping writes inline is the correct design,
+  not a stopgap. (OpenCode/OMP gate `task` at the session-plugin level; Claude's
+  PreToolUse model cannot.) Writable subagent roles on Claude are deferred by design.
 
 ## Known limitations / non-claims
 
@@ -59,9 +63,14 @@ These are deliberate boundaries, not TODOs to silently close:
   **label** only: audits/approvals are recorded under a distinct `CTL_ACTOR`
   (e.g. `ctl-review`), which is a reviewer **role label, not a proven independent
   identity**. Do not read it as "independently/authentically approved".
-- **Write boundaries are not OS sandboxing.** They are fail-closed interceptions
-  at the agent tool-hook layer (OMP / Claude Code / opencode). A process that
-  does not route through a hook is not constrained by them.
+- **Write boundaries are not OS sandboxing, and fail-closed is per-tool/per-platform
+  — not uniform.** They are tool-hook-layer interceptions (OMP / Claude Code /
+  OpenCode); a process that does not route through a hook is unconstrained. The
+  path-scoped `Write`/`Edit`/`MultiEdit` tools fail **closed** when ctl is
+  unavailable. On Claude Code, **`Bash` fails open** on a ctl error/timeout (the
+  shell is never locked out, and Bash is not path-scoped — so it is not a hard write
+  boundary), and the **`Task`/subagent-spawn tool is not gated by PreToolUse at all**
+  (the U-1 platform boundary above). OpenCode gates `task` and fails `Bash` closed.
 - **The event log is not L3 tamper-evident.** No hash chain, signature, or
   external anchoring. `tree_hash` / `policy_hash` / `evidence_hash` are
   content/envelope-integrity hashes, not cryptographic attestations of identity

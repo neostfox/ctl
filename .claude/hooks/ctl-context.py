@@ -36,8 +36,14 @@ def main() -> None:
         if b.get("gates"):
             lines.append(f"    Gates: {', '.join(b['gates'])}")
     lines.append(
-        "Mutating tools outside scope are blocked by the ctl PreToolUse gate "
-        "(fails closed if ctl is unavailable)."
+        "Enforcement (Claude Code PreToolUse gate) is per-tool, not uniform: "
+        "Write/Edit/MultiEdit are path-scoped against write_allow and FAIL CLOSED "
+        "when ctl is unavailable. Bash is gated but FAILS OPEN on a ctl "
+        "error/timeout (the shell is never locked out) and is not path-scoped — so "
+        "Bash is not a hard write boundary; prefer the Write/Edit tools for in-scope "
+        "edits. The Task/subagent-spawn tool is NOT matched by PreToolUse at all "
+        "(a Claude platform boundary, not a TODO — see .claude/subagent-dispatch.md): "
+        "dispatch only read-only subagents and keep writes inline in the main agent."
     )
 
     print(json.dumps({
