@@ -55,6 +55,17 @@ enum Commands {
     Validate,
     /// Diagnose local task ledger health
     Doctor,
+    /// Update the ctl binary in place to the latest GitHub release (ADR 0002).
+    /// The only command that performs network I/O: it downloads and
+    /// sha256-verifies the release archive, then replaces the running binary.
+    Update {
+        /// Install a specific release tag (e.g. v0.0.6) instead of the latest.
+        #[arg(long)]
+        version: Option<String>,
+        /// Report whether a newer version exists without installing anything.
+        #[arg(long)]
+        check: bool,
+    },
     /// Truncate a torn trailing record from a ledger (explicit crash-recovery),
     /// or with --cross-ledger, detect and repair task↔run inconsistencies
     Repair {
@@ -1225,6 +1236,9 @@ pub fn run() -> Result<()> {
         Commands::Reconcile => cmd_reconcile(),
         Commands::Validate => cmd_validate(),
         Commands::Doctor => cmd_doctor(),
+        Commands::Update { version, check } => {
+            crate::infrastructure::self_update::run(version.clone(), *check)
+        }
         Commands::Repair {
             task,
             run,
@@ -3844,7 +3858,18 @@ fn check_dependencies() -> Result<()> {
         }
     }
     found_deps.sort();
-    let mut expected: Vec<&str> = vec!["anyhow", "clap", "libc", "serde", "serde_json", "sha2"];
+    // `ureq` is the single network client, admitted by ADR 0002 for the
+    // `ctl update` self-updater only (native-tls backend, no async runtime).
+    // The forbidden scan above still blocks reqwest/tokio/hyper/async-std.
+    let mut expected: Vec<&str> = vec![
+        "anyhow",
+        "clap",
+        "libc",
+        "serde",
+        "serde_json",
+        "sha2",
+        "ureq",
+    ];
     expected.sort();
     if found_deps != expected {
         return Err(anyhow::anyhow!(
@@ -4151,6 +4176,7 @@ fn check_milestone_scope() -> Result<()> {
             "task",
             "telemetry",
             "uncertainty",
+            "update",
             "validate",
             "workspace",
         ],

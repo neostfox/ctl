@@ -4,6 +4,8 @@ pub mod boundary;
 pub mod gates;
 pub mod schema_validator;
 #[allow(dead_code)]
+pub mod self_update;
+#[allow(dead_code)]
 pub mod skill_sync;
 #[allow(dead_code)]
 pub mod skills;

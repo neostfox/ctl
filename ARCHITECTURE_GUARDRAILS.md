@@ -318,7 +318,7 @@ test fixtures
 | ID | 级别 | 规则 |
 |---|---|---|
 | `DEP-001` | REVIEW | 新增 runtime dependency 必须单独审查。 |
-| `DEP-002` | STOP | `M0-M3` 禁止引入 async runtime、HTTP client、数据库、Web framework、agent SDK。 |
+| `DEP-002` | STOP | `M0-M3` 禁止引入 async runtime、数据库、Web framework、agent SDK。**HTTP client 仅限 `ctl update` 自更新路径**——见 ADR 0002 的窄口子：同步 `ureq`（native-tls，无 async runtime），仅对固定 release 主机出站、sha256 校验后才替换二进制；不在受治理的 task/run/gate 路径上，不产生 event。其它任何网络用途仍属 STOP，需各自的 ADR。`reqwest`/`tokio`/`hyper`/`async-std` 由 `check_dependencies` 持续硬禁。 |
 | `DEP-003` | STOP | 禁止自动执行依赖安装或 package script。 |
 | `DEP-004` | REVIEW | `Cargo.toml` 和 `Cargo.lock` 变化必须进入依赖变更报告。 |
 
