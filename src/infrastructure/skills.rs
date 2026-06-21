@@ -195,6 +195,19 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-cli-reference/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
         },
+        // OMP-native skills with no workflow-core: ported to Claude because they
+        // have no other Claude path (unlike ctl-diagnose → ctl-oracle agent and
+        // ctl-brainstorm/ctl-review folded into control-guard). spec-bootstrap
+        // migrates an existing workflow + generates `.ctl/spec/`; spec-update
+        // captures knowledge after a task finishes (control-guard routes to it).
+        EmbeddedFile {
+            relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-spec-bootstrap/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-spec-update/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-spec-update/SKILL.md"),
+        },
         // Read-only subagent role(s). Writable roles are deferred until it is
         // verified (in a sandbox) whether subagent tool calls reach the gate;
         // a read-only role never writes, so it is safe under ctl today.
@@ -384,8 +397,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 12,
-            "claude injects 3 integration files + control-guard + 6 workflow skills + cli-reference + 1 agent"
+            n, 14,
+            "claude injects 3 integration files + control-guard + 6 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -399,6 +412,8 @@ mod tests {
             "skills/ctl-handoff/SKILL.md",
             "skills/ctl-architecture-review/SKILL.md",
             "skills/ctl-cli-reference/SKILL.md",
+            "skills/ctl-spec-bootstrap/SKILL.md",
+            "skills/ctl-spec-update/SKILL.md",
             "agents/ctl-oracle.md",
         ] {
             assert!(
