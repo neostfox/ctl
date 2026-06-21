@@ -1,11 +1,43 @@
-# Release Notes — ctl v0.0.5
+# Release Notes — ctl v0.0.6
 
-Follows **v0.0.4**. `ctl --version` reports the built version from
+Follows **v0.0.5**. `ctl --version` reports the built version from
 `CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
 `release.yml`), and the npm `@ai-dev/ctl` meta-package plus its five platform
 packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included since 0.0.5 — self-update & Claude skill parity
+
+- **`ctl update` — in-place self-updater.** A new top-level command resolves the
+  latest release from the `neostfox/ctl` GitHub repo, downloads the platform
+  asset over HTTPS, **sha256-verifies** it against the published `.sha256`
+  (refusing to install if the checksum is missing), extracts it with the system
+  `tar`, and replaces the running binary (Windows renames the live `.exe` aside;
+  Unix replaces the inode). `ctl update --check` reports without installing;
+  `--version <tag>` pins a specific release. This is the **only** command that
+  performs network I/O.
+- **ADR 0002 — narrow network carve-out.** `ctl update` deliberately overturns
+  the `DEP-002` blanket "no HTTP client" stop with an audited, narrow carve-out:
+  one synchronous client (`ureq`, **native-tls** backend — no async runtime, no
+  C/asm toolchain), against a pinned release host, sha256-verified, never on the
+  governed task/run/gate path and producing no events. `reqwest`/`tokio`/`hyper`/
+  `async-std` stay hard-forbidden by the `check_dependencies` guard; the event
+  ledger stays pure and offline.
+- **Claude skill parity — spec lifecycle.** The `ctl-spec-bootstrap` and
+  `ctl-spec-update` skills are now shipped to the Claude adapter
+  (`claude_embedded_files()`), closing the two genuine gaps where the capability
+  had no Claude path. (The other OMP-native skills remain covered differently on
+  Claude by design: `ctl-diagnose` via the `ctl-oracle` subagent,
+  `ctl-brainstorm`/`ctl-review` folded into `control-guard`.) `control-guard` now
+  routes the spec lifecycle; the spec-bootstrap hook-integration section is
+  honest that the Claude `ctl-context.py` is SessionStart-only (no automatic
+  spec-drift detection).
+- **ADR 0001 — defer cryptographic authentication & signed envelopes.** Records
+  the decision to keep authenticated-principal / signed-orchestration-envelope
+  work deferred at lowest priority for ctl's local, single-user, trusted-operator
+  model — honest disclosure is the sufficient response; crypto would not deliver
+  the property locally and needs guardrail-forbidden deps.
 
 ## Included since 0.0.4 — record-and-disclose hardening
 

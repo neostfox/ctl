@@ -1,6 +1,6 @@
 {
   "name": "@ai-dev/ctl-win32-x64-msvc",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "ctl binary for Windows x64 (MSVC)",
   "files": ["ctl.exe"],
   "os": ["win32"],
