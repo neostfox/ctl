@@ -18,7 +18,9 @@ Three designs were weighed (see the alignment exchange that produced this ADR):
 2. **Print-only advisor** — detect the install method and print the command; never execute.
 3. **In-core downloader** — ctl itself performs HTTPS GET + sha256 verify + extract + self-replace.
 
-The operator chose **(3), executing directly**, with `ureq` (synchronous — no async runtime) for HTTP and the **system `tar`** for extraction (present on Win10+/macOS/Linux), keeping the new *direct* dependency count at one. TLS uses the **`native-tls` backend** (OS-native: schannel on Windows, Security.framework on macOS, OpenSSL on Linux) rather than rustls — the build environment has no C compiler, and rustls' `ring`/`aws-lc-rs` providers require a C/asm toolchain; native-tls links the platform's existing TLS instead.
+The operator chose **(3), executing directly**, with `ureq` (synchronous — no async runtime) for HTTP and the **system `tar`** for extraction (present on Win10+/macOS/Linux), keeping the new *direct* dependency count at one. TLS uses the **`native-tls` backend** (OS-native: schannel on Windows, Security.framework on macOS, OpenSSL on Linux) rather than rustls — the local build environment (Windows) has no C compiler, and rustls' `ring`/`aws-lc-rs` providers require a C/asm toolchain; native-tls links the platform's existing TLS instead.
+
+**Linux TLS amendment (build fix).** native-tls on Linux means `openssl-sys`, which by default *probes for a system OpenSSL install*. The release `aarch64-unknown-linux-gnu` artifact is **cross-compiled** and the runner has no ARM64 OpenSSL, so the first 0.0.6 build failed (`openssl-sys`: "Could not find directory of OpenSSL installation"). The fix is a Linux-only `ureq` `vendored` feature (forwards to `native-tls/vendored`): OpenSSL is **compiled from source** with the cross C toolchain the release workflow already installs (`gcc-aarch64-linux-gnu`). This keeps the `native-tls` decision, touches only the existing `ureq` dep (no new direct dependency — Windows/macOS are unaffected, still schannel/Security.framework), and statically self-contains every Linux artifact (no end-user libssl runtime dependency, which the prior system-linked build silently required).
 
 ## Decision
 
@@ -41,7 +43,7 @@ Everything else stays forbidden, and the guard is relaxed to match — not remov
 
 **Accepted:**
 
-- ctl core now links a TLS stack (ureq + native-tls → schannel / Security.framework / OpenSSL). Build now needs network access to crates.io; Linux release builds additionally need OpenSSL dev headers (or a vendored-openssl feature) — Windows/macOS use the OS TLS with no extra toolchain.
+- ctl core now links a TLS stack (ureq + native-tls → schannel / Security.framework / OpenSSL). Build now needs network access to crates.io. Linux builds use the **vendored** OpenSSL feature (compiled from source via the `ureq` `vendored` flag → `native-tls/vendored`), so they need a C compiler + `perl` at build time but **no** system OpenSSL and no runtime libssl; Windows/macOS use the OS TLS with no extra toolchain. The trade is a larger Linux binary and tracking OpenSSL CVEs at our release cadence, in exchange for a reliable cross build and a self-contained artifact.
 - `check_dependencies` and the guardrail docs no longer read as an absolute "zero network ever"; they read as "no network except the audited `ctl update` egress." This ADR is the audit trail for that line.
 - On Windows a running `.exe` cannot overwrite itself: `ctl update` renames the live binary aside (`ctl.exe` → `ctl.exe.old`) and writes the new one in place; the stale `.old` is best-effort removed on the next run. A failed swap leaves the original in place.
 

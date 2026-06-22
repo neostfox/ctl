@@ -20,10 +20,15 @@ This is a factual changelog. It contains no scores or quality grades.
 - **ADR 0002 — narrow network carve-out.** `ctl update` deliberately overturns
   the `DEP-002` blanket "no HTTP client" stop with an audited, narrow carve-out:
   one synchronous client (`ureq`, **native-tls** backend — no async runtime, no
-  C/asm toolchain), against a pinned release host, sha256-verified, never on the
-  governed task/run/gate path and producing no events. `reqwest`/`tokio`/`hyper`/
-  `async-std` stay hard-forbidden by the `check_dependencies` guard; the event
-  ledger stays pure and offline.
+  C/asm toolchain on the local Windows build), against a pinned release host,
+  sha256-verified, never on the governed task/run/gate path and producing no
+  events. `reqwest`/`tokio`/`hyper`/`async-std` stay hard-forbidden by the
+  `check_dependencies` guard; the event ledger stays pure and offline. On
+  **Linux** the build uses native-tls's **vendored** OpenSSL (compiled from
+  source), so the cross-compiled `aarch64` artifact builds without a system
+  OpenSSL and every Linux binary is statically self-contained (no end-user
+  libssl dependency). macOS (Security.framework) / Windows (schannel) are
+  unaffected.
 - **Claude skill parity — spec lifecycle.** The `ctl-spec-bootstrap` and
   `ctl-spec-update` skills are now shipped to the Claude adapter
   (`claude_embedded_files()`), closing the two genuine gaps where the capability

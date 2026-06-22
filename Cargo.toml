@@ -27,3 +27,15 @@ ureq = { version = "3", default-features = false, features = ["native-tls"] }
 # parsing of a bare negative pid is not portable; the syscall is unambiguous.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Linux-only: build a vendored OpenSSL from source for native-tls instead of
+# probing for a system install. The release `aarch64-unknown-linux-gnu` build is
+# cross-compiled and has no ARM64 OpenSSL on the runner, so `openssl-sys` aborts
+# ("Could not find directory of OpenSSL installation"). `ureq`'s `vendored`
+# feature forwards to `native-tls/vendored`, which compiles OpenSSL with the
+# cross C toolchain — fixing the cross build and making every Linux artifact
+# statically self-contained (no end-user libssl runtime dependency). This only
+# adds a feature to the existing `ureq` dep; no new direct dependency, and macOS
+# (Security.framework) / Windows (schannel) are unaffected.
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls", "vendored"] }
