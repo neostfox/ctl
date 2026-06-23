@@ -77,12 +77,16 @@ try {
     Copy-Item -Path $src -Destination (Join-Path $InstallDir 'ctl.exe') -Force
     Write-Host "ctl-install: installed to $InstallDir\ctl.exe"
 
-    # Persist to user PATH if missing.
+    # Persist to user PATH, ensuring our dir is FIRST so a freshly installed
+    # ctl wins over any pre-existing one (e.g. a cargo- or npm-installed ctl)
+    # already earlier in PATH. De-dup any prior occurrence so it moves to front.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (($userPath -split ';') -notcontains $InstallDir) {
-        $newPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
+    $entries  = @($userPath -split ';' | Where-Object { $_ -ne '' })
+    $rest     = @($entries | Where-Object { $_.TrimEnd('\') -ne $InstallDir.TrimEnd('\') })
+    if ($entries.Count -eq 0 -or $entries[0].TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
+        $newPath = (@($InstallDir) + $rest) -join ';'
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Host "ctl-install: added $InstallDir to user PATH (open a new shell to use it)."
+        Write-Host "ctl-install: put $InstallDir first on user PATH (open a new shell to use it)."
     }
 
     & (Join-Path $InstallDir 'ctl.exe') --version
