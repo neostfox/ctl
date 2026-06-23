@@ -164,22 +164,37 @@ jobs:
   # Publish the npm packages under the @velo-ai org: the five platform binary
   # packages, the @velo-ai/ctl meta-package (which bundles every platform binary
   # under platforms/ — that is what bin/ctl.js resolves), and the @velo-ai/omp
-  # OMP plugin. Requires the NPM_TOKEN secret (an npm automation token with
-  # publish rights on the @velo-ai org). Versions are stamped to the release tag
-  # at publish time, so the committed package.json versions need not be bumped
-  # per release (they still track Cargo.toml via the generator's drift check).
+  # OMP plugin. Versions are stamped to the release tag at publish time, so the
+  # committed package.json versions need not be bumped per release (they still
+  # track Cargo.toml via the generator's drift check).
+  #
+  # Auth is OIDC TRUSTED PUBLISHING — no NPM_TOKEN. Each publish exchanges the
+  # job's GitHub OIDC id-token for a short-lived npm credential and emits
+  # provenance automatically (no --provenance flag, no long-lived secret that
+  # npm's 2FA enforcement would reject). PREREQUISITES on npmjs.com: every
+  # package must already exist AND have a trusted publisher configured for this
+  # repo + workflow file (`release.yml`). npm cannot create a package on first
+  # publish via OIDC (npm/cli#8544), so brand-new packages are bootstrapped once
+  # out-of-band before this job can publish them.
   npm-publish:
     name: publish npm packages (@velo-ai)
     needs: [verify, build]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # mint the OIDC token npm exchanges for a publish credential
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
+      # OIDC trusted publishing requires npm >= 11.5.1 on Node >= 22.14.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
 
       - name: Resolve release version
         shell: bash
@@ -239,10 +254,10 @@ jobs:
             });
           '
 
+      # No NODE_AUTH_TOKEN: npm detects the GitHub OIDC environment (id-token:
+      # write) and exchanges it for a short-lived publish credential per package.
       - name: Publish platform packages
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           for dir in win32-x64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
@@ -251,12 +266,8 @@ jobs:
 
       - name: Publish meta package
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: cd npm && npm publish --access public
 
       - name: Publish OMP plugin
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: cd npm-omp && npm publish --access public
