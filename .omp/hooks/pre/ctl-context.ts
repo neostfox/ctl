@@ -10,6 +10,10 @@
 
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 import { execFile } from "child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+import { createRequire } from "module";
 
 interface GateResult {
   allowed: boolean;
@@ -62,6 +66,86 @@ function logCtlError(
 }
 
 /**
+ * Locate the `ctl` binary WITHOUT depending on the host process PATH.
+ *
+ * The hook's `execFile` inherits the OMP process environment, not the per-tool
+ * `bash.env.PATH` from settings.json — so on Windows, when OMP is launched from
+ * a context that lacks `~/.cargo/bin` / the npm dir on PATH, bare `execFile("ctl")`
+ * fails with ENOENT, the gate returns null, and every mutating tool fails closed.
+ *
+ * Resolution order (first hit wins, probed once and memoized):
+ *   1. CTL_BIN env var — explicit operator override.
+ *   2. Bundled npm package `@ai-dev/ctl` — its platform binary, resolved
+ *      relative to node_modules (PATH-independent; the plugin-distribution path).
+ *   3. Well-known install dirs — `~/.cargo/bin/ctl[.exe]` (cargo build install).
+ *   4. Bare `ctl` — fall back to PATH resolution (prior behavior).
+ */
+let resolvedCtlBin: string | undefined;
+
+function platformBinaryName(): string {
+  return process.platform === "win32" ? "ctl.exe" : "ctl";
+}
+
+/** The npm wrapper's `platforms/<dir>` tuple (see npm/bin/ctl.js). */
+function platformDir(): string {
+  const tuples: Record<string, string> = {
+    "win32-x64": "win32-x64-msvc",
+    "darwin-x64": "darwin-x64",
+    "darwin-arm64": "darwin-arm64",
+    "linux-x64": "linux-x64-gnu",
+    "linux-arm64": "linux-arm64-gnu",
+  };
+  const key = `${process.platform}-${process.arch}`;
+  return tuples[key] ?? key;
+}
+
+/** Resolve the binary inside an installed `@ai-dev/ctl`, or null if absent. */
+function resolveBundledCtl(): string | null {
+  try {
+    const req = createRequire(import.meta.url);
+    const bin = platformBinaryName();
+    // Optional platform dep, installed directly: .../ctl-<dir>/ctl[.exe]
+    try {
+      const root = req.resolve(`@ai-dev/ctl-${platformDir()}/package.json`);
+      const p = join(root, "..", bin);
+      if (existsSync(p)) return p;
+    } catch { /* not installed as a separate platform dep */ }
+    // Main package's bundled copy: .../ctl/platforms/<dir>/ctl[.exe]
+    const main = req.resolve("@ai-dev/ctl/package.json");
+    const p = join(main, "..", "platforms", platformDir(), bin);
+    if (existsSync(p)) return p;
+  } catch { /* @ai-dev/ctl not installed at all */ }
+  return null;
+}
+
+function resolveCtlBin(): string {
+  if (resolvedCtlBin !== undefined) return resolvedCtlBin;
+
+  const fromEnv = process.env.CTL_BIN?.trim();
+  if (fromEnv) {
+    resolvedCtlBin = fromEnv;
+    return resolvedCtlBin;
+  }
+
+  const bundled = resolveBundledCtl();
+  if (bundled) {
+    resolvedCtlBin = bundled;
+    return resolvedCtlBin;
+  }
+
+  const bin = platformBinaryName();
+  const cargoBin = join(homedir(), ".cargo", "bin", bin);
+  if (existsSync(cargoBin)) {
+    resolvedCtlBin = cargoBin;
+    return resolvedCtlBin;
+  }
+
+  // Last resort: rely on PATH (prior behavior). Logs ENOENT if still missing.
+  resolvedCtlBin = "ctl";
+  return resolvedCtlBin;
+}
+
+/**
  * Invoke `ctl` via the async libuv spawn path (`execFile`), NOT `execFileSync`.
  * On Windows, `spawnSync` against the native `ctl.exe` intermittently hangs
  * with empty stdio until the timeout kills it (issue #2) — the async path does
@@ -70,7 +154,7 @@ function logCtlError(
 function ctl(args: string[], stage: string): Promise<string | null> {
   return new Promise<string | null>((resolve) => {
     execFile(
-      "ctl",
+      resolveCtlBin(),
       args,
       { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
       (err, stdout, stderr) => {
