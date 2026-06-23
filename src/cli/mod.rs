@@ -339,7 +339,8 @@ enum TaskKindArg {
 
 #[derive(Subcommand)]
 enum SkillsCommands {
-    /// Generate every platform's SKILL.md from `.agent/skills/<skill>/source.md`.
+    /// Generate every platform's SKILL.md from `.agent/skills/<skill>/source.md`
+    /// AND the `@velo-ai/omp` plugin package under `npm-omp/` from `.omp/`.
     /// With --check, verify the on-disk files match (a CI gate) without writing.
     Sync {
         /// Verify only: exit non-zero if any generated file is out of date.
@@ -1409,29 +1410,33 @@ fn cmd_skills(command: &SkillsCommands) -> Result<()> {
     match command {
         SkillsCommands::Sync { check } => {
             let project_root = std::env::current_dir()?;
-            let outcome = crate::infrastructure::skill_sync::sync(&project_root, *check)?;
+            // Two single-source generators run under one command: the per-platform
+            // workflow SKILL.md files, and the `@velo-ai/omp` plugin package
+            // assembled from `.omp/`. Their outcomes are merged so `--check` gates
+            // both in CI.
+            let mut outcome = crate::infrastructure::skill_sync::sync(&project_root, *check)?;
+            let plugin = crate::infrastructure::omp_plugin::sync(&project_root, *check)?;
+            outcome.written.extend(plugin.written);
+            outcome.stale.extend(plugin.stale);
             if *check {
                 if outcome.stale.is_empty() {
-                    println!("All workflow skills are in sync with their source.");
+                    println!("All generated files are in sync with their source.");
                 } else {
                     for s in &outcome.stale {
                         println!("  stale: {s}");
                     }
                     return Err(anyhow::anyhow!(
-                        "{} skill file(s) out of date — run `ctl skills sync`",
+                        "{} generated file(s) out of date — run `ctl skills sync`",
                         outcome.stale.len()
                     ));
                 }
             } else if outcome.written.is_empty() {
-                println!("All workflow skills already up to date.");
+                println!("All generated files already up to date.");
             } else {
                 for s in &outcome.written {
                     println!("  wrote: {s}");
                 }
-                println!(
-                    "Regenerated {} skill file(s) from source.",
-                    outcome.written.len()
-                );
+                println!("Regenerated {} file(s) from source.", outcome.written.len());
             }
             Ok(())
         }
