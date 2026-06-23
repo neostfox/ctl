@@ -1,6 +1,6 @@
 {
   "name": "@velo-ai/ctl-win32-x64-msvc",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "ctl binary for Windows x64 (MSVC)",
   "files": ["ctl.exe"],
   "os": ["win32"],

@@ -1,6 +1,6 @@
 {
   "name": "@velo-ai/ctl-darwin-arm64",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "ctl binary for macOS ARM64",
   "files": ["ctl"],
   "os": ["darwin"],

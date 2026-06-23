@@ -1,11 +1,35 @@
-# Release Notes — ctl v0.0.6
+# Release Notes — ctl v0.0.7
 
-Follows **v0.0.5**. `ctl --version` reports the built version from
+Follows **v0.0.6**. `ctl --version` reports the built version from
 `CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
 `release.yml`), and the npm `@velo-ai/ctl` meta-package plus its five platform
 packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included since 0.0.6 — @velo-ai npm org, OMP plugin package & Windows hook fix
+
+- **npm org renamed `@ai-dev` → `@velo-ai`.** The meta-package is now
+  `@velo-ai/ctl`, with five `@velo-ai/ctl-<platform>` binary packages. The
+  `@ai-dev` org was unavailable; every reference (wrapper error text, OMP hook
+  lookups, plugin generator, docs) moved in lockstep.
+- **`@velo-ai/omp` — installable OMP plugin.** `ctl skills sync` now also
+  generates `npm-omp/` (the `@velo-ai/omp` package) from the canonical `.omp/`
+  source: a `package.json` declaring the OMP extension entry (the governance
+  hook) plus a dependency on `@velo-ai/ctl`, so `npm i` / `omp plugin link`
+  installs the integration **and** the platform binary together. A cargo drift
+  test (`omp_plugin_package_is_in_sync_on_disk`) fails CI if the package drifts
+  from its source.
+- **PATH-independent `ctl` resolution in the OMP hook.** The pre-hook resolved
+  `ctl` by bare name against the host process PATH, which fails on Windows when
+  `ctl` is installed off the launch PATH — the gate then fails closed and blocks
+  every mutating tool. It now resolves `CTL_BIN` → the bundled `@velo-ai/ctl`
+  package (`require.resolve`) → `~/.cargo/bin/ctl[.exe]` → bare `ctl`.
+- **npm publish pipeline.** `release.yml` gains an `npm-publish` job: it stages
+  each built binary into its platform package, stamps every version to the
+  release tag, and publishes the platform packages, the `@velo-ai/ctl`
+  meta-package, and the `@velo-ai/omp` plugin in dependency order. Requires an
+  `NPM_TOKEN` secret with publish rights on the `@velo-ai` org.
 
 ## Included since 0.0.5 — self-update & Claude skill parity
 
