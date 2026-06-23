@@ -1,7 +1,7 @@
 # @velo-ai/omp
 
 OMP plugin for the **ctl** control plane. It ships the governance pre-hook and the
-control-plane skills, and depends on the `@ai-dev/ctl` npm package so the `ctl`
+control-plane skills, and depends on the `@velo-ai/ctl` npm package so the `ctl`
 binary is installed alongside it.
 
 > **Generated file — do not edit.** This package is produced from the canonical

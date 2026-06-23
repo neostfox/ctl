@@ -23,6 +23,6 @@
     "README.md"
   ],
   "dependencies": {
-    "@ai-dev/ctl": "0.0.6"
+    "@velo-ai/ctl": "0.0.6"
   }
 }

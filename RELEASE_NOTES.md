@@ -2,7 +2,7 @@
 
 Follows **v0.0.5**. `ctl --version` reports the built version from
 `CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
-`release.yml`), and the npm `@ai-dev/ctl` meta-package plus its five platform
+`release.yml`), and the npm `@velo-ai/ctl` meta-package plus its five platform
 packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.

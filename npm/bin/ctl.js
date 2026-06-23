@@ -19,7 +19,7 @@ const fs = require("fs");
 if (!fs.existsSync(binaryPath)) {
   console.error(
     `ctl: unsupported platform '${platform}-${arch}' or binary not installed.\n` +
-    `Run 'npm rebuild @ai-dev/ctl' or install the correct platform package.`
+    `Run 'npm rebuild @velo-ai/ctl' or install the correct platform package.`
   );
   process.exit(1);
 }

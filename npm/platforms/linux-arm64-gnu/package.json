@@ -1,5 +1,5 @@
 {
-  "name": "@ai-dev/ctl-linux-arm64-gnu",
+  "name": "@velo-ai/ctl-linux-arm64-gnu",
   "version": "0.0.6",
   "description": "ctl binary for Linux ARM64 (GNU)",
   "files": ["ctl"],

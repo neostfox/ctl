@@ -3,7 +3,7 @@
 //! The plugin is assembled from the SAME `.omp/` source that `ctl init` embeds
 //! (`skills::all_embedded_files`): the governance hook + skills + spec guides are
 //! copied verbatim, and a `package.json` is generated declaring the OMP extension
-//! entry (the hook) and a dependency on the `@ai-dev/ctl` npm package. Installing
+//! entry (the hook) and a dependency on the `@velo-ai/ctl` npm package. Installing
 //! the plugin (`npm i` / `omp plugin link`) therefore brings BOTH the integration
 //! AND the platform binary into `node_modules`, so the hook resolves `ctl`
 //! relative to the package — PATH-independent, which is the whole point on Windows
@@ -24,12 +24,12 @@ const PLUGIN_DIR: &str = "npm-omp";
 /// npm package name to publish.
 const PLUGIN_NAME: &str = "@velo-ai/omp";
 /// The ctl binary npm package the plugin depends on (brings `ctl.exe` etc.).
-const CTL_DEP: &str = "@ai-dev/ctl";
+const CTL_DEP: &str = "@velo-ai/ctl";
 /// OMP extension entry point, relative to the package root.
 const HOOK_ENTRY: &str = "./hooks/pre/ctl-context.ts";
 
 /// Generated `package.json` (hand-formatted for stable, reviewable output).
-/// The version and the `@ai-dev/ctl` dependency both track the crate version so
+/// The version and the `@velo-ai/ctl` dependency both track the crate version so
 /// the plugin and the binary it bundles are released in lockstep.
 fn package_json() -> String {
     format!(
@@ -173,7 +173,7 @@ mod tests {
             "omp.extensions points at the hook"
         );
         assert!(
-            pkg.contains("\"@ai-dev/ctl\""),
+            pkg.contains("\"@velo-ai/ctl\""),
             "depends on the ctl binary pkg"
         );
         // Version tracks the crate version on both the package and the dependency.

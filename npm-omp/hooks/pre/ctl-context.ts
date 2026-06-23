@@ -75,7 +75,7 @@ function logCtlError(
  *
  * Resolution order (first hit wins, probed once and memoized):
  *   1. CTL_BIN env var — explicit operator override.
- *   2. Bundled npm package `@ai-dev/ctl` — its platform binary, resolved
+ *   2. Bundled npm package `@velo-ai/ctl` — its platform binary, resolved
  *      relative to node_modules (PATH-independent; the plugin-distribution path).
  *   3. Well-known install dirs — `~/.cargo/bin/ctl[.exe]` (cargo build install).
  *   4. Bare `ctl` — fall back to PATH resolution (prior behavior).
@@ -99,22 +99,22 @@ function platformDir(): string {
   return tuples[key] ?? key;
 }
 
-/** Resolve the binary inside an installed `@ai-dev/ctl`, or null if absent. */
+/** Resolve the binary inside an installed `@velo-ai/ctl`, or null if absent. */
 function resolveBundledCtl(): string | null {
   try {
     const req = createRequire(import.meta.url);
     const bin = platformBinaryName();
     // Optional platform dep, installed directly: .../ctl-<dir>/ctl[.exe]
     try {
-      const root = req.resolve(`@ai-dev/ctl-${platformDir()}/package.json`);
+      const root = req.resolve(`@velo-ai/ctl-${platformDir()}/package.json`);
       const p = join(root, "..", bin);
       if (existsSync(p)) return p;
     } catch { /* not installed as a separate platform dep */ }
     // Main package's bundled copy: .../ctl/platforms/<dir>/ctl[.exe]
-    const main = req.resolve("@ai-dev/ctl/package.json");
+    const main = req.resolve("@velo-ai/ctl/package.json");
     const p = join(main, "..", "platforms", platformDir(), bin);
     if (existsSync(p)) return p;
-  } catch { /* @ai-dev/ctl not installed at all */ }
+  } catch { /* @velo-ai/ctl not installed at all */ }
   return null;
 }
 

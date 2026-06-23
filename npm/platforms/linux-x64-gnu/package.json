@@ -1,5 +1,5 @@
 {
-  "name": "@ai-dev/ctl-linux-x64-gnu",
+  "name": "@velo-ai/ctl-linux-x64-gnu",
   "version": "0.0.6",
   "description": "ctl binary for Linux x64 (GNU)",
   "files": ["ctl"],

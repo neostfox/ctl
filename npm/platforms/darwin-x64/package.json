@@ -1,5 +1,5 @@
 {
-  "name": "@ai-dev/ctl-darwin-x64",
+  "name": "@velo-ai/ctl-darwin-x64",
   "version": "0.0.6",
   "description": "ctl binary for macOS x64",
   "files": ["ctl"],

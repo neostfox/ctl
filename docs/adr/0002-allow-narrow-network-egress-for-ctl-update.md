@@ -8,7 +8,7 @@
 
 ## Context
 
-ctl ships through three channels: GitHub Releases (`neostfox/ctl`, via `scripts/install.{sh,ps1}`), npm (`@ai-dev/ctl`), and `cargo install`. Updating today is a manual, out-of-band step — the operator must re-run the installer or remember the right package-manager command. The request is a first-class `ctl update` that updates the binary in place to the latest release.
+ctl ships through three channels: GitHub Releases (`neostfox/ctl`, via `scripts/install.{sh,ps1}`), npm (`@velo-ai/ctl`), and `cargo install`. Updating today is a manual, out-of-band step — the operator must re-run the installer or remember the right package-manager command. The request is a first-class `ctl update` that updates the binary in place to the latest release.
 
 A self-updater must (1) discover the latest version, (2) fetch the new binary, and (3) replace the running one. Steps (1)–(2) require **outbound network I/O** — exactly what `DEP-002` and the AGENTS.md hard stops forbid in core.
 
