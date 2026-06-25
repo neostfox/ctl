@@ -77,8 +77,11 @@ function logCtlError(
  *   1. CTL_BIN env var — explicit operator override.
  *   2. Bundled npm package `@velo-ai/ctl` — its platform binary, resolved
  *      relative to node_modules (PATH-independent; the plugin-distribution path).
- *   3. Well-known install dirs — `~/.cargo/bin/ctl[.exe]` (cargo build install).
- *   4. Bare `ctl` — fall back to PATH resolution (prior behavior).
+ *   3. Globally npm-installed `@velo-ai/ctl` — probe the known global roots, so a
+ *      plain `npm i -g @velo-ai/ctl` works (invisible to createRequire, and on
+ *      Windows it exposes only `.cmd`/`.ps1` shims on PATH, never a real exe).
+ *   4. Well-known install dirs — `~/.cargo/bin/ctl[.exe]` (cargo build install).
+ *   5. Bare `ctl` — fall back to PATH resolution (prior behavior).
  */
 let resolvedCtlBin: string | undefined;
 
@@ -118,6 +121,41 @@ function resolveBundledCtl(): string | null {
   return null;
 }
 
+/**
+ * Resolve the binary inside a GLOBALLY npm-installed `@velo-ai/ctl`, or null.
+ *
+ * The hook lives outside any project `node_modules`, so a `npm i -g @velo-ai/ctl`
+ * is invisible to `createRequire`/`resolveBundledCtl` (which only walk up local
+ * node_modules). On Windows the global install also exposes only `.cmd`/`.ps1`
+ * shims on PATH — never a real `ctl.exe` — so the bare-name fallback fails too.
+ * Probe the known global roots directly for the platform binary.
+ */
+function resolveGlobalNpmCtl(): string | null {
+  const bin = platformBinaryName();
+  const rel = join(
+    "node_modules", "@velo-ai", "ctl", "platforms", platformDir(), bin,
+  );
+  const roots: string[] = [];
+  const prefix = process.env.npm_config_prefix?.trim();
+  if (prefix) {
+    roots.push(prefix); // Windows: <prefix>\node_modules
+    roots.push(join(prefix, "lib")); // unix: <prefix>/lib/node_modules
+  }
+  if (process.platform === "win32") {
+    const appdata = process.env.APPDATA?.trim();
+    if (appdata) roots.push(join(appdata, "npm")); // default global root on Windows
+  } else {
+    roots.push("/usr/local", "/usr/local/lib", "/usr", "/usr/lib");
+    const home = homedir();
+    roots.push(join(home, ".npm-global"), join(home, ".npm-global", "lib"));
+  }
+  for (const root of roots) {
+    const p = join(root, rel);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
 function resolveCtlBin(): string {
   if (resolvedCtlBin !== undefined) return resolvedCtlBin;
 
@@ -130,6 +168,12 @@ function resolveCtlBin(): string {
   const bundled = resolveBundledCtl();
   if (bundled) {
     resolvedCtlBin = bundled;
+    return resolvedCtlBin;
+  }
+
+  const globalNpm = resolveGlobalNpmCtl();
+  if (globalNpm) {
+    resolvedCtlBin = globalNpm;
     return resolvedCtlBin;
   }
 
