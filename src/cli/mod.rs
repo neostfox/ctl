@@ -6340,8 +6340,7 @@ mod tests {
         classify_bash, decision_entry, detect_shared_git_op, ellipsize,
         format_brainstorm_provenance, format_decision_line, format_decisions,
         format_research_output, format_uncertainty_ledger, parse_project_default_gates,
-        resolve_active_governance, resolve_ctl_for_hook, ActiveTask, CtlProbe, CtlReach,
-        GovState,
+        resolve_active_governance, resolve_ctl_for_hook, ActiveTask, CtlProbe, CtlReach, GovState,
     };
     use std::path::{Path, PathBuf};
 
@@ -6962,28 +6961,49 @@ mod tests {
     // instead of the gate failing closed later.
 
     fn npm_global_target(appdata: &str, platform_dir: &str, bin: &str) -> PathBuf {
-        Path::new(appdata).join("npm").join("node_modules").join("@velo-ai")
-            .join("ctl").join("platforms").join(platform_dir).join(bin)
+        Path::new(appdata)
+            .join("npm")
+            .join("node_modules")
+            .join("@velo-ai")
+            .join("ctl")
+            .join("platforms")
+            .join(platform_dir)
+            .join(bin)
     }
 
     #[test]
     fn ctl_bin_override_resolves_first() {
         let exists = |_p: &Path| true;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: Some("  C:/x/ctl.exe  ".into()), npm_prefix: None,
-            appdata: None, home: None, path_dirs: vec![], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: Some("  C:/x/ctl.exe  ".into()),
+            npm_prefix: None,
+            appdata: None,
+            home: None,
+            path_dirs: vec![],
+            exists: &exists,
         };
-        assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "CTL_BIN" });
+        assert_eq!(
+            resolve_ctl_for_hook(&p),
+            CtlReach::Resolved { how: "CTL_BIN" }
+        );
     }
 
     #[test]
     fn blank_ctl_bin_is_ignored() {
         let exists = |_p: &Path| false;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: Some("   ".into()), npm_prefix: None, appdata: None,
-            home: None, path_dirs: vec![], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: Some("   ".into()),
+            npm_prefix: None,
+            appdata: None,
+            home: None,
+            path_dirs: vec![],
+            exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::NotFound);
     }
@@ -6993,10 +7013,15 @@ mod tests {
         let target = npm_global_target("C:/Users/u/AppData/Roaming", "win32-x64-msvc", "ctl.exe");
         let exists = move |q: &Path| q == target;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: None, npm_prefix: None,
-            appdata: Some("C:/Users/u/AppData/Roaming".into()), home: None,
-            path_dirs: vec![], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: None,
+            npm_prefix: None,
+            appdata: Some("C:/Users/u/AppData/Roaming".into()),
+            home: None,
+            path_dirs: vec![],
+            exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "npm" });
     }
@@ -7006,11 +7031,20 @@ mod tests {
         let cargo = Path::new("/home/u").join(".cargo").join("bin").join("ctl");
         let exists = move |q: &Path| q == cargo;
         let p = CtlProbe {
-            windows: false, bin_name: "ctl", platform_dir: "linux-x64-gnu",
-            ctl_bin: None, npm_prefix: None, appdata: None,
-            home: Some("/home/u".into()), path_dirs: vec![], exists: &exists,
+            windows: false,
+            bin_name: "ctl",
+            platform_dir: "linux-x64-gnu",
+            ctl_bin: None,
+            npm_prefix: None,
+            appdata: None,
+            home: Some("/home/u".into()),
+            path_dirs: vec![],
+            exists: &exists,
         };
-        assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "cargo" });
+        assert_eq!(
+            resolve_ctl_for_hook(&p),
+            CtlReach::Resolved { how: "cargo" }
+        );
     }
 
     #[test]
@@ -7020,9 +7054,15 @@ mod tests {
         let shim = Path::new("C:/npm").join("ctl.cmd");
         let exists = move |q: &Path| q == shim;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: None, npm_prefix: None, appdata: None, home: None,
-            path_dirs: vec!["C:/npm".into()], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: None,
+            npm_prefix: None,
+            appdata: None,
+            home: None,
+            path_dirs: vec!["C:/npm".into()],
+            exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::OnlyShim);
     }
@@ -7032,9 +7072,15 @@ mod tests {
         let exe = Path::new("C:/tools").join("ctl.exe");
         let exists = move |q: &Path| q == exe;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: None, npm_prefix: None, appdata: None, home: None,
-            path_dirs: vec!["C:/tools".into()], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: None,
+            npm_prefix: None,
+            appdata: None,
+            home: None,
+            path_dirs: vec!["C:/tools".into()],
+            exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "PATH" });
     }
@@ -7043,9 +7089,15 @@ mod tests {
     fn nothing_anywhere_is_not_found() {
         let exists = |_q: &Path| false;
         let p = CtlProbe {
-            windows: true, bin_name: "ctl.exe", platform_dir: "win32-x64-msvc",
-            ctl_bin: None, npm_prefix: None, appdata: None, home: None,
-            path_dirs: vec!["C:/x".into()], exists: &exists,
+            windows: true,
+            bin_name: "ctl.exe",
+            platform_dir: "win32-x64-msvc",
+            ctl_bin: None,
+            npm_prefix: None,
+            appdata: None,
+            home: None,
+            path_dirs: vec!["C:/x".into()],
+            exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::NotFound);
     }
