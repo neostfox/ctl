@@ -25,6 +25,10 @@
  */
 import type { Plugin } from "@opencode-ai/plugin";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { createRequire } from "node:module";
 
 export interface GateResult {
   allowed: boolean;
@@ -203,6 +207,88 @@ function logCtlError(stage: string, args: readonly string[], detail: string): vo
   );
 }
 
+function platformBinaryName(): string {
+  return process.platform === "win32" ? "ctl.exe" : "ctl";
+}
+
+/** The napi platform tuple matching npm/bin/ctl.js (platforms/<dir>/). */
+function platformDir(): string {
+  const tuples: Record<string, string> = {
+    "win32-x64": "win32-x64-msvc",
+    "darwin-x64": "darwin-x64",
+    "darwin-arm64": "darwin-arm64",
+    "linux-x64": "linux-x64-gnu",
+    "linux-arm64": "linux-arm64-gnu",
+  };
+  const key = `${process.platform}-${process.arch}`;
+  return tuples[key] ?? key;
+}
+
+/** Resolve `@velo-ai/ctl`'s binary from a LOCAL node_modules, or null. */
+function resolveBundledCtl(): string | null {
+  try {
+    const req = createRequire(import.meta.url);
+    const bin = platformBinaryName();
+    try {
+      const root = req.resolve(`@velo-ai/ctl-${platformDir()}/package.json`);
+      const p = join(root, "..", bin);
+      if (existsSync(p)) return p;
+    } catch { /* not installed as a separate platform dep */ }
+    const main = req.resolve("@velo-ai/ctl/package.json");
+    const p = join(main, "..", "platforms", platformDir(), bin);
+    if (existsSync(p)) return p;
+  } catch { /* @velo-ai/ctl not installed locally */ }
+  return null;
+}
+
+/** Resolve `@velo-ai/ctl`'s binary from a GLOBAL npm install, or null. The
+ *  plugin lives outside any project node_modules, so a `npm i -g @velo-ai/ctl`
+ *  is invisible to createRequire; on Windows the global install also exposes
+ *  only `.cmd`/`.ps1` shims on PATH (never a real ctl.exe). Probe the known
+ *  global roots directly. */
+function resolveGlobalNpmCtl(): string | null {
+  const bin = platformBinaryName();
+  const rel = join("node_modules", "@velo-ai", "ctl", "platforms", platformDir(), bin);
+  const roots: string[] = [];
+  const prefix = process.env.npm_config_prefix?.trim();
+  if (prefix) {
+    roots.push(prefix); // Windows: <prefix>\node_modules
+    roots.push(join(prefix, "lib")); // unix: <prefix>/lib/node_modules
+  }
+  if (process.platform === "win32") {
+    const appdata = process.env.APPDATA?.trim();
+    if (appdata) roots.push(join(appdata, "npm")); // default global root on Windows
+  } else {
+    roots.push("/usr/local", "/usr/local/lib", "/usr", "/usr/lib");
+    const home = homedir();
+    roots.push(join(home, ".npm-global"), join(home, ".npm-global", "lib"));
+  }
+  for (const root of roots) {
+    const p = join(root, rel);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * Resolve a real `ctl` executable WITHOUT depending only on PATH. `execFile`
+ * (no shell) needs a real binary; on Windows a global `npm i -g @velo-ai/ctl`
+ * exposes only `.cmd`/`.ps1` shims on PATH, so bare "ctl" fails and the gate
+ * fails closed. Order: CTL_BIN override → local npm → global npm →
+ * ~/.cargo/bin → bare "ctl" (PATH fallback). Exported for tests.
+ */
+export function resolveCtlBin(): string {
+  const fromEnv = process.env.CTL_BIN?.trim();
+  if (fromEnv) return fromEnv;
+  const bundled = resolveBundledCtl();
+  if (bundled) return bundled;
+  const globalNpm = resolveGlobalNpmCtl();
+  if (globalNpm) return globalNpm;
+  const cargoBin = join(homedir(), ".cargo", "bin", platformBinaryName());
+  if (existsSync(cargoBin)) return cargoBin;
+  return "ctl";
+}
+
 /**
  * Invoke `ctl` via the async libuv spawn path (`execFile`, array argv, no shell):
  * on Windows a sync spawn against the native `ctl.exe` can hang with empty stdio
@@ -211,7 +297,7 @@ function logCtlError(stage: string, args: readonly string[], detail: string): vo
 function runCtl(args: string[], stage: string): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
-      "ctl",
+      resolveCtlBin(),
       args,
       { encoding: "utf-8", timeout: CTL_TIMEOUT_MS, windowsHide: true },
       (err, stdout, stderr) => {

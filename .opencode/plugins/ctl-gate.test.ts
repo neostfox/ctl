@@ -17,6 +17,7 @@ import {
   buildRecordArgs,
   buildDispatchArgs,
   createHooks,
+  resolveCtlBin,
   type CtlRunner,
   type GateResult,
 } from "./ctl-gate.ts";
@@ -330,16 +331,31 @@ test("hook does NOT record a dispatch when the task spawn is denied", async () =
   expect(dispatchCalls.length).toBe(0);
 });
 
+test("resolveCtlBin: CTL_BIN override is returned verbatim (resolution priority #1)", () => {
+  const saved = process.env.CTL_BIN;
+  process.env.CTL_BIN = "/custom/path/to/ctl.exe";
+  try {
+    expect(resolveCtlBin()).toBe("/custom/path/to/ctl.exe");
+  } finally {
+    if (saved === undefined) delete process.env.CTL_BIN;
+    else process.env.CTL_BIN = saved;
+  }
+});
+
 test("REAL exported plugin hook fails closed when ctl is unreachable", async () => {
   const hooks = (await CtlGate({} as never)) as ReturnType<typeof createHooks>;
-  const saved = process.env.PATH;
-  process.env.PATH = "C:\\__no_ctl_here__"; // make `ctl` unresolvable
+  // Point CTL_BIN at a bogus binary: the resolver now finds a globally-installed
+  // ctl regardless of PATH, so breaking PATH alone no longer makes it unreachable —
+  // CTL_BIN (priority #1) is the deterministic way to force an unrunnable binary.
+  const saved = process.env.CTL_BIN;
+  process.env.CTL_BIN = "C:\\__no_ctl_here__\\ctl.exe";
   try {
     const errWrite = await caught(() => hooks["tool.execute.before"]({ tool: "write" }, { args: { filePath: ".opencode/x" } }));
     const errRead = await caught(() => hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: ".opencode/x" } }));
     expect(errWrite).not.toBeNull(); // mutating → blocked
     expect(errRead).toBeNull(); // read-only → allowed
   } finally {
-    process.env.PATH = saved;
+    if (saved === undefined) delete process.env.CTL_BIN;
+    else process.env.CTL_BIN = saved;
   }
 });
