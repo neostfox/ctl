@@ -239,6 +239,35 @@ class GateHookTest(unittest.TestCase):
             self.gate_calls[0][self.gate_calls[0].index("--task") + 1], "my-task"
         )
 
+    # ── ctl-binary resolution (claude-gate-ctl-resolve-v1 contract) ──
+
+    def test_ctl_bin_env_override_is_used_as_the_binary(self):
+        # CTL_BIN is the explicit operator override (resolution priority #1).
+        # On Windows a `npm i -g @velo-ai/ctl` exposes only .cmd/.ps1 shims on
+        # PATH (no real ctl.exe), so a bare "ctl" execFile/subprocess fails and
+        # the gate would fail closed. The hook must invoke the resolved binary,
+        # not the literal string "ctl".
+        override = "/custom/path/to/ctl.exe"
+        self._invoke(
+            {"tool_name": "Write", "tool_input": {"file_path": ".claude/x"}},
+            verdict={"allowed": True, "state": "in_progress", "reason": "ok"},
+            env={"CTL_BIN": override},
+        )
+        self.assertEqual(len(self.gate_calls), 1)
+        self.assertEqual(
+            self.gate_calls[0][0], override,
+            "gate must invoke the CTL_BIN-resolved binary, not bare 'ctl'",
+        )
+
+    def test_bare_ctl_is_the_fallback_when_nothing_resolves(self):
+        # With no override and no install present, resolution falls through to
+        # bare "ctl" (PATH) — prior behavior preserved. isfile is forced False so
+        # the result is independent of any real npm/cargo install on the host.
+        with mock.patch.dict(self.mod.os.environ, {}, clear=True), \
+                mock.patch.object(self.mod.os.path, "isfile", return_value=False):
+            self.mod._CTL_BIN_CACHE = None
+            self.assertEqual(self.mod.resolve_ctl(), "ctl")
+
 
 if __name__ == "__main__":
     unittest.main()
