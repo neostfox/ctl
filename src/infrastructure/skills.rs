@@ -335,9 +335,16 @@ fn merge_settings(settings_path: &std::path::Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("settings.json 'skills.autoLoad' is not an array"))?;
 
     let already_exists = arr.iter().any(|v| v.as_str() == Some(autoload_target));
-    if !already_exists {
-        arr.push(serde_json::Value::String(autoload_target.to_string()));
+    if already_exists {
+        // The control-guard autoLoad entry is already present — nothing to
+        // merge. Return WITHOUT rewriting: serde_json sorts object keys (no
+        // `preserve_order` feature), so an unconditional rewrite would reorder
+        // the user's settings on every `ctl init`, producing a noisy diff for
+        // an already-correct config. A no-op when there is nothing to merge is
+        // a true idempotent merge.
+        return Ok(());
     }
+    arr.push(serde_json::Value::String(autoload_target.to_string()));
     // Hooks are auto-discovered by OMP from hooks/pre/*.js — no settings merge needed.
 
     // Write back atomically
@@ -390,6 +397,55 @@ mod tests {
                 "ctl init must ship the fixed guide {f}"
             );
         }
+    }
+
+    #[test]
+    fn merge_settings_is_noop_when_entry_already_present() {
+        // Re-running `ctl init` on a settings.json that already has the
+        // control-guard autoLoad entry must NOT rewrite it. serde_json sorts
+        // object keys (no `preserve_order` feature), so an unconditional rewrite
+        // would reorder the user's settings — a noisy diff for an already-correct
+        // config. The file must be byte-for-byte unchanged.
+        let d = TmpDir::new("merge-idem");
+        let settings = d.path.join("settings.json");
+        // Deliberately NON-alphabetical key order + extra user keys, so any
+        // rewrite+resort would be detectable.
+        let original = "{\n  \"modelRoles\": { \"default\": \"zai/glm-5.1\" },\n  \"skills\": {\n    \"autoLoad\": [\".omp/skills/control-guard/SKILL.md\"]\n  },\n  \"tools\": { \"approvalMode\": \"yolo\" }\n}";
+        std::fs::write(&settings, original).unwrap();
+
+        merge_settings(&settings).unwrap();
+
+        let after = std::fs::read_to_string(&settings).unwrap();
+        assert_eq!(
+            after, original,
+            "settings.json must be byte-for-byte unchanged when the autoLoad entry is already present"
+        );
+    }
+
+    #[test]
+    fn merge_settings_adds_entry_when_missing() {
+        // When the entry is MISSING, merge_settings adds it (and rewrites). Keys
+        // get sorted on that first write — acceptable, since the file genuinely
+        // changed. The entry must be present + existing user keys preserved.
+        let d = TmpDir::new("merge-add");
+        let settings = d.path.join("settings.json");
+        std::fs::write(
+            &settings,
+            "{\n  \"modelRoles\": { \"default\": \"zai/glm-5.1\" }\n}",
+        )
+        .unwrap();
+
+        merge_settings(&settings).unwrap();
+
+        let after = std::fs::read_to_string(&settings).unwrap();
+        assert!(
+            after.contains(".omp/skills/control-guard/SKILL.md"),
+            "autoLoad entry must be added when missing: {after}"
+        );
+        assert!(
+            after.contains("glm-5.1"),
+            "existing user keys must be preserved: {after}"
+        );
     }
 
     #[test]
