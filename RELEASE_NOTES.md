@@ -7,6 +7,32 @@ packages carry the matching version.
 
 This is a factual changelog. It contains no scores or quality grades.
 
+## Included since 0.0.7 — `ctl init` OMP integration verification & idempotency
+
+- **`ctl init` reachability check mirrors the hook and execs the binary.** The
+  post-init self-check resolved `ctl` by `is_file()` alone and omitted the
+  local-`node_modules` step the OMP hook checks first (`resolveBundledCtl`), so
+  it could warn "binary not found" on a machine where the hook resolves `ctl`
+  fine — e.g. after `omp plugin link` or a local `npm i @velo-ai/omp`, where the
+  binary lives under the project's `node_modules`. It now mirrors the hook's full
+  order — `CTL_BIN` → bundled `@velo-ai/ctl*` (`@velo-ai/ctl-<plat>` or
+  `@velo-ai/ctl/platforms/<plat>`) → global npm → `~/.cargo/bin` → real exe on
+  PATH — and actually runs the resolved binary (`--version`, 5s-bounded) to prove
+  it is executable, not merely present.
+- **`ctl init` surfaces the OMP plugin-link prerequisite.** For `--platform omp`
+  / `all`, init now verifies the governance hook file is present and prints that
+  OMP loads the hook only from an npm-installed or `omp plugin link`-ed plugin —
+  a marketplace install (`omp plugin install github:…`) does **not** load the
+  extension, so governance silently never fires. This is the one prerequisite
+  `ctl init` cannot detect itself.
+- **`ctl init` is idempotent for `.omp/settings.json`.** Re-running init no
+  longer rewrites an existing `settings.json` when the control-guard autoLoad
+  entry is already present. Previously `merge_settings` re-serialized the file on
+  every init; since `serde_json` sorts object keys (no `preserve_order`
+  feature), that reordered the user's settings into alphabetical order — a noisy
+  diff for an already-correct config. The merge is now a true no-op when nothing
+  needs adding.
+
 ## Included since 0.0.6 — @velo-ai npm org, OMP plugin package & Windows hook fix
 
 - **npm org renamed `@ai-dev` → `@velo-ai`.** The meta-package is now
