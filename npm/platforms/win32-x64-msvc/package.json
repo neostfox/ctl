@@ -5,5 +5,6 @@
   "files": ["ctl.exe"],
   "os": ["win32"],
   "cpu": ["x64"],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/neostfox/ctl" }
 }

@@ -26,6 +26,7 @@
     "gate"
   ],
   "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/neostfox/ctl" },
   "engines": {
     "node": ">=16"
   }

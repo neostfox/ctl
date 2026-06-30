@@ -38,6 +38,10 @@ fn package_json() -> String {
   "version": "{ver}",
   "description": "OMP plugin for the ctl control plane: governance hook + skills, with the ctl binary bundled via a dependency so the gate resolves PATH-independently.",
   "license": "MIT",
+  "repository": {{
+    "type": "git",
+    "url": "https://github.com/neostfox/ctl"
+  }},
   "keywords": [
     "omp",
     "oh-my-pi",
