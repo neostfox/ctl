@@ -49,6 +49,30 @@ pub static GATE_TEMPLATES: &[GateTemplate] = &[
         command: "cargo",
         args: &["clippy", "--", "-D", "warnings"],
     },
+    // ── TypeScript / Node gates (non-Rust projects) ─────────────────────────
+    // Invoked via `npx`, which resolves to the project's local
+    // node_modules/.bin when the tool is a devDependency. EXEC-003's network
+    // denylist means a missing tool fails closed (the registry fetch is
+    // denied) rather than silently installing — so these gates honestly
+    // require the tool to be installed locally.
+    GateTemplate {
+        id: "tsc_check",
+        description: "Type-check TypeScript with tsc --noEmit (requires typescript)",
+        command: "npx",
+        args: &["tsc", "--noEmit"],
+    },
+    GateTemplate {
+        id: "eslint_check",
+        description: "Lint with eslint across the project (requires eslint configured)",
+        command: "npx",
+        args: &["eslint", "."],
+    },
+    GateTemplate {
+        id: "vitest_run",
+        description: "Run vitest tests once (requires vitest)",
+        command: "npx",
+        args: &["vitest", "run"],
+    },
 ];
 
 /// Result of running a gate.
@@ -375,6 +399,9 @@ mod tests {
         assert!(find_template("cargo_check").is_some());
         assert!(find_template("cargo_test").is_some());
         assert!(find_template("cargo_clippy").is_some());
+        assert!(find_template("tsc_check").is_some());
+        assert!(find_template("eslint_check").is_some());
+        assert!(find_template("vitest_run").is_some());
     }
 
     #[test]
@@ -384,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_list_templates_count() {
-        assert_eq!(list_templates().len(), 4);
+        assert_eq!(list_templates().len(), 7); // 4 cargo + 3 typescript; update when adding more
     }
 
     #[test]

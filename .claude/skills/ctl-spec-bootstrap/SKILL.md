@@ -402,14 +402,17 @@ per-language template:
   *when the project enforces formatting*: its CI runs the check, or it ships a
   fmt config. If the project does not enforce formatting anywhere, leave it out.
 
-Use only gate IDs that exist as ctl gate templates. Today those are Rust-only:
+Use only gate IDs that exist as ctl gate templates. These cover Rust (`cargo_*`) and TypeScript/Node (`npx`-resolved — the tool must be a local devDependency; EXEC-003's network denylist makes a missing tool fail closed rather than silently installing):
 
 | ctl gate template | Catches | In the floor? |
 |---|---|---|
-| `cargo_check` | compilation | yes (correctness) |
-| `cargo_test` | test failures | yes (correctness) |
+| `cargo_check` | compilation | yes (Rust correctness) |
+| `cargo_test` | test failures | yes (Rust correctness) |
 | `cargo_clippy` | lint defects | yes, **if** the project lints with clippy |
 | `cargo_fmt_check` | formatting drift | yes, **if** the project enforces formatting |
+| `tsc_check` | TypeScript type errors (`tsc --noEmit`) | yes (TS correctness), **if** the project uses TypeScript |
+| `eslint_check` | lint defects (`eslint .`) | yes, **if** the project lints with eslint |
+| `vitest_run` | test failures (`vitest run`) | yes (TS correctness), **if** the project tests with vitest |
 
 For a Rust project whose CI runs `cargo fmt --check`, `cargo check`,
 `cargo clippy`, and `cargo test`, the floor is therefore all four:
@@ -419,7 +422,7 @@ gates CI already enforces.
 **No applicable templates → leave it empty.** Detection by marker file does not
 reliably classify every project (a `package.json` may be Node, a tool, or a
 mixed repo). If the project's language has **no** ctl gate templates yet
-(Node/TypeScript, Python, Go, Java, …), do **not** invent gate IDs. Leave
+(Python, Go, Java, …), do **not** invent gate IDs. Leave
 `default_gates` empty/absent; `ctl task create` will keep requiring an explicit
 `--gates` for that repo until templates exist. A later, more capable bootstrap
 fills these in.

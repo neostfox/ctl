@@ -1,11 +1,44 @@
-# Release Notes — ctl v0.0.7
+# Release Notes — ctl v0.0.10
 
-Follows **v0.0.6**. `ctl --version` reports the built version from
-`CARGO_PKG_VERSION`; the release tag must equal `Cargo.toml` (enforced by
-`release.yml`), and the npm `@velo-ai/ctl` meta-package plus its five platform
-packages carry the matching version.
+Follows **v0.0.9**. `ctl --version` reports `CARGO_PKG_VERSION`; the release tag
+must equal `Cargo.toml` (enforced by `release.yml`), and the npm `@velo-ai/ctl`
+meta-package plus its five platform packages carry the matching version (stamped
+to the tag at publish time).
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included in 0.0.10 — TypeScript / Node gate templates
+
+- **ctl gains non-Rust gate templates.** The gate registry
+  (`src/infrastructure/gates/mod.rs`) previously shipped only the four `cargo_*`
+  templates, so non-Rust projects (Node/TypeScript/Python/Go/Java) had **no**
+  enforceable gate: `ctl task create` without `--gates` errored on the missing
+  floor, and there was no valid non-Rust gate id to pass either. Three
+  TypeScript/Node templates are added, invoked via `npx` so they resolve to the
+  project's local `node_modules/.bin`:
+  - `tsc_check` — `npx tsc --noEmit` (type-check)
+  - `eslint_check` — `npx eslint .` (lint)
+  - `vitest_run` — `npx vitest run` (tests)
+  EXEC-003's network denylist means a missing tool **fails closed** (the registry
+  fetch is denied) rather than silently installing — so these gates honestly
+  require the tool to be installed as a devDependency.
+- **`/ctl-spec-bootstrap` records a real floor for TypeScript projects.** Step
+  1.5's template table now lists the TS gates as applicable; projects detected as
+  TypeScript get `default_gates = ["tsc_check", "eslint_check", "vitest_run"]`
+  instead of an empty floor.
+- **Fixture/known-gate lists synced.** `check_fixture_paths_gates`
+  (`src/cli/mod.rs`) and the `test_list_templates_count` / `test_find_template_known`
+  tests now include the three new ids.
+- **AGENTS.md gate list** updated to declare the TS templates.
+
+### Known gaps deferred (tracked separately)
+
+- The TDD red→green interlock (`application::TDD_TEST_GATE`) is still bound to
+  `cargo_test`; a TypeScript TDD task would need `vitest_run`.
+- Python / Go / Java still have no templates.
+- A generic "run arbitrary command" gate (which would let a project define its
+  own without a code change) needs a gate data-model change and is not included.
+
 
 ## Included since 0.0.7 — `ctl init` OMP integration verification & idempotency
 

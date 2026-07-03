@@ -75,7 +75,7 @@ code — it plans, governs, and ingests results; an external executor (OMP/openc
 1. **Events**: Strict ascending `seq`, idempotent `command_id`, schema `control.event-envelope.v1`.
 2. **Reducer**: Pure function `apply(&mut TaskState, &Event)`. No side effects. State machine: `Planning → Ready → InProgress → Review → Completed` (plus `Cancelled`).
 3. **Hold**: Orthogonal to phase. Violation, gate failure, or human pause triggers hold. No `start`/`submit`/`finish` while held.
-4. **Gates**: Only predefined templates (`cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
+4. **Gates**: Only predefined templates (Rust: `cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`; TypeScript/Node: `tsc_check`, `eslint_check`, `vitest_run`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
 5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md` and `.ctl/scripts`.
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
 

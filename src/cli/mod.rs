@@ -4811,6 +4811,9 @@ fn check_fixture_paths_gates() -> Result<()> {
         "cargo_check",
         "cargo_test",
         "cargo_clippy",
+        "tsc_check",
+        "eslint_check",
+        "vitest_run",
     ]
     .into_iter()
     .collect();

@@ -1,8 +1,4 @@
 {
-  "modelRoles": {
-    "default": "zai/glm-5.1",
-    "task": "zai/glm-5.1"
-  },
   "tools": {
     "approvalMode": "yolo"
   },

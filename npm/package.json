@@ -1,6 +1,6 @@
 {
   "name": "@velo-ai/ctl",
-  "version": "0.0.7",
+  "version": "0.0.10",
   "description": "AI Dev Control Plane CLI — deterministic task lifecycle, boundary enforcement, and gate validation",
   "bin": {
     "ctl": "./bin/ctl.js"
@@ -10,11 +10,11 @@
     "platforms/"
   ],
   "optionalDependencies": {
-    "@velo-ai/ctl-win32-x64-msvc": "0.0.7",
-    "@velo-ai/ctl-darwin-x64": "0.0.7",
-    "@velo-ai/ctl-darwin-arm64": "0.0.7",
-    "@velo-ai/ctl-linux-x64-gnu": "0.0.7",
-    "@velo-ai/ctl-linux-arm64-gnu": "0.0.7"
+    "@velo-ai/ctl-win32-x64-msvc": "0.0.10",
+    "@velo-ai/ctl-darwin-x64": "0.0.10",
+    "@velo-ai/ctl-darwin-arm64": "0.0.10",
+    "@velo-ai/ctl-linux-x64-gnu": "0.0.10",
+    "@velo-ai/ctl-linux-arm64-gnu": "0.0.10"
   },
   "keywords": [
     "ai",
@@ -26,7 +26,10 @@
     "gate"
   ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/neostfox/ctl" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neostfox/ctl"
+  },
   "engines": {
     "node": ">=16"
   }
