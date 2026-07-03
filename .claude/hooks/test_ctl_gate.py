@@ -8,8 +8,12 @@ the 0.0.5 honesty audit (D1 / Finding 6 / U-1) found was previously UNTESTED:
   * Bash FAILS OPEN (allow) when ctl is unavailable — the shell is never locked;
   * the Task / subagent-spawn tool is NOT matched by PreToolUse at all, so the
     hook never even consults ctl for it (the U-1 platform boundary);
-  * idle / out-of-scope deny verdicts surface as a deny decision;
-  * deny verdicts and bash_write allows are forwarded to the decision log.
+  * hard-core deny verdicts (protected path, deps step-up, held, overlap)
+    surface as a deny decision;
+  * OBSERVE verdicts (allowed + warning, e.g. out-of-scope or task-less
+    writes) surface as additionalContext WITHOUT a permissionDecision — the
+    write proceeds under the normal permission flow, the model sees the nudge;
+  * deny verdicts and flagged allows (record=true) land in the decision log.
 
 No ctl binary and no model: `subprocess.run` is mocked, stdin is fed a tool
 payload, and the emitted permission decision (stdout JSON) is asserted.
@@ -151,26 +155,60 @@ class GateHookTest(unittest.TestCase):
         )
         self.assertIsNone(r, "an allowed write emits no decision")
 
-    def test_out_of_scope_write_is_denied_with_reason_and_remedy(self):
+    def test_hard_core_deny_surfaces_with_reason_and_remedy(self):
+        # Protected paths remain the write-time hard core under observe mode.
         r = self._invoke(
             {"tool_name": "Write", "tool_input": {"file_path": "Cargo.toml"}},
             verdict={"allowed": False, "state": "in_progress",
-                     "reason": "outside write_allow",
-                     "remedy": "ctl task revise --id <id>"},
+                     "reason": "protected path: Cargo.toml",
+                     "remedy": "ctl apply --path <p> --reason <why>"},
         )
         self.assertEqual(self._decision(r), "deny")
-        self.assertIn("outside write_allow", self._reason(r))
-        self.assertIn("ctl task revise", self._reason(r))
+        self.assertIn("protected path", self._reason(r))
+        self.assertIn("ctl apply", self._reason(r))
 
-    def test_idle_write_is_denied(self):
-        # Idle = no active in_progress task; writes must be denied.
+    # ── observe mode: allowed + warning → additionalContext, no decision ──
+
+    @staticmethod
+    def _context(result):
+        return result["hookSpecificOutput"]["additionalContext"]
+
+    def test_observed_idle_write_allows_with_model_visible_warning(self):
         r = self._invoke(
             {"tool_name": "Write", "tool_input": {"file_path": "src/x"}},
-            verdict={"allowed": False, "state": "idle",
-                     "reason": "no active in_progress task — create one first"},
+            verdict={"allowed": True, "record": True, "state": "idle",
+                     "reason": "no active in_progress task (observe mode)",
+                     "warning": "no active in_progress task — this ungoverned "
+                                "write is recorded in .ctl/decisions.jsonl",
+                     "remedy": "ctl task quick --write-allow <path>"},
         )
-        self.assertEqual(self._decision(r), "deny")
-        self.assertIn("idle", self._reason(r))
+        self.assertNotIn(
+            "permissionDecision", r["hookSpecificOutput"],
+            "an observed write must NOT carry a permission decision",
+        )
+        self.assertIn("ctl observe [idle]", self._context(r))
+        self.assertIn(".ctl/decisions.jsonl", self._context(r))
+        self.assertIn("ctl task quick", self._context(r))
+
+    def test_observed_write_is_recorded_with_warning(self):
+        self._invoke(
+            {"tool_name": "Write", "tool_input": {"file_path": "src/x"}},
+            verdict={"allowed": True, "record": True, "state": "in_progress",
+                     "reason": "outside write_allow (observe mode)",
+                     "warning": "outside the active task's write_allow"},
+        )
+        self.assertEqual(len(self.record_calls), 1)
+        data = self._record_payload(self.record_calls[0])
+        self.assertTrue(data["allowed"])
+        self.assertEqual(data["warning"], "outside the active task's write_allow")
+
+    def test_plain_allow_with_no_warning_stays_silent(self):
+        r = self._invoke(
+            {"tool_name": "Write", "tool_input": {"file_path": "src/x"}},
+            verdict={"allowed": True, "state": "in_progress",
+                     "reason": "within write_allow"},
+        )
+        self.assertIsNone(r, "an unflagged allow must emit nothing")
 
     # ── the U-1 platform boundary: PreToolUse does not gate Task ──
 
@@ -195,7 +233,7 @@ class GateHookTest(unittest.TestCase):
         self._invoke(
             {"tool_name": "Write", "tool_input": {"file_path": "Cargo.toml"}},
             verdict={"allowed": False, "state": "in_progress",
-                     "reason": "outside write_allow"},
+                     "reason": "protected path: Cargo.toml"},
         )
         self.assertEqual(len(self.record_calls), 1)
         data = self._record_payload(self.record_calls[0])

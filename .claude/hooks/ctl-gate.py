@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook — enforce ctl governance boundaries.
+"""Claude Code PreToolUse hook — ctl governance gate (observe mode).
 
 Calls `ctl hook gate` and translates the verdict into a Claude Code
-permission decision. Fails CLOSED for mutating tools when ctl is
-unavailable: an unenforceable boundary must never silently allow writes.
+permission decision. The gate's hard core (protected paths, deps step-up,
+held tasks, cross-task overlap) still returns deny verdicts, which surface
+as a deny decision. Observed verdicts (out-of-scope / task-less writes,
+commits outside the Review window) come back `allowed: true` with a
+`warning`: the hook forwards the warning to the model as PreToolUse
+`additionalContext` WITHOUT a permissionDecision, so the write proceeds
+under the normal permission flow and the model sees the governance nudge.
+Fails CLOSED for Write/Edit/MultiEdit when ctl is unavailable: with no gate
+there is no recorder, and the protected-path check would be blind.
 
 Registered in .claude/settings.json for matcher "Write|Edit|MultiEdit|Bash".
 """
@@ -116,6 +123,23 @@ def allow() -> None:
     sys.exit(0)
 
 
+def allow_with_context(context: str) -> None:
+    """Defer to the normal permission flow, but inject model-visible context.
+
+    additionalContext WITHOUT a permissionDecision: the tool call proceeds
+    under the user's normal permission settings (the hook never silently
+    auto-approves), while the model sees the observe-mode warning and can
+    self-correct (create/widen a task) instead of being blocked.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
+        }
+    }))
+    sys.exit(0)
+
+
 def record_decision(tool: str, ti: dict, verdict: dict) -> None:
     """Append blocked/flagged tool calls to the NON-CANONICAL .ctl/decisions.jsonl.
 
@@ -135,6 +159,8 @@ def record_decision(tool: str, ti: dict, verdict: dict) -> None:
         "state": verdict.get("state", ""),
         "reason": verdict.get("reason", ""),
     }
+    if verdict.get("warning"):
+        record["warning"] = verdict["warning"]
     if tool == "Bash":
         record["command"] = ti.get("command", "")
     else:
@@ -203,6 +229,13 @@ def main() -> None:
     record_decision(tool, ti, verdict)
 
     if verdict.get("allowed") is True:
+        warning = verdict.get("warning", "")
+        if warning:
+            msg = f"ctl observe [{verdict.get('state', '')}]: {warning}"
+            remedy = verdict.get("remedy")
+            if remedy:
+                msg += f"\nSuggested: {remedy}"
+            allow_with_context(msg)
         allow()
 
     state = verdict.get("state", "")

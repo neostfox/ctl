@@ -1,6 +1,6 @@
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 1
+CONTROL_GUARD_PROTOCOL_VERSION = 2
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -18,11 +18,15 @@ ctl task (parent)  — declared scope, gates, boundaries (the ctl ledger)
 ```
 
 You **proactively** create the parent ctl task before risk-bearing work, then
-break it into subtasks with your host's native mechanism. Enforcement is done by
-the host's ctl gate (see the platform section): mutating actions outside scope
-are blocked, and if `ctl` is unavailable mutating tools **fail closed** (blocked)
-until it responds — you cannot work around a block by retrying; create or widen a
-task, or redirect the work.
+break it into subtasks with your host's native mechanism. The host's ctl gate
+(see the platform section) runs in **observe mode**: a mutating action outside
+scope, or with no active task, is **allowed but recorded** to the non-canonical
+decision log (`.ctl/decisions.jsonl`) with a model-visible warning. A warning is
+a prompt to create or widen a task before continuing — never permission to keep
+working ungoverned. The **hard core still denies**: protected paths, dependency
+changes without a step-up approval, held tasks, and cross-task write overlap.
+If `ctl` is unavailable, path-scoped write tools **fail closed** (blocked) until
+it responds.
 
 ## When to Engage (proactive) vs. Skip
 

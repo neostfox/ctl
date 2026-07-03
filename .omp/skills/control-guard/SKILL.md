@@ -10,10 +10,10 @@ control-guard protocol, byte-checked by CI against
 `.agent/protocols/control-guard.md` and the OpenCode skill. Do not edit it here in
 isolation. OMP-specific mechanics live in "OMP Integration" after the core.
 
-<!-- ctl:control-guard-core:start version=1 -->
+<!-- ctl:control-guard-core:start version=2 -->
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 1
+CONTROL_GUARD_PROTOCOL_VERSION = 2
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -31,11 +31,15 @@ ctl task (parent)  — declared scope, gates, boundaries (the ctl ledger)
 ```
 
 You **proactively** create the parent ctl task before risk-bearing work, then
-break it into subtasks with your host's native mechanism. Enforcement is done by
-the host's ctl gate (see the platform section): mutating actions outside scope
-are blocked, and if `ctl` is unavailable mutating tools **fail closed** (blocked)
-until it responds — you cannot work around a block by retrying; create or widen a
-task, or redirect the work.
+break it into subtasks with your host's native mechanism. The host's ctl gate
+(see the platform section) runs in **observe mode**: a mutating action outside
+scope, or with no active task, is **allowed but recorded** to the non-canonical
+decision log (`.ctl/decisions.jsonl`) with a model-visible warning. A warning is
+a prompt to create or widen a task before continuing — never permission to keep
+working ungoverned. The **hard core still denies**: protected paths, dependency
+changes without a step-up approval, held tasks, and cross-task write overlap.
+If `ctl` is unavailable, path-scoped write tools **fail closed** (blocked) until
+it responds.
 
 ## When to Engage (proactive) vs. Skip
 
@@ -173,9 +177,11 @@ do not replicate it:
 - **session_start → context**: injects the active task boundaries into every LLM
   call.
 - **tool_call**: gates mutating tools via `ctl hook gate`. Mutating tools here:
-  `write`/`edit`, **`bash`**, and the **`task`** (subagent-spawn) tool. Writes
-  outside `write_allow`, git commits without a completed task, pushes, and
-  writable subagent spawns are blocked; read-only tools are never blocked.
+  `write`/`edit`, **`bash`**, and the **`task`** (subagent-spawn) tool. Observe
+  mode: out-of-scope or task-less writes and commits/pushes outside the Review
+  window are allowed but recorded to the decision log; protected paths, deps
+  changes without approval, held tasks, and writable subagent spawns without an
+  active task are blocked; read-only tools are never blocked.
 - **subagent timeout**: blocks `job poll` past the threshold — cancel and
   re-spawn a smaller assignment (configurable via `CTL_SUBAGENT_TIMEOUT_MS`).
 - **agent_end / session_shutdown**: spec-drift and unfinished-task reminders.

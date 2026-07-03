@@ -7,6 +7,37 @@ to the tag at publish time).
 
 This is a factual changelog. It contains no scores or quality grades.
 
+## Included in 0.0.10 — Gate observe mode (deny → record + warn)
+
+- **The write gate no longer denies by default.** `ctl hook gate` verdicts for
+  out-of-scope Write/Edit (including out-of-repo targets), writes with no
+  `in_progress` task, `bash_write` while idle, and `git commit`/`git push`
+  outside the Review window change from `allowed:false` to `allowed:true` +
+  `record:true` + a `warning` field. Observed calls land in the non-canonical
+  `.ctl/decisions.jsonl` (the gate-decision-log-v1 channel); the Claude
+  PreToolUse hook forwards the warning to the model as `additionalContext`
+  **without** a permission decision, so the user's normal permission flow is
+  untouched. ADR: `.ctl/spec/prd/gate-observe-mode.md`.
+- **Protected paths are now denied explicitly, not incidentally.** A new
+  gate-side classifier (`classify_write_target`) resolves the hook's absolute
+  target against the project root and checks the boundary-normalizer protected
+  list (`.git`, `.ctl` ledgers, `.control`, `schemas/`, `Cargo.toml`,
+  `Cargo.lock`, with the `.ctl/config.toml` / `workflow.md` / `scripts`
+  carve-outs). Previously protection fell out of "never in write_allow", which
+  observe mode would have silently softened. A granted `ctl apply` exception
+  still authorizes a specific protected path; traversal/UNC targets the gate
+  refuses to classify stay denied.
+- **The hard core is unchanged**: deps changes without a `deps` step-up
+  approval, held tasks, cross-task write overlap (M-c), multi-active ambiguity
+  without a dispatch binding, destructive git ops during active runs (M6), and
+  fail-closed for Write/Edit/MultiEdit when `ctl` is unavailable.
+- **Protocol + docs synced**: control-guard core bumped to
+  `CONTROL_GUARD_PROTOCOL_VERSION = 2` across `.agent/protocols/` and all four
+  platform skill copies (`.claude`, `.omp`, `.opencode`, `npm-omp`);
+  `ctl-context.py` session context and AGENTS.md describe the observe posture.
+- **Known gap**: the opencode plugin allows-and-records observed verdicts but
+  does not yet surface the `warning` text to the model.
+
 ## Included in 0.0.10 — TypeScript / Node gate templates
 
 - **ctl gains non-Rust gate templates.** The gate registry

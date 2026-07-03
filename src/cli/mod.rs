@@ -5855,6 +5855,60 @@ fn is_spec_path(project_root: &Path, path: &str) -> bool {
     };
     resolved.starts_with(project_root.join(".ctl").join("spec"))
 }
+/// Gate-side classification of a Write/Edit target path (observe mode).
+///
+/// Unlike `PathNormalizer::normalize_write` — which validates task boundaries
+/// at create/revise time and requires an existing, canonicalizable parent —
+/// this is a lexical check for the hook path: targets arrive absolute from the
+/// host and may name files that do not exist yet. Protection must be checked
+/// explicitly here because out-of-scope writes are now observed, not denied,
+/// so a protected path no longer falls into the generic scope deny.
+enum WriteTarget {
+    /// Inside the repo, not protected.
+    InRepo,
+    /// Outside the project root entirely (e.g. a home-dir memory file).
+    OutOfRepo,
+    /// Under a protected root (ledgers, schemas, manifests) — hard deny.
+    Protected(String),
+    /// Traversal/UNC/empty — the gate refuses to classify it. Hard deny.
+    Suspicious(&'static str),
+}
+
+fn classify_write_target(project_root: &Path, target: &str) -> WriteTarget {
+    use std::path::Component;
+    if target.starts_with("\\\\") || target.starts_with("//") {
+        return WriteTarget::Suspicious("UNC path");
+    }
+    let p = Path::new(target);
+    let rel = if p.is_absolute() {
+        match p.strip_prefix(project_root) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => return WriteTarget::OutOfRepo,
+        }
+    } else {
+        p.to_path_buf()
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for comp in rel.components() {
+        match comp {
+            Component::ParentDir => return WriteTarget::Suspicious(".. traversal"),
+            Component::RootDir | Component::Prefix(_) => {
+                return WriteTarget::Suspicious("absolute path component")
+            }
+            Component::CurDir => continue,
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return WriteTarget::Suspicious("empty path");
+    }
+    let norm = PathNormalizer::new(project_root.to_path_buf());
+    if norm.is_protected(&normalized) {
+        return WriteTarget::Protected(normalized.to_string_lossy().into_owned());
+    }
+    WriteTarget::InRepo
+}
+
 /// Short string for GovState variant (no Debug payload).
 fn gov_state_str(state: &GovState) -> &'static str {
     match state {
@@ -5937,6 +5991,53 @@ fn cmd_hook_gate(
                 return Ok(());
             }
 
+            // Observe mode: protection and traversal are the write-time hard
+            // core; everything else scope-shaped is allowed + recorded + warned.
+            let class = classify_write_target(&project_root, target);
+
+            if let WriteTarget::Suspicious(why) = &class {
+                let output = serde_json::json!({
+                    "allowed": false,
+                    "state": gov_state_str(&state),
+                    "reason": format!("write target refused classification: {}", why),
+                    "remedy": "use a plain repo-relative or absolute path without traversal/UNC components"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+
+            if let WriteTarget::Protected(p) = &class {
+                // A granted `ctl apply` exception still authorizes a specific
+                // protected path (e.g. Cargo.toml under a deps approval flow).
+                if let GovState::InProgress {
+                    task_id,
+                    approved_apply_paths,
+                    ..
+                } = &state
+                {
+                    if path_in_scope(&project_root, target, approved_apply_paths) {
+                        let output = serde_json::json!({
+                            "allowed": true,
+                            "state": "in_progress",
+                            "task_id": task_id,
+                            "reason": "reviewed out-of-scope exception (ctl apply) on a protected path"
+                        });
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                        return Ok(());
+                    }
+                }
+                let output = serde_json::json!({
+                    "allowed": false,
+                    "state": gov_state_str(&state),
+                    "reason": format!("protected path: {} — canonical ledgers/schemas/manifests are never writable by default", p),
+                    "remedy": "request a reviewed exception: ctl apply --path <p> --reason <why>, then ctl approval grant"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+
+            let out_of_repo = matches!(class, WriteTarget::OutOfRepo);
+
             match &state {
                 GovState::InProgress {
                     task_id,
@@ -5944,7 +6045,8 @@ fn cmd_hook_gate(
                     approved_apply_paths,
                     ..
                 } => {
-                    let in_scope = path_in_scope(&project_root, target, write_allow);
+                    let in_scope =
+                        !out_of_repo && path_in_scope(&project_root, target, write_allow);
                     // M-f `ctl apply`: a write outside write_allow is allowed when a
                     // reviewer has granted this exact out-of-scope path (an audited
                     // exception). M-c overlap still applies below.
@@ -5953,8 +6055,9 @@ fn cmd_hook_gate(
                     let allowed_by_scope = in_scope || applied;
                     // M-c: even within our own scope (or a granted apply), a write
                     // must not land inside another *active* task's claimed scope.
-                    // Only checked when otherwise allowed (a denied write is moot).
-                    let conflict = if allowed_by_scope {
+                    // Checked whenever the write will proceed (which under observe
+                    // mode is also the out-of-scope case).
+                    let conflict = if !out_of_repo {
                         first_overlapping_active_task(&project_root, target, task_id)?
                     } else {
                         None
@@ -5968,21 +6071,36 @@ fn cmd_hook_gate(
                             "reason": format!("path is inside active task '{}' write_allow — cross-task write overlap", other),
                             "remedy": "narrow the write scopes so they don't overlap, or submit/cancel the other task first"
                         })
-                    } else {
+                    } else if allowed_by_scope {
                         serde_json::json!({
-                            "allowed": allowed_by_scope,
+                            "allowed": true,
                             "state": "in_progress",
                             "task_id": task_id,
                             "reason": if in_scope {
                                 "within write_allow"
-                            } else if applied {
-                                "reviewed out-of-scope exception (ctl apply)"
                             } else {
-                                "outside write_allow"
-                            },
-                            "remedy": if allowed_by_scope { "" } else {
-                                "request a reviewed exception: ctl apply --path <p> --reason <why>, then ctl approval grant; or widen scope via ctl task revise"
+                                "reviewed out-of-scope exception (ctl apply)"
                             }
+                        })
+                    } else {
+                        // Observe: out of scope (or out of repo) under an active
+                        // task — allowed, recorded, warned.
+                        serde_json::json!({
+                            "allowed": true,
+                            "state": "in_progress",
+                            "task_id": task_id,
+                            "record": true,
+                            "reason": if out_of_repo {
+                                "outside the repository — not governable by task scope (observe mode)"
+                            } else {
+                                "outside write_allow (observe mode)"
+                            },
+                            "warning": if out_of_repo {
+                                "this write lands outside the repository; it is recorded in .ctl/decisions.jsonl but no task scope can govern it"
+                            } else {
+                                "this write is outside the active task's write_allow; it is allowed and recorded in .ctl/decisions.jsonl — widen the scope if this belongs to the task"
+                            },
+                            "remedy": "widen scope via ctl task revise, or request a reviewed exception: ctl apply --path <p> --reason <why>"
                         })
                     };
                     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -5998,11 +6116,20 @@ fn cmd_hook_gate(
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 _ => {
+                    // Observe: no in_progress task (idle/review/completed) —
+                    // allowed, recorded, warned. Durable work should still get
+                    // a task; the warning says so without blocking.
                     let output = serde_json::json!({
-                        "allowed": false,
+                        "allowed": true,
                         "state": gov_state_str(&state),
-                        "reason": "no active in_progress task — create one first",
-                        "remedy": "use control-guard skill to create a task, or user says 'skip control'"
+                        "record": true,
+                        "reason": if out_of_repo {
+                            "outside the repository, no active task (observe mode)"
+                        } else {
+                            "no active in_progress task (observe mode)"
+                        },
+                        "warning": "no active in_progress task — this ungoverned write is recorded in .ctl/decisions.jsonl; create a ctl task for durable or multi-file work",
+                        "remedy": "ctl task quick --write-allow <path> --objective <text>, or continue for trivial edits"
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
@@ -6073,32 +6200,41 @@ fn cmd_hook_gate(
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     }
                     _ => {
+                        // Observe: outside the commit window — allowed, recorded,
+                        // warned. The finish interlock still requires the task's
+                        // own in-scope work to be committed during Review.
                         let output = serde_json::json!({
-                            "allowed": false,
+                            "allowed": true,
                             "state": gov_state_str(&state),
-                            "reason": "git commit only allowed in a task's commit window (Review or Completed)",
-                            "remedy": "ctl task submit --id <id> to open the commit window, then commit before ctl task finish"
+                            "record": true,
+                            "reason": "git commit outside a task's commit window (observe mode)",
+                            "warning": "commit outside a Review/Completed window — recorded in .ctl/decisions.jsonl; the canonical flow is ctl task submit → commit → finish",
+                            "remedy": "ctl task submit --id <id> opens the commit window for governed work"
                         });
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     }
                 },
                 "git_push" => {
                     // M-g: push rides the same commit window as commit — open
-                    // from Review through Completed.
-                    let allowed =
+                    // from Review through Completed. Outside it: observe.
+                    let in_window =
                         matches!(&state, GovState::Review { .. } | GovState::Completed { .. });
-                    let output = serde_json::json!({
-                        "allowed": allowed,
-                        "state": gov_state_str(&state),
-                        "reason": if allowed {
-                            "push window open (review or completed)"
-                        } else {
-                            "git push only allowed in a task's commit window (Review or Completed)"
-                        },
-                        "remedy": if allowed { "" } else {
-                            "ctl task submit --id <id> to open the commit window, then commit and push"
-                        }
-                    });
+                    let output = if in_window {
+                        serde_json::json!({
+                            "allowed": true,
+                            "state": gov_state_str(&state),
+                            "reason": "push window open (review or completed)"
+                        })
+                    } else {
+                        serde_json::json!({
+                            "allowed": true,
+                            "state": gov_state_str(&state),
+                            "record": true,
+                            "reason": "git push outside a task's commit window (observe mode)",
+                            "warning": "push outside a Review/Completed window — recorded in .ctl/decisions.jsonl; pushes are outward-facing, prefer the governed submit → commit → push flow",
+                            "remedy": "ctl task submit --id <id> opens the commit window"
+                        })
+                    };
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 "cargo_deps" => {
@@ -6145,30 +6281,29 @@ fn cmd_hook_gate(
                 "bash_write" => {
                     // Best-effort: this command appears to write files (a redirection
                     // or a file-mutating verb). ctl cannot path-scope a shell write,
-                    // so this is NOT a write_allow check — it only requires an active
-                    // in_progress task, closing the gap where Write/Edit are denied
-                    // while idle but a bash write would otherwise slip through. The
-                    // path-scoped Write/Edit tools remain the governed way to make
-                    // in-scope edits; a determined shell can still obscure a write.
-                    let allow = matches!(&state, GovState::InProgress { .. });
-                    let output = serde_json::json!({
-                        "allowed": allow,
-                        "state": gov_state_str(&state),
-                        // A bash write is never path-scoped against write_allow, so
-                        // every attempt — allowed or denied — is noteworthy. Flag it
-                        // for the decision log; denies elsewhere are logged by the
-                        // host hook on `allowed == false`, but a bash_write ALLOW
-                        // would otherwise be invisible, so mark it explicitly.
-                        "record": true,
-                        "reason": if allow {
-                            "bash write allowed under active task — NOT path-scope-checked against write_allow"
-                        } else {
-                            "bash appears to write files but there is no active in_progress task"
-                        },
-                        "remedy": if allow { "" } else {
-                            "start a ctl task (create + ready + start), or use the path-scoped Write/Edit tool"
-                        }
-                    });
+                    // so this is NOT a write_allow check. Under observe mode both
+                    // cases are allowed; every attempt is flagged for the decision
+                    // log (a bash write is never path-scoped, so an unrecorded
+                    // ALLOW would be invisible), and the task-less case carries a
+                    // model-visible warning instead of a deny.
+                    let has_task = matches!(&state, GovState::InProgress { .. });
+                    let output = if has_task {
+                        serde_json::json!({
+                            "allowed": true,
+                            "state": gov_state_str(&state),
+                            "record": true,
+                            "reason": "bash write allowed under active task — NOT path-scope-checked against write_allow"
+                        })
+                    } else {
+                        serde_json::json!({
+                            "allowed": true,
+                            "state": gov_state_str(&state),
+                            "record": true,
+                            "reason": "bash write with no active in_progress task (observe mode)",
+                            "warning": "this shell command appears to write files with no active task — recorded in .ctl/decisions.jsonl; create a ctl task for durable work, or use the path-scoped Write/Edit tools",
+                            "remedy": "ctl task quick --write-allow <path> --objective <text>"
+                        })
+                    };
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 _ => {
@@ -6496,12 +6631,97 @@ fn cmd_hook_spec_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bash, decision_entry, detect_shared_git_op, ellipsize,
+        classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
         format_brainstorm_provenance, format_decision_line, format_decisions,
         format_research_output, format_uncertainty_ledger, parse_project_default_gates,
         resolve_active_governance, resolve_ctl_for_hook, ActiveTask, CtlProbe, CtlReach, GovState,
+        WriteTarget,
     };
     use std::path::{Path, PathBuf};
+
+    // ── classify_write_target (gate observe mode) ──
+    // Purely lexical, so no files are created; the root just needs to be an
+    // absolute path that exists as a string on every platform.
+
+    fn classify_root() -> PathBuf {
+        std::env::temp_dir().join("ctl_gate_classify_root")
+    }
+
+    #[test]
+    fn write_target_in_repo_relative_and_absolute() {
+        let root = classify_root();
+        assert!(matches!(
+            classify_write_target(&root, "src/cli/mod.rs"),
+            WriteTarget::InRepo
+        ));
+        let abs = root.join("src").join("cli").join("mod.rs");
+        assert!(matches!(
+            classify_write_target(&root, &abs.to_string_lossy()),
+            WriteTarget::InRepo
+        ));
+    }
+
+    #[test]
+    fn write_target_out_of_repo_is_classified_not_denied() {
+        let root = classify_root();
+        // temp_dir itself is absolute and NOT under the (deeper) root.
+        let outside = std::env::temp_dir().join("elsewhere").join("CLAUDE.md");
+        assert!(matches!(
+            classify_write_target(&root, &outside.to_string_lossy()),
+            WriteTarget::OutOfRepo
+        ));
+    }
+
+    #[test]
+    fn write_target_protected_paths_are_flagged() {
+        let root = classify_root();
+        for p in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "schemas/x.json",
+            ".git/config",
+            ".ctl/tasks/t/events.jsonl",
+        ] {
+            assert!(
+                matches!(classify_write_target(&root, p), WriteTarget::Protected(_)),
+                "{p} must classify as protected"
+            );
+        }
+        // Absolute form of a protected path is protected too.
+        let abs = root.join("Cargo.toml");
+        assert!(matches!(
+            classify_write_target(&root, &abs.to_string_lossy()),
+            WriteTarget::Protected(_)
+        ));
+    }
+
+    #[test]
+    fn write_target_ctl_carveouts_stay_writable() {
+        // The normalizer carve-outs from the blanket `.ctl` protection must
+        // survive the gate-side check (spec is exempted earlier, config here).
+        let root = classify_root();
+        assert!(matches!(
+            classify_write_target(&root, ".ctl/config.toml"),
+            WriteTarget::InRepo
+        ));
+    }
+
+    #[test]
+    fn write_target_traversal_and_unc_are_suspicious() {
+        let root = classify_root();
+        assert!(matches!(
+            classify_write_target(&root, "../outside.txt"),
+            WriteTarget::Suspicious(_)
+        ));
+        assert!(matches!(
+            classify_write_target(&root, "//server/share/x"),
+            WriteTarget::Suspicious(_)
+        ));
+        assert!(matches!(
+            classify_write_target(&root, ""),
+            WriteTarget::Suspicious(_)
+        ));
+    }
 
     fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {
         ActiveTask {

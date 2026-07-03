@@ -10,10 +10,10 @@ byte-checked by CI against `.agent/protocols/control-guard.md` and the OMP skill
 Do not edit it here in isolation. opencode-specific mechanics live in "opencode
 Integration" after the core.
 
-<!-- ctl:control-guard-core:start version=1 -->
+<!-- ctl:control-guard-core:start version=2 -->
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 1
+CONTROL_GUARD_PROTOCOL_VERSION = 2
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -31,11 +31,15 @@ ctl task (parent)  — declared scope, gates, boundaries (the ctl ledger)
 ```
 
 You **proactively** create the parent ctl task before risk-bearing work, then
-break it into subtasks with your host's native mechanism. Enforcement is done by
-the host's ctl gate (see the platform section): mutating actions outside scope
-are blocked, and if `ctl` is unavailable mutating tools **fail closed** (blocked)
-until it responds — you cannot work around a block by retrying; create or widen a
-task, or redirect the work.
+break it into subtasks with your host's native mechanism. The host's ctl gate
+(see the platform section) runs in **observe mode**: a mutating action outside
+scope, or with no active task, is **allowed but recorded** to the non-canonical
+decision log (`.ctl/decisions.jsonl`) with a model-visible warning. A warning is
+a prompt to create or widen a task before continuing — never permission to keep
+working ungoverned. The **hard core still denies**: protected paths, dependency
+changes without a step-up approval, held tasks, and cross-task write overlap.
+If `ctl` is unavailable, path-scoped write tools **fail closed** (blocked) until
+it responds.
 
 ## When to Engage (proactive) vs. Skip
 
@@ -172,9 +176,13 @@ Suggestion.
 - **experimental.chat.system.transform**: injects the active task boundaries
   (scope, phase, task id) into the system prompt every call.
 - **tool.execute.before**: gates the mutating tools `write` / `edit` / `patch` /
-  `bash` / `task` via `ctl hook gate`; it **throws** (blocking the tool) on an
-  out-of-scope or wrong-phase verdict, and **fails closed** for mutating tools
-  when `ctl` is unavailable. Read-only tools are never blocked.
+  `bash` / `task` via `ctl hook gate`. Observe mode: an out-of-scope or
+  task-less verdict comes back allowed + recorded to the decision log (the
+  plugin does not yet surface the warning text to the model — follow-up).
+  Hard-core verdicts (protected path, deps step-up, held, overlap, ungoverned
+  writable subagent spawn) still **throw** (blocking the tool), and mutating
+  tools **fail closed** when `ctl` is unavailable. Read-only tools are never
+  blocked.
 
 ### Subagent roles (autonomous dispatch)
 

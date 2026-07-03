@@ -78,6 +78,7 @@ code — it plans, governs, and ingests results; an external executor (OMP/openc
 4. **Gates**: Only predefined templates (Rust: `cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`; TypeScript/Node: `tsc_check`, `eslint_check`, `vitest_run`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
 5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md` and `.ctl/scripts`.
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
+7. **Gate observe mode**: the host write gate (`ctl hook gate`) allows-and-records out-of-scope / task-less mutations and out-of-window commits/pushes to the non-canonical `.ctl/decisions.jsonl`, returning a model-visible `warning`; protected paths, deps step-up, held tasks, cross-task overlap, and multi-active ambiguity remain hard denies. See `.ctl/spec/prd/gate-observe-mode.md`.
 
 ## Spec & Documentation
 

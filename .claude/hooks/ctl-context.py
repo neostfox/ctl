@@ -36,12 +36,15 @@ def main() -> None:
         if b.get("gates"):
             lines.append(f"    Gates: {', '.join(b['gates'])}")
     lines.append(
-        "Enforcement (Claude Code PreToolUse gate) is per-tool, not uniform: "
-        "Write/Edit/MultiEdit are path-scoped against write_allow and FAIL CLOSED "
-        "when ctl is unavailable. Bash is gated but FAILS OPEN on a ctl "
-        "error/timeout (the shell is never locked out) and is not path-scoped — so "
-        "Bash is not a hard write boundary; prefer the Write/Edit tools for in-scope "
-        "edits. The Task/subagent-spawn tool is NOT matched by PreToolUse at all "
+        "The PreToolUse gate runs in OBSERVE MODE: out-of-scope or task-less "
+        "writes, and commits outside the Review window, are allowed but recorded "
+        "to .ctl/decisions.jsonl with a model-visible warning — a warning is a "
+        "prompt to create/widen a task, not permission to ignore governance. "
+        "The hard core still denies: protected paths (.git, .ctl ledgers, "
+        "schemas/, Cargo.toml/lock), dependency changes without a deps approval, "
+        "held tasks, and cross-task write overlap. Write/Edit/MultiEdit FAIL "
+        "CLOSED when ctl is unavailable; Bash FAILS OPEN and is not path-scoped. "
+        "The Task/subagent-spawn tool is NOT matched by PreToolUse at all "
         "(a Claude platform boundary, not a TODO — see .claude/subagent-dispatch.md): "
         "dispatch only read-only subagents and keep writes inline in the main agent."
     )

@@ -123,13 +123,15 @@ class ContextHookTest(unittest.TestCase):
         self.assertIn("first", ctx)
         self.assertIn("second", ctx)
 
-    # ── the honest per-tool enforcement notice (D1 regression guard) ──
+    # ── the honest enforcement notice (D1 regression guard, observe mode) ──
 
-    def test_enforcement_notice_is_per_tool_and_honest(self):
+    def test_enforcement_notice_is_observe_mode_and_honest(self):
         ctx = self._invoke(ctx=_ctx(_task()))
-        # Per-tool, not the old "all mutating tools fail closed" overclaim.
-        self.assertIn("per-tool", ctx)
-        self.assertIn("FAIL CLOSED", ctx)        # Write/Edit/MultiEdit
+        # Observe posture is stated, with the recording channel and hard core.
+        self.assertIn("OBSERVE MODE", ctx)
+        self.assertIn(".ctl/decisions.jsonl", ctx)
+        self.assertIn("hard core still denies", ctx)
+        self.assertIn("FAIL CLOSED", ctx)        # Write/Edit/MultiEdit on ctl-down
         self.assertIn("FAILS OPEN", ctx)         # Bash
         self.assertIn("not path-scoped", ctx)    # Bash is not a hard boundary
         # The U-1 platform boundary: Task is not gated by PreToolUse.

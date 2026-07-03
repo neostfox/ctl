@@ -111,7 +111,10 @@ impl PathNormalizer {
 
     /// Check whether a normalized path is under a protected root.
     /// Uses separator-boundary matching so ".git" does not match "gitignored".
-    fn is_protected(&self, path: &Path) -> bool {
+    /// Public because the hook gate (observe mode) must check protection
+    /// explicitly: protection no longer falls out of "never in write_allow"
+    /// now that out-of-scope writes are observed rather than denied.
+    pub fn is_protected(&self, path: &Path) -> bool {
         let s = path.to_string_lossy().to_lowercase();
         // Carve-outs from the blanket `.ctl` protection: AI-writable control-plane
         // config, treated like `.ctl/spec` (which the gate already exempts). These let
