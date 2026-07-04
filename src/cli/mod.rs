@@ -6444,12 +6444,7 @@ fn iso8601_utc_to_epoch(s: &str) -> Option<u64> {
         t.next()?.parse::<u32>().ok()?,
         t.next()?.parse::<u32>().ok()?,
     );
-    let ss = t
-        .next()?
-        .split('.')
-        .next()?
-        .parse::<u32>()
-        .ok()?;
+    let ss = t.next()?.split('.').next()?.parse::<u32>().ok()?;
     if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
@@ -6861,12 +6856,12 @@ mod tests {
     #[test]
     fn iso8601_parse_matches_known_epochs() {
         assert_eq!(iso8601_utc_to_epoch("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(iso8601_utc_to_epoch("2026-07-04T05:05:35Z"), Some(1_783_141_535));
-        // Fractional seconds tolerated, malformed rejected.
         assert_eq!(
-            iso8601_utc_to_epoch("1970-01-01T00:00:01.500Z"),
-            Some(1)
+            iso8601_utc_to_epoch("2026-07-04T05:05:35Z"),
+            Some(1_783_141_535)
         );
+        // Fractional seconds tolerated, malformed rejected.
+        assert_eq!(iso8601_utc_to_epoch("1970-01-01T00:00:01.500Z"), Some(1));
         assert_eq!(iso8601_utc_to_epoch("not a date"), None);
         assert_eq!(iso8601_utc_to_epoch("2026-13-01T00:00:00Z"), None);
     }
