@@ -1,0 +1,106 @@
+# Thinking Guides
+
+> **Purpose**: Expand your thinking to catch things you might not have considered.
+
+---
+
+## Why Thinking Guides?
+
+**Most bugs and tech debt come from "didn't think of that"**, not from lack of skill:
+
+- Didn't think about what happens at layer boundaries → cross-layer bugs
+- Didn't think about code patterns repeating → duplicated code everywhere
+- Didn't think about edge cases → runtime errors
+- Didn't think about future maintainers → unreadable code
+
+These guides help you **ask the right questions before coding**.
+
+---
+
+## Available Guides
+
+| Guide | Purpose | When to Use |
+|-------|---------|-------------|
+| [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
+| [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [First Principles](./first-principles.md) | Derive scope from fundamental truths | Complex tasks, ambiguous requirements |
+| [Failure Diagnosis](./failure-diagnosis.md) | Bayesian reasoning + root cause analysis | When something breaks |
+| [Complexity Classification](./complexity-classification.md) | Estimate task scope | Before proposing boundaries |
+| [Code Decay Risks (R1–R6)](./decay-risks.md) | 6 production code decay patterns with Iron Law | When reviewing code quality or architecture |
+| [Test Decay Risks (T1–T6)](./test-decay-risks.md) | 6 test suite decay patterns with Iron Law | When reviewing test quality |
+
+---
+
+## Quick Reference: Thinking Triggers
+
+### When to Think About Cross-Layer Issues
+
+- [ ] Feature touches 3+ layers (CLI, Application, Domain, Infrastructure)
+- [ ] Data format changes between layers (CLI args → Event JSON → TaskState)
+- [ ] Multiple consumers need the same data (status display, replay, validate)
+- [ ] You're not sure where to put some logic
+- [ ] You are adding an event kind, JSONL record, RPC payload, or config field
+- [ ] CLI code starts casting raw event payload fields directly
+- [ ] Adding a new boundary field (must touch reducer + schema + CLI + fixtures)
+
+→ Read [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md)
+
+### When to Think About Code Reuse
+
+- [ ] You're writing similar code to something that exists
+- [ ] You see the same pattern repeated 3+ times
+- [ ] You're adding a new field to multiple places
+- [ ] **You're modifying any constant or config** (e.g., protected paths, gate templates)
+- [ ] **You're creating a new utility/helper function** ← Search first!
+- [ ] Two files read the same untyped payload field with local casts
+- [ ] Multiple branches update the same derived state from `kind` / `action`
+- [ ] You're adding a validation that might already exist in application or domain
+
+→ Read [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md)
+
+### When Verifying AI Cross-Review Results
+
+- [ ] Reviewer claims "user input can be malicious" → Check the actual data source (internal manifest? user config? external API?)
+- [ ] Reviewer flags "missing validation" → Is the data from a trusted internal source?
+- [ ] Reviewer says "behavior change" → Read the code comments — is it intentional design?
+- [ ] Reviewer identifies a "bug" in test → Mentally delete the feature being tested — does the test still pass? If yes → tautological test
+
+**Common AI reviewer false-positive patterns**:
+1. **Trust boundary confusion**: Treating internal data (bundled JSON manifests) as untrusted external input
+2. **Ignoring design comments**: Flagging intentional behavior documented in code comments as bugs
+3. **Variable misreading**: Not tracing a variable to its actual definition (e.g., Map keyed by path vs name)
+4. **Milestone scope confusion**: Flagging M2+ patterns as missing when the code is correctly M0-scoped
+
+**Verification rule**: Every CRITICAL/WARNING finding must be verified against the actual code before prioritizing. Budget ~35% false-positive rate for AI reviews.
+
+---
+
+## Pre-Modification Rule (CRITICAL)
+
+> **Before changing ANY value, ALWAYS search first!**
+
+Search for the value you're about to change in both `src/` and `specs/` and `fixtures/`. This single habit prevents most "forgot to update X" bugs.
+
+Key cross-file dependencies in this project:
+- Gate template IDs: `infrastructure/gates/mod.rs` ↔ `application/mod.rs` (validation) ↔ `domain/task.rs` (state) ↔ `fixtures/` ↔ `schemas/`
+- Protected paths: `infrastructure/boundary/normalizer.rs` ↔ `ARCHITECTURE_GUARDRAILS.md`
+- Event types: `domain/task.rs apply()` ↔ `application/mod.rs` (builders) ↔ `cli/mod.rs` (subcommands) ↔ `schemas/` ↔ `fixtures/`
+- Boundary fields: `domain/task.rs TaskState` ↔ `application/mod.rs CreateTaskInput` ↔ `cli/mod.rs` flags ↔ `schemas/`
+
+---
+
+## How to Use This Directory
+
+1. **Before coding**: Skim the relevant thinking guide
+2. **During coding**: If something feels repetitive or complex, check the guides
+3. **After bugs**: Add new insights to the relevant guide (learn from mistakes)
+
+---
+
+## Contributing
+
+Found a new "didn't think of that" moment? Add it to the relevant guide.
+
+---
+
+**Core Principle**: 30 minutes of thinking saves 3 hours of debugging.
