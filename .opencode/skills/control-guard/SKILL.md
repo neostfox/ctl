@@ -10,10 +10,10 @@ byte-checked by CI against `.agent/protocols/control-guard.md` and the OMP skill
 Do not edit it here in isolation. opencode-specific mechanics live in "opencode
 Integration" after the core.
 
-<!-- ctl:control-guard-core:start version=2 -->
+<!-- ctl:control-guard-core:start version=3 -->
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 2
+CONTROL_GUARD_PROTOCOL_VERSION = 3
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -136,11 +136,22 @@ Before an edit review, check whether the write collides with another active
 task's `write_allow`; on overlap, sequence the tasks rather than writing
 concurrently to a shared path.
 
-## Brainstorm / Research Routing
+## Pipeline Routing (proposal-first)
 
-- Unclear requirements, a new feature, or scoping a complex change → run the
-  **brainstorm** flow to diverge/converge before creating the implementation
-  task.
+The governed pipeline: **triage (this protocol) → align (grill) → PRD → tasks →
+execute (tdd) → wrap-up (finish → spec-update)**. Each station's skill declares
+its station contract (upstream artifact → produces → downstream consumer); when
+routing, report the current station and its artifact so the human always knows
+where the pipeline stands.
+
+- **Trivial** (typo, single-file obvious fix) — skip the pipeline; edit directly
+  (the gate records ungoverned writes) or use a quick task.
+- **Everything else** — before `ctl task create`, run the align station (grill):
+  a first-principles proposal and a micro-decision interview — one question at a
+  time, each with a recommended answer; facts come from the repo, direction
+  comes from the user. **Do not build until the user confirms.**
+- Multiple durable tasks → confirmed alignment goes through **PRD** (the
+  pipeline's first hard checkpoint) before **tasks**.
 - A question answered by producing **evidence rather than code** → a
   **research/spike** task: it completes by recording evidence + uncertainty
   outcomes, not a diff.

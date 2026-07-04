@@ -1948,6 +1948,14 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 id,
                 event.seq
             );
+            // Pipeline nudge (non-blocking, record-only provenance): remind the
+            // creator to link the task back to its alignment artifact.
+            println!(
+                "hint: no alignment provenance attached — if this task derived from an \
+                 alignment note (.ctl/spec/alignment/), record it: ctl brainstorm record \
+                 --id {} --brainstorm BS-xxx --divergence <note-path>",
+                id
+            );
         }
         TaskCommands::Quick {
             write_allow,
@@ -1996,6 +2004,15 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 event.seq,
                 write_allow.join(", "),
                 gate_list.join(", ")
+            );
+            // Pipeline nudge (non-blocking, record-only provenance): same as
+            // `create` — quick tasks that came from an alignment note should
+            // still carry the link.
+            println!(
+                "hint: no alignment provenance attached — if this task derived from an \
+                 alignment note (.ctl/spec/alignment/), record it: ctl brainstorm record \
+                 --id {} --brainstorm BS-xxx --divergence <note-path>",
+                task_id
             );
         }
         TaskCommands::Revise {
@@ -5648,7 +5665,14 @@ fn classify_bash_segment(segment: &str) -> &'static str {
     } else if cmd.starts_with("git push") {
         "git_push"
     } else if cmd.starts_with("cargo add") || cmd.starts_with("cargo install") {
-        "cargo_deps"
+        // `cargo install --path <dir>` is a self-install of a local crate (the
+        // dev-loop's binary reinstall) — build-tier, not a dependency change.
+        // Registry installs (`cargo install <crate>`) stay deps: supply chain.
+        if cmd.starts_with("cargo install") && cmd.contains("--path") {
+            "cargo_build"
+        } else {
+            "cargo_deps"
+        }
     } else if cmd.starts_with("cargo check")
         || cmd.starts_with("cargo test")
         || cmd.starts_with("cargo build")
@@ -6853,6 +6877,13 @@ mod tests {
         assert_eq!(classify_bash("git push origin master"), "git_push");
         assert_eq!(classify_bash("git commit -m x"), "git_commit");
         assert_eq!(classify_bash("cargo add serde"), "cargo_deps");
+        // Self-install of the local crate is build-tier, not a dep change;
+        // registry installs remain deps (supply chain).
+        assert_eq!(
+            classify_bash("cargo install --path . --force"),
+            "cargo_build"
+        );
+        assert_eq!(classify_bash("cargo install ripgrep"), "cargo_deps");
         assert_eq!(classify_bash("cargo test"), "cargo_build");
         assert_eq!(classify_bash("ls -la"), "bash_other");
     }

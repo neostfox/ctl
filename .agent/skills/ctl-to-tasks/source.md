@@ -1,8 +1,19 @@
 ---
 name: ctl-to-tasks
-description: "Convert a confirmed PRD or plan into ctl task proposals — vertical slices, each independently verifiable, each declaring objective, read scope, write scope, gates, acceptance evidence, an AFK/HITL label, and blocking uncertainties. Triggers when: a PRD or plan exists and you need to break it into governed tasks. Do NOT trigger for: scoping a single fuzzy request (ctl-brainstorm), or fabricating task state without a plan. Never creates tasks that bypass protected-path controls and never synthesizes completed ctl events from a plan."
+description: "Convert a confirmed PRD or plan into ctl task proposals — vertical slices, each independently verifiable, each declaring objective, read scope, write scope, gates, acceptance evidence, an AFK/HITL label, and blocking uncertainties. Triggers when: a PRD or plan exists and you need to break it into governed tasks. Do NOT trigger for: scoping a single fuzzy request (ctl-grill-with-spec), or fabricating task state without a plan. Never creates tasks that bypass protected-path controls and never synthesizes completed ctl events from a plan."
 ---
 
+
+## Station contract
+
+- **Upstream**: a **confirmed** PRD from `ctl-to-prd` (`.ctl/spec/prd/<prd-id>.md`),
+  or — for a single obvious task — a confirmed alignment note straight from
+  `ctl-grill-with-spec`.
+- **Produces**: task proposals handed to control-guard for `ctl task create`;
+  each created task records `ctl brainstorm` provenance back to the alignment
+  note / PRD it derived from (record-only — never gates).
+- **Downstream**: execution under control-guard (`ctl-tdd-loop` for behavior
+  changes), then wrap-up (finish → `ctl-spec-update`).
 
 ## Decompose into tasks (phase body)
 

@@ -98,6 +98,15 @@ material; ctl does not vendor third-party skills as an active control plane and
 does not place them inside its trust boundary.
 <!-- ctl:workflow-core:end -->
 
+## Station contract
+
+- **Upstream**: a **confirmed** alignment note from `ctl-grill-with-spec`
+  (`.ctl/spec/alignment/<date>-<slug>.md`). If none exists and the request is
+  non-trivial, go back to the grill station first.
+- **Produces**: a PRD at `.ctl/spec/prd/<prd-id>.md` (status: draft →
+  confirmed — the user's confirmation is the pipeline's first hard checkpoint).
+- **Downstream**: `ctl-to-tasks` consumes the **confirmed** PRD.
+
 ## Synthesize the PRD (phase body)
 
 Scaffold the shape with the ctl CLI, then fill it from resolved context:

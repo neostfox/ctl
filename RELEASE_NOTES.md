@@ -7,6 +7,41 @@ to the tag at publish time).
 
 This is a factual changelog. It contains no scores or quality grades.
 
+## Included in 0.0.10 — Pipeline stations: grill v2 + handoff contracts
+
+- **`ctl-grill-with-spec` v2 is the alignment station's single entry.** The
+  phase body restores the micro-decision interview the original skill lineage
+  (mattpocock/skills `grilling`) had: one question at a time, each carrying a
+  recommended answer; "facts from the repo, direction from the user" replaces
+  the old "only ask the user for what the repo cannot answer" stance;
+  **nothing is built until the user confirms shared understanding**. Broad
+  requests get an explicit diverge step (2-3 candidate approaches with
+  trade-offs). The alignment note lands at a fixed path
+  `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md` (spec tier — writable under the
+  gate) and is registered as record-only brainstorm provenance.
+- **`ctl-brainstorm` is retired to an alias stub** (`.omp`, `npm-omp`) pointing
+  at grill v2 — its interview loop was absorbed, removing the duplicate
+  alignment entry and the Claude/OMP skill asymmetry.
+- **Station contracts.** `ctl-grill-with-spec`, `ctl-to-prd`, and
+  `ctl-to-tasks` now open with an explicit contract: upstream artifact →
+  produces → downstream consumer (alignment note → PRD → task proposals), so
+  each stage consumes the previous stage's artifact instead of floating free.
+  Sources regenerated via `ctl skills sync` (12 files, incl. npm-omp mirrors).
+- **control-guard core v3: Pipeline Routing (proposal-first).** The routing
+  section now names the six stations (triage → align → PRD → tasks → execute →
+  wrap-up), requires reporting the current station when routing, and encodes
+  the complexity ladder: trivial edits skip the pipeline; everything else gets
+  a proposal + micro-decision confirmation before `ctl task create`. Synced
+  across `.agent/protocols/` + 4 platform copies; complexity-classification
+  guide updated to match.
+- **`ctl task create`/`quick` print a non-blocking provenance hint** pointing
+  at `ctl brainstorm record` when a task should link back to its alignment
+  note (record-only — creation is never gated).
+- **`cargo install --path <dir>` reclassified** from `cargo_deps` to
+  `cargo_build`: a self-install of the local crate (the dev-loop's binary
+  reinstall) is not a dependency change. Registry installs
+  (`cargo install <crate>`) still require the deps step-up approval.
+
 ## Included in 0.0.10 — Gate observe mode (deny → record + warn)
 
 - **The write gate no longer denies by default.** `ctl hook gate` verdicts for
