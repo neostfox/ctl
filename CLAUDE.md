@@ -8,7 +8,9 @@ Before modifying files:
 1. Read `AGENTS.md` when present and the relevant documents under `.ctl/spec/`.
 2. Inspect the current ctl task and write scope.
 3. If no suitable task exists:
-   - use brainstorm for ambiguous or multi-option work;
+   - run the alignment station (`ctl-grill-with-spec`) for ambiguous or
+     multi-option work — propose with recommendations, micro-confirm with the
+     user, then scope;
    - create a scoped ctl task;
    - move it through ready/start before writing.
 4. Only modify paths allowed by the active task.
@@ -28,11 +30,13 @@ Subagent dispatch (read-only by default):
   questions — to read-only subagents (built-in `Explore`; `claude-code-guide` for
   Claude Code / SDK / API questions). They preserve main-agent context and cannot
   break scope because they never write.
-- Keep **writes inline** in the main agent. Only the main agent reliably carries
-  the active task's `CTL_TASK_ID` binding and routes its Write/Edit/Bash through
-  the ctl gate. Do **not** dispatch file edits to subagents: a subagent runs in an
-  isolated context, does not inherit `CTL_TASK_ID`, and it is unverified whether
-  its tool calls reach the PreToolUse gate at all.
+- Keep **writes inline** in the main agent by default. A 2026-07-04 live probe
+  verified a subagent's Write/Edit/Bash calls DO pass the PreToolUse gate and are
+  observed/recorded like main-agent writes (see `.claude/subagent-dispatch.md`,
+  Addendum) — but `CTL_TASK_ID` binding under multiple active tasks is untested,
+  so keep coordinated multi-file implementation inline inside the active task's
+  `write_allow`; occasional dispatched writes are governable when exactly one
+  task is active.
 
 Before completion:
 

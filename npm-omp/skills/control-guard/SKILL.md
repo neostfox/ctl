@@ -10,10 +10,10 @@ control-guard protocol, byte-checked by CI against
 `.agent/protocols/control-guard.md` and the OpenCode skill. Do not edit it here in
 isolation. OMP-specific mechanics live in "OMP Integration" after the core.
 
-<!-- ctl:control-guard-core:start version=3 -->
+<!-- ctl:control-guard-core:start version=4 -->
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 3
+CONTROL_GUARD_PROTOCOL_VERSION = 4
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -130,7 +130,10 @@ even before a task exists, with no write risk):
   reviewer assess the proposed diff and honor the verdict.
 - **Completion audit** — after `submit`, the reviewer runs the closure checklist
   over the whole diff (build/test/lint **evidence**, not assertions) and emits a
-  verdict, which you record (above). This gate is hard.
+  verdict, which you record (above). This gate is hard. The checklist includes
+  the **observation log**: review `ctl decisions` for the task's window —
+  ungoverned writes recorded by observe mode are part of the change story;
+  explain them or absorb them into scope before accepting.
 
 Before an edit review, check whether the write collides with another active
 task's `write_allow`; on overlap, sequence the tasks rather than writing

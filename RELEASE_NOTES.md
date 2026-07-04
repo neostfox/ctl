@@ -7,6 +7,26 @@ to the tag at publish time).
 
 This is a factual changelog. It contains no scores or quality grades.
 
+## Included in 0.0.10 — Observe-mode consumers + verified subagent gating
+
+- **The observation log now has consumers.** `ctl task finish` prints a
+  non-canonical observation-log summary (record count + `ctl decisions`
+  pointer), and the control-guard completion-audit checklist (core v4, synced
+  canonical + 4 copies) requires reviewing `ctl decisions` for the task's
+  window — recorded ungoverned writes must be explained or absorbed into
+  scope, so record-and-disclose cannot decay into an unread log.
+- **Subagent gating verified empirically (2026-07-04 live probe).** A spawned
+  subagent's Write call DID pass the session PreToolUse gate: observe-mode
+  `additionalContext` was delivered into the subagent's own context and the
+  write was recorded in `.ctl/decisions.jsonl`. This **overturns** the
+  docs-based U-1 claim that subagent tool calls never reach the parent's
+  hooks (`.claude/subagent-dispatch.md`, Addendum). Policy updated in
+  CLAUDE.md / control-guard / the bootstrap managed-block template: read-only
+  dispatch unchanged; writable dispatch is governable under a single active
+  task; coordinated multi-file implementation stays inline until multi-active
+  `CTL_TASK_ID` binding is tested. `.ctl/spec/` is now tracked in git
+  (ledgers stay local).
+
 ## Included in 0.0.10 — Pipeline stations: grill v2 + handoff contracts
 
 - **`ctl-grill-with-spec` v2 is the alignment station's single entry.** The

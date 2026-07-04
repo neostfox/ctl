@@ -2092,6 +2092,20 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
         TaskCommands::Finish { id } => {
             let event = app.finish_task(id)?;
             println!("Finished task '{}' at seq {}.", id, event.seq);
+            // Observe-mode consumer: recorded ungoverned writes are only worth
+            // recording if someone reads them — surface the log at the one
+            // moment a human is already reviewing. Best-effort: never fail the
+            // finish on a log-read error.
+            let decisions_path = app.project_root.join(".ctl").join("decisions.jsonl");
+            if let Ok(content) = std::fs::read_to_string(&decisions_path) {
+                let n = content.lines().filter(|l| !l.trim().is_empty()).count();
+                if n > 0 {
+                    println!(
+                        "observation log: {} non-canonical record(s) in .ctl/decisions.jsonl — review with: ctl decisions",
+                        n
+                    );
+                }
+            }
         }
         TaskCommands::Cancel { id } => {
             let event = app.cancel_task(id)?;

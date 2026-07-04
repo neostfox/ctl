@@ -11,10 +11,10 @@ control-guard protocol, byte-checked by CI against
 here in isolation. Claude-specific mechanics live in "Claude Code Integration"
 after the core.
 
-<!-- ctl:control-guard-core:start version=3 -->
+<!-- ctl:control-guard-core:start version=4 -->
 # Control Guard — Core Protocol
 
-CONTROL_GUARD_PROTOCOL_VERSION = 3
+CONTROL_GUARD_PROTOCOL_VERSION = 4
 
 This is the platform-neutral control-guard protocol. It is embedded **verbatim**
 inside each platform skill's managed-core block; the canonical copy lives at
@@ -131,7 +131,10 @@ even before a task exists, with no write risk):
   reviewer assess the proposed diff and honor the verdict.
 - **Completion audit** — after `submit`, the reviewer runs the closure checklist
   over the whole diff (build/test/lint **evidence**, not assertions) and emits a
-  verdict, which you record (above). This gate is hard.
+  verdict, which you record (above). This gate is hard. The checklist includes
+  the **observation log**: review `ctl decisions` for the task's window —
+  ungoverned writes recorded by observe mode are part of the change story;
+  explain them or absorb them into scope before accepting.
 
 Before an edit review, check whether the write collides with another active
 task's `write_allow`; on overlap, sequence the tasks rather than writing
@@ -211,14 +214,15 @@ dispatched**:
 | Claude Code / SDK / API questions | `claude-code-guide` (built-in) | read-only — always safe |
 | diagnosis & falsifiable root-cause (`ctl-diagnose`) | `ctl-oracle` (`.claude/agents/`) | read-only — always safe |
 
-**Writes stay inline in the main agent.** Only the main agent reliably carries
-`CTL_TASK_ID` and routes `Write` / `Edit` / `Bash` through the gate. Do **not**
-dispatch file edits to subagents: a subagent runs in an isolated context, does not
-inherit `CTL_TASK_ID`, and whether its tool calls reach the PreToolUse gate at all
-is a **host** behavior that is unverified (see `.claude/subagent-dispatch.md`).
-Writable subagent roles (a designer/oracle equivalent) are therefore deferred
-until that host behavior is confirmed. So: dispatch read-only investigation and
-diagnosis; do the implementation inline, inside the active task's `write_allow`.
+**Writes stay inline in the main agent by default.** A 2026-07-04 live probe
+verified that a subagent's `Write`/`Edit`/`Bash` calls **do pass** the session's
+PreToolUse gate (observe-mode warning delivered into the subagent's context,
+record in `.ctl/decisions.jsonl`) — superseding the earlier docs-based U-1
+"confirmed no" (see `.claude/subagent-dispatch.md`, Addendum). What remains
+untested is `CTL_TASK_ID` binding under **multiple active tasks**, so: dispatch
+read-only investigation and diagnosis freely; writable dispatch is now
+governable but keep coordinated multi-file implementation inline, inside the
+active task's `write_allow`, until the binding question is settled.
 
 Workflow phases (see `.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec`
 to align from first principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks`

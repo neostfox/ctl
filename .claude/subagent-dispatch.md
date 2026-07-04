@@ -85,6 +85,38 @@ Writable `.claude` subagent roles therefore stay deferred **by design**. (The
 `ctl-gate.py` regression tests pin the corollary: the hook never consults `ctl`
 for a `Task` tool call — `test_ctl_gate.py::test_task_tool_is_ungoverned_and_never_reaches_ctl`.)
 
+## Addendum — U-1 partially OVERTURNED by live probe (2026-07-04)
+
+The 2026-06-20 resolution above was **docs-based** (external-authority reading).
+A live in-repo probe under gate observe mode now supersedes its second claim:
+
+> **Probe**: a spawned subagent (type `claude`) was instructed to create
+> `probe-subagent-gate.tmp` via the Write tool, with no active task.
+> **Result**: the Write succeeded in observe mode, the subagent **received the
+> PreToolUse hook's additionalContext verbatim** ("ctl observe [completed]: no
+> active in_progress task — this ungoverned write is recorded…"), and
+> `.ctl/decisions.jsonl` gained exactly one record for the probe path (68 → 69).
+
+Consequences, claim by claim:
+
+- "A subagent's own Write/Edit/Bash calls do **not** trigger the parent
+  session's PreToolUse hooks" — **REFUTED empirically**. They do trigger it,
+  and the verdict context is delivered into the subagent's own context.
+  (Either the docs were wrong for this configuration or host behavior changed;
+  the live probe is the stronger evidence either way.)
+- "PreToolUse does not match the `Task`/spawn tool itself" — **unchanged**; the
+  probe did not test spawn-gating, and `test_task_tool_is_ungoverned_and_never_reaches_ctl`
+  still pins it.
+- **Still untested**: `CTL_TASK_ID` binding for subagent calls under **multiple
+  active tasks** (the hook reads its own process env; whether that env carries
+  the parent's binding for a subagent-context hook invocation is unverified).
+
+**Policy update**: read-only dispatch unchanged (always safe). Writable dispatch
+is no longer categorically ungoverned — subagent writes are gated, observed, and
+recorded like main-agent writes. Keep coordinated multi-file implementation
+inline by default until the multi-active binding question is settled; single
+active task + observe mode makes occasional dispatched writes governable.
+
 ## OpenUncertainty (still open — must not be hidden)
 
 - **Can subagents spawn nested subagents, and does the `SubagentStart` event
