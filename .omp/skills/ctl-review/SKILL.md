@@ -1,6 +1,6 @@
 ---
 name: ctl-review
-description: "Reviews code as a read-only sub-agent. Two modes: (A) edit review before a change is applied, (B) completion audit of the whole task diff before finish. Applies the decay-risk rubric (R1-R6 / T1-T6), the Iron Law, and a Health Score, then emits a machine-readable VERDICT. Triggers when: control-guard requests an edit review or a completion audit, or the user asks to review a diff/PR, audit a task before finishing, or check code quality. Do NOT trigger for: writing new code from scratch, planning (use ctl-brainstorm), or root-causing a defect (use ctl-diagnose)."
+description: "Reviews code as a read-only sub-agent. Two modes: (A) edit review before a change is applied, (B) completion audit of the whole task diff before finish. Applies the decay-risk rubric (R1-R6 / T1-T6), the Iron Law, and a Health Score, then emits a machine-readable VERDICT. Triggers when: control-guard requests an edit review or a completion audit, or the user asks to review a diff/PR, audit a task before finishing, or check code quality. Do NOT trigger for: writing new code from scratch, planning (use ctl-grill-with-spec), or root-causing a defect (use ctl-diagnose)."
 ---
 
 # ctl-review

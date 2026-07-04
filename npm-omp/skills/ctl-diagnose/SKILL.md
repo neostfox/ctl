@@ -1,6 +1,6 @@
 ---
 name: ctl-diagnose
-description: "Root-cause a defect with disciplined Bayesian reasoning and capture the lesson so the class of bug cannot recur. Triggers when: a gate fails, a boundary is violated, a build/test breaks, behavior is unexpected, or the same bug has been 'fixed' more than once. Do NOT trigger for: code-quality review (use ctl-review), planning (use ctl-brainstorm), or routine implementation with no failure."
+description: "Root-cause a defect with disciplined Bayesian reasoning and capture the lesson so the class of bug cannot recur. Triggers when: a gate fails, a boundary is violated, a build/test breaks, behavior is unexpected, or the same bug has been 'fixed' more than once. Do NOT trigger for: code-quality review (use ctl-review), planning (use ctl-grill-with-spec), or routine implementation with no failure."
 ---
 
 # ctl-diagnose

@@ -53,7 +53,7 @@ For each candidate, record:
 ### Hard rule
 
 **No code changes.** This skill is read-only by default. When the user chooses a
-candidate, route to `ctl-brainstorm` / `ctl-to-tasks` to open a *new* governed
+candidate, route to `ctl-grill-with-spec` / `ctl-to-tasks` to open a *new* governed
 task with its own scope and gates — the review never edits code itself.
 
 ### Anti-patterns
@@ -68,7 +68,7 @@ task with its own scope and gates — the review never edits code itself.
 
 `ctl architecture review` is read-only (no events). Produce the candidate report as a normal
 artifact only if its path is inside an active task's `write_allow`; otherwise print it. A chosen
-candidate becomes a NEW governed task (`ctl-brainstorm` -> `ctl task create`, gated by the OMP
+candidate becomes a NEW governed task (`ctl-grill-with-spec` -> `ctl task create`, gated by the OMP
 PreToolUse hook) — this skill never edits code. Pairs with the OMP agent-end architecture-drift
 reminder.
 <!-- integration:opencode -->
@@ -83,4 +83,4 @@ and candidate report are read-only (always spawnable, no active task required). 
 a chosen candidate into a new governed task is `designer`; implementing it is `build`.
 <!-- integration:claude -->
 
-`ctl architecture review` is read-only (no events). Produce the candidate report as a normal artifact only if its path is inside an active task's `write_allow`; otherwise print it. A chosen candidate becomes a NEW governed task (`ctl-brainstorm` -> `ctl task create`, gated by the Claude Code PreToolUse hook) — this skill never edits code. Read-only review can be dispatched to a subagent; keep the follow-up task's edits inline.
+`ctl architecture review` is read-only (no events). Produce the candidate report as a normal artifact only if its path is inside an active task's `write_allow`; otherwise print it. A chosen candidate becomes a NEW governed task (`ctl-grill-with-spec` -> `ctl task create`, gated by the Claude Code PreToolUse hook) — this skill never edits code. Read-only review can be dispatched to a subagent; keep the follow-up task's edits inline.

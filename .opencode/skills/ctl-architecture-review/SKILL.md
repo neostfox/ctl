@@ -147,7 +147,7 @@ For each candidate, record:
 ### Hard rule
 
 **No code changes.** This skill is read-only by default. When the user chooses a
-candidate, route to `ctl-brainstorm` / `ctl-to-tasks` to open a *new* governed
+candidate, route to `ctl-grill-with-spec` / `ctl-to-tasks` to open a *new* governed
 task with its own scope and gates — the review never edits code itself.
 
 ### Anti-patterns
