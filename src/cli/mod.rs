@@ -1224,6 +1224,12 @@ enum HookCommands {
     },
     /// Check if .ctl/spec/ is fresh relative to source changes
     SpecStatus,
+    /// Wrap-up check for session-stop hooks: did the most recent task
+    /// completion get a knowledge capture afterwards (project tier
+    /// `.ctl/spec/`, global tier `~/.ctl/memory/`)? Reports `pending` and
+    /// auto-marks a non-canonical once-guard (`.ctl/wrapup-reminded.json`) so
+    /// the same finish is never reported pending twice.
+    WrapupCheck,
 }
 
 pub fn run() -> Result<()> {
@@ -5218,6 +5224,7 @@ fn cmd_hook(command: &HookCommands) -> Result<()> {
         ),
         HookCommands::RecordDecision { data } => cmd_hook_record_decision(data),
         HookCommands::SpecStatus => cmd_hook_spec_status(),
+        HookCommands::WrapupCheck => cmd_hook_wrapup_check(),
     }
 }
 
@@ -6420,6 +6427,178 @@ fn decision_entry(data: &str, ts: u64) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(entry))
 }
 
+/// Parse a `YYYY-MM-DDTHH:MM:SS[.frac]Z` UTC timestamp to unix seconds.
+/// Fractional seconds are ignored; returns None on malformed input. Local to
+/// the hook path so the check never depends on event-replay machinery.
+fn iso8601_utc_to_epoch(s: &str) -> Option<u64> {
+    let s = s.trim().trim_end_matches('Z');
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day) = (
+        d.next()?.parse::<i64>().ok()?,
+        d.next()?.parse::<u32>().ok()?,
+        d.next()?.parse::<u32>().ok()?,
+    );
+    let mut t = time.split(':');
+    let (hh, mm) = (
+        t.next()?.parse::<u32>().ok()?,
+        t.next()?.parse::<u32>().ok()?,
+    );
+    let ss = t
+        .next()?
+        .split('.')
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant's algorithm), valid for all UTC dates.
+    let y_adj = y - i64::from(m <= 2);
+    let era = y_adj.div_euclid(400);
+    let yoe = (y_adj - era * 400) as i64;
+    let mp = i64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + i64::from(hh) * 3_600 + i64::from(mm) * 60 + i64::from(ss);
+    u64::try_from(secs).ok()
+}
+
+/// The most recent `task_completed` event across every task ledger, as
+/// `(task_id, unix_epoch)`. Lexical scan — no replay, safe on any ledger.
+fn latest_completed_task(project_root: &Path) -> Option<(String, u64)> {
+    let tasks_dir = project_root.join(".ctl").join("tasks");
+    let mut best: Option<(String, u64)> = None;
+    for entry in std::fs::read_dir(&tasks_dir).ok()?.flatten() {
+        let events = entry.path().join("events.jsonl");
+        let Ok(content) = std::fs::read_to_string(&events) else {
+            continue;
+        };
+        for line in content.lines().rev() {
+            if !line.contains("\"task_completed\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("task_completed") {
+                continue;
+            }
+            let ts = v
+                .get("occurred_at")
+                .and_then(|t| t.as_str())
+                .and_then(iso8601_utc_to_epoch);
+            let id = v
+                .get("task_id")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if let Some(ts) = ts {
+                if best.as_ref().is_none_or(|(_, b)| ts > *b) {
+                    best = Some((id, ts));
+                }
+            }
+            break; // newest task_completed for this ledger found
+        }
+    }
+    best
+}
+
+/// Newest file mtime (unix epoch) under `dir`, recursively. None if the tree
+/// is absent or empty.
+fn newest_mtime_under(dir: &Path) -> Option<u64> {
+    let mut newest: Option<u64> = None;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let candidate = if path.is_dir() {
+            newest_mtime_under(&path)
+        } else {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+        };
+        if let Some(c) = candidate {
+            if newest.is_none_or(|n| c > n) {
+                newest = Some(c);
+            }
+        }
+    }
+    newest
+}
+
+/// Pure wrap-up policy: pending iff a completion exists, no capture write is
+/// at-or-after it, and this completion has not already been reminded.
+fn wrapup_pending(finished: u64, last_capture: Option<u64>, reminded: Option<u64>) -> bool {
+    let captured = last_capture.is_some_and(|c| c >= finished);
+    let already_reminded = reminded == Some(finished);
+    !captured && !already_reminded
+}
+
+fn cmd_hook_wrapup_check() -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    if !project_root.join(".ctl").exists() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pending": false, "reason": "no .ctl directory — project not governed"
+            }))?
+        );
+        return Ok(());
+    }
+    let Some((task_id, finished)) = latest_completed_task(&project_root) else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pending": false, "reason": "no completed tasks"
+            }))?
+        );
+        return Ok(());
+    };
+    // Capture targets: project tier (.ctl/spec) + global tier (~/.ctl/memory).
+    let mut last_capture = newest_mtime_under(&project_root.join(".ctl").join("spec"));
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let global = Path::new(&home).join(".ctl").join("memory");
+        last_capture = match (last_capture, newest_mtime_under(&global)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    // Once-guard: non-canonical marker, same trust tier as decisions.jsonl.
+    let marker = project_root.join(".ctl").join("wrapup-reminded.json");
+    let reminded = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("finished_epoch").and_then(|x| x.as_u64()));
+    let pending = wrapup_pending(finished, last_capture, reminded);
+    if pending {
+        // Auto-mark: emitting a pending report IS the one reminder for this
+        // finish. Best-effort — a marker write failure must not fail the hook.
+        let _ = std::fs::write(
+            &marker,
+            serde_json::to_string(&serde_json::json!({
+                "finished_epoch": finished, "task_id": task_id, "canonical": false
+            }))
+            .unwrap_or_default(),
+        );
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "pending": pending,
+            "task_id": task_id,
+            "finished_epoch": finished,
+            "last_capture_epoch": last_capture,
+            "already_reminded": reminded == Some(finished)
+        }))?
+    );
+    Ok(())
+}
+
 fn cmd_hook_record_decision(data: &str) -> Result<()> {
     let project_root = std::env::current_dir()?;
     let decisions_dir = project_root.join(".ctl");
@@ -6671,11 +6850,41 @@ mod tests {
     use super::{
         classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
         format_brainstorm_provenance, format_decision_line, format_decisions,
-        format_research_output, format_uncertainty_ledger, parse_project_default_gates,
-        resolve_active_governance, resolve_ctl_for_hook, ActiveTask, CtlProbe, CtlReach, GovState,
-        WriteTarget,
+        format_research_output, format_uncertainty_ledger, iso8601_utc_to_epoch,
+        parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook,
+        wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
     };
     use std::path::{Path, PathBuf};
+
+    // ── wrap-up check (Stop-hook reminder) ──
+
+    #[test]
+    fn iso8601_parse_matches_known_epochs() {
+        assert_eq!(iso8601_utc_to_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso8601_utc_to_epoch("2026-07-04T05:05:35Z"), Some(1_783_141_535));
+        // Fractional seconds tolerated, malformed rejected.
+        assert_eq!(
+            iso8601_utc_to_epoch("1970-01-01T00:00:01.500Z"),
+            Some(1)
+        );
+        assert_eq!(iso8601_utc_to_epoch("not a date"), None);
+        assert_eq!(iso8601_utc_to_epoch("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn wrapup_pending_policy() {
+        // No capture ever → pending.
+        assert!(wrapup_pending(100, None, None));
+        // Capture before the finish → still pending.
+        assert!(wrapup_pending(100, Some(99), None));
+        // Capture at-or-after the finish → cleared.
+        assert!(!wrapup_pending(100, Some(100), None));
+        assert!(!wrapup_pending(100, Some(101), None));
+        // Already reminded for THIS finish → never pending twice.
+        assert!(!wrapup_pending(100, None, Some(100)));
+        // A reminder for an older finish does not suppress a newer one.
+        assert!(wrapup_pending(200, Some(150), Some(100)));
+    }
 
     // ── classify_write_target (gate observe mode) ──
     // Purely lexical, so no files are created; the root just needs to be an

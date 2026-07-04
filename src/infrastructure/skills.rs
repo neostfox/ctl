@@ -156,6 +156,10 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.claude/hooks/ctl-gate.py"),
         },
         EmbeddedFile {
+            relative_path: "hooks/ctl-wrapup.py",
+            content: include_str!("../../.claude/hooks/ctl-wrapup.py"),
+        },
+        EmbeddedFile {
             relative_path: "settings.json",
             content: include_str!("../../.claude/settings.json"),
         },
@@ -453,12 +457,13 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 14,
-            "claude injects 3 integration files + control-guard + 6 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
+            n, 15,
+            "claude injects 4 integration files + control-guard + 6 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
             "hooks/ctl-gate.py",
+            "hooks/ctl-wrapup.py",
             "settings.json",
             "skills/control-guard/SKILL.md",
             "skills/ctl-grill-with-spec/SKILL.md",

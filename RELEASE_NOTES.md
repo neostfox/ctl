@@ -1,5 +1,25 @@
 # Release Notes — ctl v0.0.10
 
+## Unreleased (0.0.11) — Wrap-up automation: Stop-hook capture reminder
+
+- **`ctl hook wrapup-check`** (new `hook` subcommand): reports whether the most
+  recent `task_completed` still lacks a knowledge capture — compared against
+  the newest write under `.ctl/spec/` (project tier) and `~/.ctl/memory/`
+  (global tier). Emitting a pending report auto-marks a **non-canonical**
+  once-guard (`.ctl/wrapup-reminded.json`), so one finish yields at most one
+  reminder; any capture write clears the state on its own. Pure policy
+  (`wrapup_pending`) and the ISO-8601 parser are unit-tested.
+- **`.claude/hooks/ctl-wrapup.py`** on the **Stop** event (first Stop wiring):
+  when pending, blocks the stop once with tier-routing instructions
+  (`/ctl-spec-update`; repo lessons → `.ctl/spec/`, cross-project preferences
+  → `~/.ctl/memory/`); fails **open** on every ctl error — a reminder never
+  traps the session. Wired in `.claude/settings.json`, embedded in the claude
+  injector (now 4 integration files), tested like the gate hook.
+- Provenance: derived from confirmed alignment
+  `.ctl/spec/alignment/2026-07-04-wrapup-memory-capture.md` and PRD
+  `.ctl/spec/prd/wrapup-memory-capture.md` (recorded via `ctl brainstorm
+  record`, BS-wrapup-001 — first live use of the create-hint → record loop).
+
 Follows **v0.0.9**. `ctl --version` reports `CARGO_PKG_VERSION`; the release tag
 must equal `Cargo.toml` (enforced by `release.yml`), and the npm `@velo-ai/ctl`
 meta-package plus its five platform packages carry the matching version (stamped
