@@ -13,7 +13,10 @@ control-plane skills. Pure integration package — it does **not** bundle the
 1. Install `ctl` itself: `cargo install --path .` from the ctl repo, or download
    a binary from the GitHub releases page. The hook resolves it via the one
    blessed chain **CTL_BIN → `~/.cargo/bin` → PATH** — set `CTL_BIN` to pin a
-   specific binary.
+   specific binary. `ctl init --platform omp` pins `CTL_BIN` into
+   `~/.omp/agent/.env` automatically (OMP merges that file into its process
+   env at startup), so resolution does not depend on which shell launched
+   `omp`.
 2. Install the plugin. The extension hook only loads for **npm-installed** or
    **linked** plugins (not for `omp plugin install github:…` marketplace
    installs):

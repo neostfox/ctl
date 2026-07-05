@@ -1377,6 +1377,10 @@ T6_architecture_mismatch = true
     // actually installed/linked (the hook only loads from an installed/linked
     // plugin; a marketplace install does not load it).
     if matches!(platform, PlatformArg::Omp | PlatformArg::All) {
+        // The OMP hook runs inside the omp process, whose env is fixed at
+        // launch — pin CTL_BIN in the agent .env OMP merges at startup so
+        // resolution stops depending on which shell launched omp.
+        pin_ctl_bin_in_omp_env();
         report_omp_integration(&project_root);
     }
 
@@ -1700,6 +1704,140 @@ fn report_omp_integration(project_root: &Path) {
          `omp plugin link ./npm-omp` (dev) or `npm i @velo-ai/omp`, NOT \
          `omp plugin install github:…` (marketplace installs do not load the hook)."
     );
+}
+
+/// Where the OMP runtime reads its agent-level `.env`, mirroring oh-my-pi's
+/// `packages/utils/src/dirs.ts`: `PI_CODING_AGENT_DIR` overrides the agent dir
+/// outright; otherwise the config root (`PI_CONFIG_DIR`, default `~/.omp`)
+/// plus `agent`. Profile/XDG redirection is deliberately not mirrored — init
+/// prints the path it wrote so an advanced setup can relocate the entry.
+fn omp_agent_env_file(
+    agent_dir_override: Option<&str>,
+    config_dir: Option<&str>,
+    home: &Path,
+) -> std::path::PathBuf {
+    if let Some(d) = agent_dir_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return Path::new(d).join(".env");
+    }
+    let root = match config_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(d) if Path::new(d).is_absolute() => Path::new(d).to_path_buf(),
+        Some(d) => home.join(d),
+        None => home.join(".omp"),
+    };
+    root.join("agent").join(".env")
+}
+
+/// Upsert `KEY="value"` into dotenv-style content, preserving every other
+/// line. Key matching mirrors OMP's `parseEnvFile`: everything before the
+/// first `=`, trimmed. Returns the new content plus the previous value
+/// (quotes stripped) when an existing `KEY` line was replaced.
+fn upsert_env_line(content: &str, key: &str, value: &str) -> (String, Option<String>) {
+    let new_line = format!("{key}=\"{value}\"");
+    let mut old: Option<String> = None;
+    let mut lines: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for raw in content.lines() {
+        let line = raw.trim_end_matches('\r');
+        let is_key = !line.trim_start().starts_with('#')
+            && line.split_once('=').is_some_and(|(k, _)| k.trim() == key);
+        if is_key && !replaced {
+            let val = line.split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
+            old = Some(val.trim_matches(|c| c == '"' || c == '\'').to_string());
+            lines.push(new_line.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        lines.push(new_line);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    (out, old)
+}
+
+/// True for a binary living in a cargo `target/{debug,release}` tree — a
+/// transient dev build that must not be pinned as the durable CTL_BIN.
+fn is_cargo_target_build(bin: &Path) -> bool {
+    let comps: Vec<String> = bin
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    comps
+        .windows(2)
+        .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"))
+}
+
+/// Pin `CTL_BIN` in the OMP agent `.env` (runs on `ctl init --platform
+/// omp|all`). OMP merges that file into its process env at startup (keys not
+/// already set), so the governance hook resolves ctl regardless of which
+/// shell launched `omp` — a launch env missing PATH/CTL_BIN was a real
+/// fail-closed source. Best-effort: a failure warns and never fails init.
+fn pin_ctl_bin_in_omp_env() {
+    // Prefer the chain's answer (stable blessed locations); fall back to the
+    // binary running init — the manual-install case the pin exists for.
+    let (resolved, _, _) = resolve_ctl_path(&real_ctl_probe());
+    let Some(bin) = resolved.or_else(|| std::env::current_exe().ok()) else {
+        return;
+    };
+    if is_cargo_target_build(&bin) {
+        println!(
+            "  ⚠️  CTL_BIN not pinned in the OMP .env: {} is a transient cargo target build. \
+             Install a durable binary (cargo install --path ., or a GitHub release) and re-run ctl init.",
+            bin.display()
+        );
+        return;
+    }
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    };
+    let Some(home) = home.filter(|h| !h.trim().is_empty()) else {
+        return;
+    };
+    let env_file = omp_agent_env_file(
+        std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
+        std::env::var("PI_CONFIG_DIR").ok().as_deref(),
+        Path::new(&home),
+    );
+    let existing = std::fs::read_to_string(&env_file).unwrap_or_default();
+    let value = bin.display().to_string();
+    let (updated, old) = upsert_env_line(&existing, "CTL_BIN", &value);
+    if updated == existing {
+        println!(
+            "  .omp env: CTL_BIN already pinned in {}",
+            env_file.display()
+        );
+        return;
+    }
+    let write = env_file
+        .parent()
+        .map(std::fs::create_dir_all)
+        .unwrap_or(Ok(()))
+        .and_then(|()| std::fs::write(&env_file, &updated));
+    match write {
+        Ok(()) => match old.filter(|o| o != &value) {
+            Some(o) => println!(
+                "  .omp env: CTL_BIN pinned to {} in {} (was: {})",
+                value,
+                env_file.display(),
+                o
+            ),
+            None => println!(
+                "  .omp env: CTL_BIN pinned to {} in {} — the OMP hook now resolves ctl \
+                     regardless of the shell omp was launched from",
+                value,
+                env_file.display()
+            ),
+        },
+        Err(e) => println!(
+            "  ⚠️  could not pin CTL_BIN in {} ({e}) — set CTL_BIN there manually if the \
+             OMP gate reports binary-not-found.",
+            env_file.display()
+        ),
+    }
 }
 
 fn cmd_skills(command: &SkillsCommands) -> Result<()> {
@@ -6888,9 +7026,10 @@ mod tests {
     use super::{
         classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
         format_brainstorm_provenance, format_decision_line, format_decisions,
-        format_research_output, format_uncertainty_ledger, iso8601_utc_to_epoch,
-        parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook,
-        wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
+        format_research_output, format_uncertainty_ledger, is_cargo_target_build,
+        iso8601_utc_to_epoch, omp_agent_env_file, parse_project_default_gates,
+        resolve_active_governance, resolve_ctl_for_hook, upsert_env_line, wrapup_pending,
+        ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
     };
     use std::path::{Path, PathBuf};
 
@@ -7737,5 +7876,83 @@ mod tests {
             exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::NotFound);
+    }
+
+    // ── OMP agent .env CTL_BIN pin (ctl init --platform omp|all) ──
+
+    #[test]
+    fn omp_env_file_defaults_to_home_omp_agent() {
+        let f = omp_agent_env_file(None, None, Path::new("/home/u"));
+        assert_eq!(
+            f,
+            Path::new("/home/u").join(".omp").join("agent").join(".env")
+        );
+    }
+
+    #[test]
+    fn omp_env_file_agent_dir_override_wins() {
+        let f = omp_agent_env_file(
+            Some(" /custom/agent "),
+            Some("/ignored"),
+            Path::new("/home/u"),
+        );
+        assert_eq!(f, Path::new("/custom/agent").join(".env"));
+    }
+
+    #[test]
+    fn omp_env_file_relative_config_dir_joins_home() {
+        let f = omp_agent_env_file(None, Some(".omp-alt"), Path::new("/home/u"));
+        assert_eq!(
+            f,
+            Path::new("/home/u")
+                .join(".omp-alt")
+                .join("agent")
+                .join(".env")
+        );
+    }
+
+    #[test]
+    fn upsert_appends_to_empty_and_preserves_other_lines() {
+        let (out, old) = upsert_env_line("", "CTL_BIN", "/x/ctl");
+        assert_eq!(out, "CTL_BIN=\"/x/ctl\"\n");
+        assert_eq!(old, None);
+
+        let (out, old) = upsert_env_line("# comment\nFOO=bar\n", "CTL_BIN", "/x/ctl");
+        assert_eq!(out, "# comment\nFOO=bar\nCTL_BIN=\"/x/ctl\"\n");
+        assert_eq!(old, None);
+    }
+
+    #[test]
+    fn upsert_replaces_existing_key_and_reports_old_value() {
+        // Key matching mirrors OMP parseEnvFile: trimmed key before first '='.
+        let (out, old) = upsert_env_line(
+            "FOO=bar\nCTL_BIN = \"C:\\old\\ctl.exe\"\r\nBAZ=1\n",
+            "CTL_BIN",
+            "C:\\new\\ctl.exe",
+        );
+        assert_eq!(out, "FOO=bar\nCTL_BIN=\"C:\\new\\ctl.exe\"\nBAZ=1\n");
+        assert_eq!(old.as_deref(), Some("C:\\old\\ctl.exe"));
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_skips_comments() {
+        let content = "# CTL_BIN=commented\nCTL_BIN=\"/x/ctl\"\n";
+        let (out, old) = upsert_env_line(content, "CTL_BIN", "/x/ctl");
+        assert_eq!(out, content);
+        assert_eq!(old.as_deref(), Some("/x/ctl"));
+    }
+
+    #[test]
+    fn cargo_target_builds_are_detected() {
+        assert!(is_cargo_target_build(Path::new(
+            "C:\\repo\\target\\debug\\ctl.exe"
+        )));
+        assert!(is_cargo_target_build(Path::new("/repo/target/release/ctl")));
+        assert!(!is_cargo_target_build(Path::new(
+            "C:\\Users\\u\\.cargo\\bin\\ctl.exe"
+        )));
+        assert!(!is_cargo_target_build(Path::new(
+            "/tools/targeted/debug/ctl"
+        )));
     }
 }
