@@ -416,7 +416,7 @@ export default function (pi: HookAPI): void {
   });
 
   // ═══════════════════════════════════════════
-  // 4. AGENT END — spec drift detection
+  // 4. AGENT END — spec drift + wrap-up capture reminder
   // ═══════════════════════════════════════════
   pi.on("agent_end", async () => {
     const spec = parseJson(await ctlHook("spec-status"));
@@ -426,6 +426,20 @@ export default function (pi: HookAPI): void {
     ) {
       process.stderr.write(
         `\n📝 Specs stale (${spec.source_files} source > ${spec.spec_files} specs). Run /ctl-spec-bootstrap.\n`,
+      );
+    }
+    // Wrap-up reminder (mirrors the .claude Stop hook): a finished task with
+    // no knowledge capture afterwards reminds ONCE — ctl's once-guard marks
+    // the finish on the pending report, and any capture write self-clears.
+    const wrap = parseJson(await ctlHook("wrapup-check"));
+    if (
+      wrap?.pending === true &&
+      typeof process.stderr?.write === "function"
+    ) {
+      process.stderr.write(
+        `\n🧠 ctl wrap-up: task '${wrap.task_id}' finished without a knowledge capture — ` +
+          `run /ctl-spec-update (repo lessons → .ctl/spec/, cross-project preferences → ~/.ctl/memory/). ` +
+          `Reminds once per finish.\n`,
       );
     }
   });
@@ -461,6 +475,18 @@ export default function (pi: HookAPI): void {
     ) {
       process.stderr.write(
         `\n📝 Specs stale. Run /ctl-spec-bootstrap to refresh.\n`,
+      );
+    }
+
+    const wrap = parseJson(await ctlHook("wrapup-check"));
+    if (
+      wrap?.pending === true &&
+      typeof process.stderr?.write === "function"
+    ) {
+      process.stderr.write(
+        `\n🧠 ctl wrap-up: task '${wrap.task_id}' finished without a knowledge capture — ` +
+          `run /ctl-spec-update before closing (repo lessons → .ctl/spec/, ` +
+          `cross-project preferences → ~/.ctl/memory/).\n`,
       );
     }
   });

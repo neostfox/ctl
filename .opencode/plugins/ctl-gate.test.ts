@@ -199,6 +199,20 @@ test("buildRecordArgs: array form, source=opencode, carries path/command + task_
   expect(bashPayload.command).toBe("echo hi > src/x.rs");
   expect(bashPayload.path).toBeUndefined();
   expect(bashPayload.task_id).toBe("t-env");
+
+  // Observe mode: an allowed verdict's warning text travels into the record.
+  const observeArgs = buildRecordArgs({
+    tool: "write",
+    gate: {
+      allowed: true,
+      record: true,
+      state: "idle",
+      reason: "no active in_progress task (observe mode)",
+      warning: "ungoverned write recorded",
+    },
+    path: "notes.md",
+  });
+  expect(JSON.parse(observeArgs[3]).warning).toBe("ungoverned write recorded");
 });
 
 test("hook records a DENY before throwing", async () => {

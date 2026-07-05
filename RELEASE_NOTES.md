@@ -1,5 +1,25 @@
 # Release Notes — ctl v0.0.10
 
+## Unreleased (0.0.11) — Backlog sweep: classifier prose fix, windowed summaries, adapter wrap-up parity
+
+- **`classify_bash` no longer reads quoted prose.** Single- and double-quoted
+  spans are stripped before segment-splitting, so a commit MESSAGE containing
+  "(cargo install /" can no longer classify as a dependency change (the live
+  false positive that denied a legitimate commit). Caveat disclosed in-code:
+  a substitution hidden inside double quotes now escapes classification —
+  consistent with the classifier's existing best-effort stance.
+- **`ctl task finish`'s observation summary is windowed**: records since the
+  task's first ledger event are reported alongside the total ("N record(s) in
+  this task's window (M total)"), so the number is actionable for the audit.
+- **OMP gets wrap-up parity**: `agent_end` and `session_shutdown` now query
+  `ctl hook wrapup-check` and print the capture reminder (once per finish,
+  self-clearing — same contract as the Claude Stop hook). npm-omp mirrored.
+- **opencode forwards observe-mode warnings**: an allowed verdict's `warning`
+  is written to stderr and included in the decision record (closes the gap
+  noted in the 0.0.10 observe-mode release).
+- **`scripts/npm-bootstrap-publish.ps1` deleted** — it published the retired
+  npm binary packages and would fail if run.
+
 ## Unreleased (0.0.11) — B-lite part 2: npm binary distribution retired
 
 - **`npm/` is gone**: the five platform binary packages and the `@velo-ai/ctl`

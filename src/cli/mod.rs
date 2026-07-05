@@ -2058,16 +2058,37 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             println!("Finished task '{}' at seq {}.", id, event.seq);
             // Observe-mode consumer: recorded ungoverned writes are only worth
             // recording if someone reads them — surface the log at the one
-            // moment a human is already reviewing. Best-effort: never fail the
-            // finish on a log-read error.
+            // moment a human is already reviewing. Windowed to this task
+            // (records since its first event) so the number is actionable;
+            // best-effort: never fail the finish on a log-read error.
             let decisions_path = app.project_root.join(".ctl").join("decisions.jsonl");
             if let Ok(content) = std::fs::read_to_string(&decisions_path) {
-                let n = content.lines().filter(|l| !l.trim().is_empty()).count();
-                if n > 0 {
-                    println!(
-                        "observation log: {} non-canonical record(s) in .ctl/decisions.jsonl — review with: ctl decisions",
-                        n
-                    );
+                let records: Vec<&str> =
+                    content.lines().filter(|l| !l.trim().is_empty()).collect();
+                if !records.is_empty() {
+                    let since = first_event_epoch(&app.project_root, id);
+                    let windowed = since.map(|s| {
+                        records
+                            .iter()
+                            .filter(|l| {
+                                serde_json::from_str::<serde_json::Value>(l)
+                                    .ok()
+                                    .and_then(|v| v.get("ts").and_then(|t| t.as_u64()))
+                                    .is_some_and(|ts| ts >= s)
+                            })
+                            .count()
+                    });
+                    match windowed {
+                        Some(w) => println!(
+                            "observation log: {} record(s) in this task's window ({} total, non-canonical) — review with: ctl decisions",
+                            w,
+                            records.len()
+                        ),
+                        None => println!(
+                            "observation log: {} non-canonical record(s) in .ctl/decisions.jsonl — review with: ctl decisions",
+                            records.len()
+                        ),
+                    }
                 }
             }
         }
@@ -5638,6 +5659,42 @@ fn compute_gov_state(project_root: &Path, bound_task: Option<&str>) -> Result<Go
     }
 }
 
+/// Remove single- and double-quoted spans before segment classification.
+/// Backslash escapes are honored inside double quotes; an unterminated quote
+/// drops the tail — the conservative direction (less text to misclassify,
+/// never more).
+fn strip_quoted(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                let mut esc = false;
+                for q in chars.by_ref() {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    match q {
+                        '\\' => esc = true,
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Classify a bash command into an action category.
 /// Classify a single (non-compound) command segment.
 fn classify_bash_segment(segment: &str) -> &'static str {
@@ -5720,9 +5777,18 @@ fn segment_has_file_redirect(cmd: &str) -> bool {
 fn classify_bash(command: &str) -> &'static str {
     let (mut push, mut deps, mut commit, mut write, mut build) =
         (false, false, false, false, false);
+    // Quoted spans are DATA, not commands — a commit MESSAGE containing
+    // "(cargo install /" segment-split into a cargo_deps classification and
+    // denied a legitimate commit (live false positive, decisions.jsonl,
+    // 2026-07-05). Strip quotes before splitting. Caveat, consistent with the
+    // best-effort stance above: bash expands `$(..)`/backticks INSIDE double
+    // quotes, so a substitution hidden in quotes now escapes classification —
+    // a determined caller already could via eval/base64; casual composition
+    // is still caught.
+    let cleaned = strip_quoted(command);
     // Split on shell control/grouping operators so a restricted action inside a
     // compound or substitution (`$(..)`, backticks) becomes its own segment.
-    for segment in command.split([';', '\n', '&', '|', '(', ')', '`']) {
+    for segment in cleaned.split([';', '\n', '&', '|', '(', ')', '`']) {
         match classify_bash_segment(segment) {
             "git_push" => push = true,
             "cargo_deps" => deps = true,
@@ -6421,6 +6487,23 @@ fn iso8601_utc_to_epoch(s: &str) -> Option<u64> {
     u64::try_from(secs).ok()
 }
 
+/// Unix epoch of a task's FIRST ledger event — the start of its observation
+/// window. Lexical read; None on any error (callers degrade to a total count).
+fn first_event_epoch(project_root: &Path, task_id: &str) -> Option<u64> {
+    let events = project_root
+        .join(".ctl")
+        .join("tasks")
+        .join(task_id)
+        .join("events.jsonl");
+    let content = std::fs::read_to_string(&events).ok()?;
+    let first = content.lines().find(|l| !l.trim().is_empty())?;
+    serde_json::from_str::<serde_json::Value>(first)
+        .ok()?
+        .get("occurred_at")?
+        .as_str()
+        .and_then(iso8601_utc_to_epoch)
+}
+
 /// The most recent `task_completed` event across every task ledger, as
 /// `(task_id, unix_epoch)`. Lexical scan — no replay, safe on any ledger.
 fn latest_completed_task(project_root: &Path) -> Option<(String, u64)> {
@@ -7063,6 +7146,18 @@ mod tests {
             "cargo_build"
         );
         assert_eq!(classify_bash("cargo install ripgrep"), "cargo_deps");
+        // Quoted spans are data: the live false positive — a commit MESSAGE
+        // containing "(cargo install /" — must classify as the commit it is,
+        // not as a dependency change.
+        assert_eq!(
+            classify_bash(
+                r#"git add -A && git commit -m "install story (cargo install / GitHub release).""#
+            ),
+            "git_commit"
+        );
+        assert_eq!(classify_bash("echo 'git push origin'"), "bash_other");
+        // Unquoted substitution still classifies (casual composition caught).
+        assert_eq!(classify_bash("echo $(git push)"), "git_push");
         assert_eq!(classify_bash("cargo test"), "cargo_build");
         assert_eq!(classify_bash("ls -la"), "bash_other");
     }

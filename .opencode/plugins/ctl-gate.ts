@@ -38,6 +38,10 @@ export interface GateResult {
   /** Gate hint: log this verdict even if allowed (e.g. a never-path-scoped
    *  bash_write). Denies are logged regardless of this flag. */
   record?: boolean;
+  /** Observe mode: a model-facing nudge on an ALLOWED verdict (out-of-scope
+   *  or task-less write, out-of-window commit). Forwarded to stderr and the
+   *  decision record; never blocks. */
+  warning?: string;
 }
 
 export interface ActiveTask {
@@ -143,6 +147,7 @@ export function buildRecordArgs(input: {
   };
   if (input.command) record.command = input.command;
   else if (input.path) record.path = input.path;
+  if (input.gate.warning) record.warning = input.gate.warning;
   const task = input.gate.task_id || input.taskId?.trim();
   if (task) record.task_id = task;
   return ["hook", "record-decision", "--data", JSON.stringify(record)];
@@ -271,6 +276,7 @@ export const realCtlRunner: CtlRunner = {
       task_id: parsed.task_id as string | undefined,
       remedy: parsed.remedy as string | undefined,
       record: parsed.record === true,
+      warning: parsed.warning as string | undefined,
     };
   },
   async context() {
@@ -338,6 +344,14 @@ export function createHooks(runner: CtlRunner) {
       if (!gate.allowed) {
         const remedy = gate.remedy ? `\n💡 ${gate.remedy}` : "";
         throw new Error(`ctl gate [${gate.state}]: ${gate.reason}${remedy}`);
+      }
+
+      // Observe mode: an allowed verdict may carry a warning (out-of-scope /
+      // task-less write, out-of-window commit). Surface it without blocking —
+      // the opencode plugin has no additionalContext channel, so stderr is
+      // the honest best-effort forward (also lands in the decision record).
+      if (gate.warning && typeof process.stderr?.write === "function") {
+        process.stderr.write(`\n⚠️ ctl observe [${gate.state}]: ${gate.warning}\n`);
       }
 
       // Attestation V1: an ALLOWED subagent dispatch bound to a parent task is
