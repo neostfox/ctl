@@ -202,3 +202,15 @@ let id = args.id.unwrap();
 
 // GOOD: clap handles required args; Optional args use if-let
 ```
+
+### Gotcha: classify_bash reads prose, not just commands
+
+> **Warning**: `classify_bash` splits the WHOLE bash string on `; \n & | ( ) `` `
+> and classifies every segment — including text inside a `git commit -m "…"`
+> message. A message containing `(cargo install /` produces a segment starting
+> with `cargo install` → classified `cargo_deps` → the commit is denied for a
+> "dependency change" that is only prose (observed live, decisions.jsonl line
+> 90, 2026-07-05). Until the classifier learns to skip quoted arguments, keep
+> trigger phrases (`cargo install`, `git push`, `cargo add`) off segment starts
+> in commit messages — e.g. write "cargo-install". A fix should classify only
+> the first token-position of each segment's actual command, not quoted prose.
