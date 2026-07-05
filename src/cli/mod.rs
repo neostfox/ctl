@@ -1729,8 +1729,10 @@ fn omp_agent_env_file(
 
 /// Upsert `KEY="value"` into dotenv-style content, preserving every other
 /// line. Key matching mirrors OMP's `parseEnvFile`: everything before the
-/// first `=`, trimmed. Returns the new content plus the previous value
-/// (quotes stripped) when an existing `KEY` line was replaced.
+/// first `=`, trimmed. OMP's parser is last-wins, so ALL existing `KEY`
+/// lines collapse into the one new line — a surviving duplicate below the
+/// pin would silently override it. Returns the new content plus the
+/// previously effective value: the LAST occurrence, quotes stripped.
 fn upsert_env_line(content: &str, key: &str, value: &str) -> (String, Option<String>) {
     let new_line = format!("{key}=\"{value}\"");
     let mut old: Option<String> = None;
@@ -1740,11 +1742,13 @@ fn upsert_env_line(content: &str, key: &str, value: &str) -> (String, Option<Str
         let line = raw.trim_end_matches('\r');
         let is_key = !line.trim_start().starts_with('#')
             && line.split_once('=').is_some_and(|(k, _)| k.trim() == key);
-        if is_key && !replaced {
+        if is_key {
             let val = line.split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
             old = Some(val.trim_matches(|c| c == '"' || c == '\'').to_string());
-            lines.push(new_line.clone());
-            replaced = true;
+            if !replaced {
+                lines.push(new_line.clone());
+                replaced = true;
+            }
         } else {
             lines.push(line.to_string());
         }
@@ -7932,6 +7936,19 @@ mod tests {
         );
         assert_eq!(out, "FOO=bar\nCTL_BIN=\"C:\\new\\ctl.exe\"\nBAZ=1\n");
         assert_eq!(old.as_deref(), Some("C:\\old\\ctl.exe"));
+    }
+
+    #[test]
+    fn upsert_collapses_duplicate_keys_and_reports_last_wins_value() {
+        // OMP's parseEnvFile is last-wins: a duplicate CTL_BIN below the pin
+        // would silently override it, so all occurrences collapse into one.
+        let (out, old) = upsert_env_line(
+            "CTL_BIN=/first/ctl\nFOO=bar\nCTL_BIN=\"/second/ctl\"\n",
+            "CTL_BIN",
+            "/new/ctl",
+        );
+        assert_eq!(out, "CTL_BIN=\"/new/ctl\"\nFOO=bar\n");
+        assert_eq!(old.as_deref(), Some("/second/ctl"));
     }
 
     #[test]
