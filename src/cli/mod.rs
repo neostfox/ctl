@@ -6451,7 +6451,7 @@ fn iso8601_utc_to_epoch(s: &str) -> Option<u64> {
     // Days from civil (Howard Hinnant's algorithm), valid for all UTC dates.
     let y_adj = y - i64::from(m <= 2);
     let era = y_adj.div_euclid(400);
-    let yoe = (y_adj - era * 400) as i64;
+    let yoe = y_adj - era * 400;
     let mp = i64::from((m + 9) % 12);
     let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
