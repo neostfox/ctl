@@ -103,6 +103,17 @@ class ContextHookTest(unittest.TestCase):
     def test_unparseable_context_and_no_memory_injects_nothing(self):
         self.assertIsNone(self._invoke(ctx_stdout="not json"))
 
+    # ── version visibility (B-lite: which binary answered?) ──
+
+    def test_ctl_version_is_shown_in_the_header(self):
+        ctx = self._invoke(ctx={"ctl_version": "9.9.9",
+                                "active_tasks": [_task("t-v")]})
+        self.assertIn("ctl 9.9.9", ctx)
+
+    def test_missing_version_keeps_plain_header(self):
+        ctx = self._invoke(ctx=_ctx(_task("t-v")))
+        self.assertIn("Active ctl task boundaries — stay within", ctx)
+
     # ── global memory tier (memory-two-tier-v1) ──
 
     def _write_index(self, tmp, *entries):

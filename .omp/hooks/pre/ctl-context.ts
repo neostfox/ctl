@@ -13,7 +13,6 @@ import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { createRequire } from "module";
 
 interface GateResult {
   allowed: boolean;
@@ -66,94 +65,16 @@ function logCtlError(
 }
 
 /**
- * Locate the `ctl` binary WITHOUT depending on the host process PATH.
- *
- * The hook's `execFile` inherits the OMP process environment, not the per-tool
- * `bash.env.PATH` from settings.json — so on Windows, when OMP is launched from
- * a context that lacks `~/.cargo/bin` / the npm dir on PATH, bare `execFile("ctl")`
- * fails with ENOENT, the gate returns null, and every mutating tool fails closed.
- *
- * Resolution order (first hit wins, probed once and memoized):
- *   1. CTL_BIN env var — explicit operator override.
- *   2. Bundled npm package `@velo-ai/ctl` — its platform binary, resolved
- *      relative to node_modules (PATH-independent; the plugin-distribution path).
- *   3. Globally npm-installed `@velo-ai/ctl` — probe the known global roots, so a
- *      plain `npm i -g @velo-ai/ctl` works (invisible to createRequire, and on
- *      Windows it exposes only `.cmd`/`.ps1` shims on PATH, never a real exe).
- *   4. Well-known install dirs — `~/.cargo/bin/ctl[.exe]` (cargo build install).
- *   5. Bare `ctl` — fall back to PATH resolution (prior behavior).
+ * Locate the `ctl` binary via the one blessed chain shared by every adapter:
+ * CTL_BIN override → ~/.cargo/bin → bare "ctl" (PATH fallback). npm probing
+ * was retired with the npm binary distribution (B-lite; see
+ * .ctl/spec/alignment/2026-07-04-binary-distribution-shrink.md) so one install
+ * location can no longer be shadowed by another. Probed once and memoized.
  */
 let resolvedCtlBin: string | undefined;
 
 function platformBinaryName(): string {
   return process.platform === "win32" ? "ctl.exe" : "ctl";
-}
-
-/** The npm wrapper's `platforms/<dir>` tuple (see npm/bin/ctl.js). */
-function platformDir(): string {
-  const tuples: Record<string, string> = {
-    "win32-x64": "win32-x64-msvc",
-    "darwin-x64": "darwin-x64",
-    "darwin-arm64": "darwin-arm64",
-    "linux-x64": "linux-x64-gnu",
-    "linux-arm64": "linux-arm64-gnu",
-  };
-  const key = `${process.platform}-${process.arch}`;
-  return tuples[key] ?? key;
-}
-
-/** Resolve the binary inside an installed `@velo-ai/ctl`, or null if absent. */
-function resolveBundledCtl(): string | null {
-  try {
-    const req = createRequire(import.meta.url);
-    const bin = platformBinaryName();
-    // Optional platform dep, installed directly: .../ctl-<dir>/ctl[.exe]
-    try {
-      const root = req.resolve(`@velo-ai/ctl-${platformDir()}/package.json`);
-      const p = join(root, "..", bin);
-      if (existsSync(p)) return p;
-    } catch { /* not installed as a separate platform dep */ }
-    // Main package's bundled copy: .../ctl/platforms/<dir>/ctl[.exe]
-    const main = req.resolve("@velo-ai/ctl/package.json");
-    const p = join(main, "..", "platforms", platformDir(), bin);
-    if (existsSync(p)) return p;
-  } catch { /* @velo-ai/ctl not installed at all */ }
-  return null;
-}
-
-/**
- * Resolve the binary inside a GLOBALLY npm-installed `@velo-ai/ctl`, or null.
- *
- * The hook lives outside any project `node_modules`, so a `npm i -g @velo-ai/ctl`
- * is invisible to `createRequire`/`resolveBundledCtl` (which only walk up local
- * node_modules). On Windows the global install also exposes only `.cmd`/`.ps1`
- * shims on PATH — never a real `ctl.exe` — so the bare-name fallback fails too.
- * Probe the known global roots directly for the platform binary.
- */
-function resolveGlobalNpmCtl(): string | null {
-  const bin = platformBinaryName();
-  const rel = join(
-    "node_modules", "@velo-ai", "ctl", "platforms", platformDir(), bin,
-  );
-  const roots: string[] = [];
-  const prefix = process.env.npm_config_prefix?.trim();
-  if (prefix) {
-    roots.push(prefix); // Windows: <prefix>\node_modules
-    roots.push(join(prefix, "lib")); // unix: <prefix>/lib/node_modules
-  }
-  if (process.platform === "win32") {
-    const appdata = process.env.APPDATA?.trim();
-    if (appdata) roots.push(join(appdata, "npm")); // default global root on Windows
-  } else {
-    roots.push("/usr/local", "/usr/local/lib", "/usr", "/usr/lib");
-    const home = homedir();
-    roots.push(join(home, ".npm-global"), join(home, ".npm-global", "lib"));
-  }
-  for (const root of roots) {
-    const p = join(root, rel);
-    if (existsSync(p)) return p;
-  }
-  return null;
 }
 
 function resolveCtlBin(): string {
@@ -165,26 +86,13 @@ function resolveCtlBin(): string {
     return resolvedCtlBin;
   }
 
-  const bundled = resolveBundledCtl();
-  if (bundled) {
-    resolvedCtlBin = bundled;
-    return resolvedCtlBin;
-  }
-
-  const globalNpm = resolveGlobalNpmCtl();
-  if (globalNpm) {
-    resolvedCtlBin = globalNpm;
-    return resolvedCtlBin;
-  }
-
-  const bin = platformBinaryName();
-  const cargoBin = join(homedir(), ".cargo", "bin", bin);
+  const cargoBin = join(homedir(), ".cargo", "bin", platformBinaryName());
   if (existsSync(cargoBin)) {
     resolvedCtlBin = cargoBin;
     return resolvedCtlBin;
   }
 
-  // Last resort: rely on PATH (prior behavior). Logs ENOENT if still missing.
+  // Last resort: rely on PATH. Logs ENOENT if still missing.
   resolvedCtlBin = "ctl";
   return resolvedCtlBin;
 }

@@ -14,8 +14,23 @@ reminder must never trap the user in a session.
 Registered in .claude/settings.json for the Stop event.
 """
 import json
+import os
 import subprocess
 import sys
+
+
+def resolve_ctl():
+    """The one blessed resolution chain: CTL_BIN → ~/.cargo/bin → PATH.
+    Identical across all three .claude hooks so they can never run
+    different binaries in the same session."""
+    override = os.environ.get("CTL_BIN", "").strip()
+    if override:
+        return override
+    binname = "ctl.exe" if sys.platform == "win32" else "ctl"
+    cargo = os.path.join(os.path.expanduser("~"), ".cargo", "bin", binname)
+    if os.path.isfile(cargo):
+        return cargo
+    return "ctl"
 
 
 def main() -> None:
@@ -26,7 +41,7 @@ def main() -> None:
 
     try:
         out = subprocess.run(
-            ["ctl", "hook", "wrapup-check"],
+            [resolve_ctl(), "hook", "wrapup-check"],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=5,
         )

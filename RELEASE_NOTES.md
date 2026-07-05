@@ -1,5 +1,21 @@
 # Release Notes — ctl v0.0.10
 
+## Unreleased (0.0.11) — B-lite part 1: one resolver chain + version visibility
+
+- **Every ctl binary resolver is now the same three-step chain**:
+  `CTL_BIN → ~/.cargo/bin → PATH`. The local/global npm probing is deleted
+  from `.claude/hooks/ctl-gate.py` and `.opencode/plugins/ctl-gate.ts`, and
+  the `.omp` / `npm-omp` context hooks; `ctl-context.py` and `ctl-wrapup.py`
+  adopt the shared resolver instead of bare `"ctl"` — the three `.claude`
+  hooks can no longer run three different binaries in one session. Rationale:
+  the npm binary distribution is being retired (confirmed alignment
+  `.ctl/spec/alignment/2026-07-04-binary-distribution-shrink.md`), so the
+  Windows-shim workaround the npm probing existed for goes with it.
+- **`ctl hook context` reports `ctl_version`** (CARGO_PKG_VERSION) and the
+  SessionStart header shows it ("Active ctl task boundaries (ctl X.Y.Z)…") —
+  every session sees WHICH binary is answering, turning silent version skew
+  into a visible fact.
+
 ## Unreleased (0.0.11) — Two-tier memory: global `~/.ctl/memory/` + project `.ctl/spec/`
 
 - **The global memory tier exists.** `~/.ctl/memory/` is ctl's platform-neutral

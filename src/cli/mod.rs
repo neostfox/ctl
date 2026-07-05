@@ -5284,6 +5284,9 @@ fn cmd_hook_context() -> Result<()> {
 
     let output = serde_json::json!({
         "binary": "ctl",
+        // Version visibility (B-lite): the governance rules live in this
+        // binary, so every session should see WHICH binary answered.
+        "ctl_version": env!("CARGO_PKG_VERSION"),
         "tasks": { "total": total, "by_phase": by_phase },
         "active_tasks": active,
         "spec_layers": spec_layers,

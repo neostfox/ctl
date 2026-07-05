@@ -18,6 +18,20 @@ GLOBAL_MEMORY_INDEX = os.path.join(
 MAX_INDEX_LINES = 30
 
 
+def resolve_ctl():
+    """The one blessed resolution chain: CTL_BIN → ~/.cargo/bin → PATH.
+    Identical across all three .claude hooks so they can never run
+    different binaries in the same session."""
+    override = os.environ.get("CTL_BIN", "").strip()
+    if override:
+        return override
+    binname = "ctl.exe" if sys.platform == "win32" else "ctl"
+    cargo = os.path.join(os.path.expanduser("~"), ".cargo", "bin", binname)
+    if os.path.isfile(cargo):
+        return cargo
+    return "ctl"
+
+
 def global_memory_lines(index_path=None):
     """Render the global memory index as context lines, or [] when absent.
 
@@ -44,7 +58,7 @@ def global_memory_lines(index_path=None):
 def main() -> None:
     try:
         out = subprocess.run(
-            ["ctl", "hook", "context"],
+            [resolve_ctl(), "hook", "context"],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=5,
         )
@@ -65,7 +79,13 @@ def main() -> None:
         }))
         sys.exit(0)
 
-    lines = ["Active ctl task boundaries — stay within write scope:"]
+    version = ctx.get("ctl_version", "")
+    header = (
+        f"Active ctl task boundaries (ctl {version}) — stay within write scope:"
+        if version
+        else "Active ctl task boundaries — stay within write scope:"
+    )
+    lines = [header]
     for t in active:
         b = t.get("boundary") or {}
         scope = ", ".join(b.get("write_allow") or []) or "(no write scope)"
