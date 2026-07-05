@@ -3,11 +3,11 @@
 //! The plugin is assembled from the SAME `.omp/` source that `ctl init` embeds
 //! (`skills::all_embedded_files`): the governance hook + skills + spec guides are
 //! copied verbatim, and a `package.json` is generated declaring the OMP extension
-//! entry (the hook) and a dependency on the `@velo-ai/ctl` npm package. Installing
-//! the plugin (`npm i` / `omp plugin link`) therefore brings BOTH the integration
-//! AND the platform binary into `node_modules`, so the hook resolves `ctl`
-//! relative to the package — PATH-independent, which is the whole point on Windows
-//! (see `.omp/hooks/pre/ctl-context.ts`).
+//! entry (the hook). The package is **pure hooks + skills** — the npm binary
+//! distribution was retired (B-lite; see
+//! `.ctl/spec/alignment/2026-07-04-binary-distribution-shrink.md`), so `ctl`
+//! itself is installed separately (`cargo install` or a GitHub release) and the
+//! hook resolves it via the one blessed chain CTL_BIN → `~/.cargo/bin` → PATH.
 //!
 //! `ctl skills sync` writes the package; `--check` (and the cargo drift test
 //! `omp_plugin_package_is_in_sync_on_disk`) re-derive it and fail if the committed
@@ -19,24 +19,22 @@ use crate::infrastructure::skills::all_embedded_files;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Directory of the committed, generated plugin package (parallel to `npm/`).
+/// Directory of the committed, generated plugin package.
 const PLUGIN_DIR: &str = "npm-omp";
 /// npm package name to publish.
 const PLUGIN_NAME: &str = "@velo-ai/omp";
-/// The ctl binary npm package the plugin depends on (brings `ctl.exe` etc.).
-const CTL_DEP: &str = "@velo-ai/ctl";
 /// OMP extension entry point, relative to the package root.
 const HOOK_ENTRY: &str = "./hooks/pre/ctl-context.ts";
 
 /// Generated `package.json` (hand-formatted for stable, reviewable output).
-/// The version and the `@velo-ai/ctl` dependency both track the crate version so
-/// the plugin and the binary it bundles are released in lockstep.
+/// Pure hooks + skills: no binary dependency — `ctl` is installed separately
+/// and resolved via CTL_BIN → `~/.cargo/bin` → PATH.
 fn package_json() -> String {
     format!(
         r#"{{
   "name": "{PLUGIN_NAME}",
   "version": "{ver}",
-  "description": "OMP plugin for the ctl control plane: governance hook + skills, with the ctl binary bundled via a dependency so the gate resolves PATH-independently.",
+  "description": "OMP plugin for the ctl control plane: governance hook + skills. Pure integration package — install ctl separately (cargo install, or a GitHub release); the hook resolves it via CTL_BIN, ~/.cargo/bin, then PATH.",
   "license": "MIT",
   "repository": {{
     "type": "git",
@@ -60,10 +58,7 @@ fn package_json() -> String {
     "skills/",
     "spec/",
     "README.md"
-  ],
-  "dependencies": {{
-    "{CTL_DEP}": "{ver}"
-  }}
+  ]
 }}
 "#,
         ver = env!("CARGO_PKG_VERSION"),
@@ -75,26 +70,23 @@ fn readme() -> String {
     format!(
         r#"# {PLUGIN_NAME}
 
-OMP plugin for the **ctl** control plane. It ships the governance pre-hook and the
-control-plane skills, and depends on the `{CTL_DEP}` npm package so the `ctl`
-binary is installed alongside it.
+OMP plugin for the **ctl** control plane: the governance pre-hook and the
+control-plane skills. Pure integration package — it does **not** bundle the
+`ctl` binary.
 
 > **Generated file — do not edit.** This package is produced from the canonical
 > `.omp/` source by `ctl skills sync`. Edit `.omp/` (and the generator in
 > `src/infrastructure/omp_plugin.rs`) instead; CI fails if `{PLUGIN_DIR}/` drifts.
 
-## Why a plugin
-
-The hook (`hooks/pre/ctl-context.ts`) shells out to `ctl`. Resolving it by bare
-name against the host process PATH fails on Windows when `ctl` was installed
-somewhere off the launch PATH. Installing this plugin via npm places the platform
-binary under `node_modules`, where the hook resolves it relative to the package —
-no PATH dependence.
-
 ## Install
 
-The extension hook only loads for **npm-installed** or **linked** plugins (not for
-`omp plugin install github:…` marketplace installs).
+1. Install `ctl` itself: `cargo install --path .` from the ctl repo, or download
+   a binary from the GitHub releases page. The hook resolves it via the one
+   blessed chain **CTL_BIN → `~/.cargo/bin` → PATH** — set `CTL_BIN` to pin a
+   specific binary.
+2. Install the plugin. The extension hook only loads for **npm-installed** or
+   **linked** plugins (not for `omp plugin install github:…` marketplace
+   installs):
 
 ```sh
 # Local development against this repo's generated package:
@@ -103,8 +95,6 @@ omp plugin link ./{PLUGIN_DIR}
 # Or, once published:
 npm i {PLUGIN_NAME}
 ```
-
-Override binary resolution with `CTL_BIN` if you want a specific `ctl`.
 "#,
     )
 }
@@ -169,20 +159,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn package_json_declares_extension_and_dependency() {
+    fn package_json_declares_extension_and_no_binary_dependency() {
         let pkg = package_json();
         assert!(pkg.contains("\"name\": \"@velo-ai/omp\""));
         assert!(
             pkg.contains(HOOK_ENTRY),
             "omp.extensions points at the hook"
         );
+        // B-lite: pure hooks+skills — the npm binary distribution is retired,
+        // so the plugin must NOT depend on any binary package.
         assert!(
-            pkg.contains("\"@velo-ai/ctl\""),
-            "depends on the ctl binary pkg"
+            !pkg.contains("\"dependencies\""),
+            "no dependency block at all"
         );
-        // Version tracks the crate version on both the package and the dependency.
+        assert!(!pkg.contains("@velo-ai/ctl"), "no binary dependency");
         let ver = env!("CARGO_PKG_VERSION");
-        assert_eq!(pkg.matches(ver).count(), 2, "version + dep version");
+        assert_eq!(pkg.matches(ver).count(), 1, "package version only");
     }
 
     #[test]

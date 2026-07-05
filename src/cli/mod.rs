@@ -1444,15 +1444,9 @@ enum CtlReach {
 struct CtlProbe<'a> {
     windows: bool,
     bin_name: &'a str,
-    platform_dir: &'a str,
     ctl_bin: Option<String>,
-    npm_prefix: Option<String>,
-    appdata: Option<String>,
     home: Option<String>,
     path_dirs: Vec<String>,
-    /// Local `node_modules` roots to probe for a bundled `@velo-ai/ctl*`
-    /// (mirrors the hook's `createRequire` walk). Empty in unit tests.
-    bundled_dirs: Vec<std::path::PathBuf>,
     exists: &'a dyn Fn(&Path) -> bool,
 }
 
@@ -1460,19 +1454,12 @@ fn nonempty(o: &Option<String>) -> Option<&str> {
     o.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// Resolve the exact `ctl` path a hook would exec, mirroring the TS hook's
-/// `resolveCtlBin()` order: CTL_BIN → local node_modules (the bundled
-/// `@velo-ai/ctl*` the plugin depends on) → global npm → cargo → real exe on
-/// PATH. Returns `(resolved_path, how, saw_shim)`. Pure: all env/fs access is
-/// injected via `CtlProbe`.
-///
-/// The local-node_modules step mirrors the hook's `resolveBundledCtl`
-/// (`createRequire`): it checks both the optional platform-dep layout
-/// (`@velo-ai/ctl-<plat>`) and the main package's bundled `platforms/<plat>`
-/// dir, BEFORE the global walk. Omitting it (the original gap) made `ctl init`
-/// warn "not found" on a machine where the hook would resolve ctl fine — e.g.
-/// after `omp plugin link` or a local `npm i @velo-ai/omp`, where the binary
-/// lives under the project's `node_modules`, not a global npm root.
+/// Resolve the exact `ctl` path a hook would exec, mirroring the one blessed
+/// chain every adapter now uses (B-lite; see
+/// `.ctl/spec/alignment/2026-07-04-binary-distribution-shrink.md`):
+/// CTL_BIN → `~/.cargo/bin` → real exe on PATH. npm probing was retired with
+/// the npm binary distribution. Returns `(resolved_path, how, saw_shim)`.
+/// Pure: all env/fs access is injected via `CtlProbe`.
 fn resolve_ctl_path(p: &CtlProbe) -> (Option<std::path::PathBuf>, &'static str, bool) {
     // 1. explicit operator override
     if let Some(bin) = nonempty(&p.ctl_bin) {
@@ -1480,67 +1467,16 @@ fn resolve_ctl_path(p: &CtlProbe) -> (Option<std::path::PathBuf>, &'static str, 
             return (Some(Path::new(bin).to_path_buf()), "CTL_BIN", false);
         }
     }
-    // 2. local node_modules — the bundled @velo-ai/ctl the plugin depends on.
-    for nm in &p.bundled_dirs {
-        let scope = nm.join("@velo-ai");
-        // optional platform dep: .../@velo-ai/ctl-<plat>/<bin>
-        let plat_dep = scope
-            .join(format!("ctl-{}", p.platform_dir))
-            .join(p.bin_name);
-        if (p.exists)(&plat_dep) {
-            return (Some(plat_dep), "npm(local)", false);
-        }
-        // main package bundled: .../@velo-ai/ctl/platforms/<plat>/<bin>
-        let main = scope
-            .join("ctl")
-            .join("platforms")
-            .join(p.platform_dir)
-            .join(p.bin_name);
-        if (p.exists)(&main) {
-            return (Some(main), "npm(local)", false);
-        }
-    }
-    // 3. global npm install (the hook runs outside any project tree, so the
-    //    global roots are what it finds beyond a local node_modules walk).
-    let rel = Path::new("node_modules")
-        .join("@velo-ai")
-        .join("ctl")
-        .join("platforms")
-        .join(p.platform_dir)
-        .join(p.bin_name);
-    let mut roots: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(prefix) = nonempty(&p.npm_prefix) {
-        roots.push(std::path::PathBuf::from(prefix));
-        roots.push(Path::new(prefix).join("lib"));
-    }
-    if p.windows {
-        if let Some(appdata) = nonempty(&p.appdata) {
-            roots.push(Path::new(appdata).join("npm"));
-        }
-    } else {
-        for r in ["/usr/local", "/usr/local/lib", "/usr", "/usr/lib"] {
-            roots.push(std::path::PathBuf::from(r));
-        }
-        if let Some(home) = nonempty(&p.home) {
-            roots.push(Path::new(home).join(".npm-global"));
-            roots.push(Path::new(home).join(".npm-global").join("lib"));
-        }
-    }
-    for root in &roots {
-        let cand = root.join(&rel);
-        if (p.exists)(&cand) {
-            return (Some(cand), "npm", false);
-        }
-    }
-    // 4. cargo install
+    // 2. cargo install — the blessed install location
     if let Some(home) = nonempty(&p.home) {
         let cargo = Path::new(home).join(".cargo").join("bin").join(p.bin_name);
         if (p.exists)(&cargo) {
             return (Some(cargo), "cargo", false);
         }
     }
-    // 5. PATH — require a REAL exe (`bin_name`), not just a shim. On Windows,
-    //    execFile/subprocess (no shell) cannot run a bare `ctl`/`.cmd`/`.ps1`.
+    // 3. PATH — require a REAL exe (`bin_name`), not just a shim. On Windows,
+    //    execFile/subprocess (no shell) cannot run a bare `ctl`/`.cmd`/`.ps1`
+    //    (a stale npm-era shim may still linger on PATH — flag it).
     let mut shim_seen = false;
     for dir in &p.path_dirs {
         let d = Path::new(dir);
@@ -1574,22 +1510,7 @@ fn resolve_ctl_for_hook(p: &CtlProbe) -> CtlReach {
     }
 }
 
-/// The napi platform tuple for the current target (matches npm/bin/ctl.js).
-fn current_platform_dir() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => "win32-x64-msvc",
-        ("macos", "x86_64") => "darwin-x64",
-        ("macos", "aarch64") => "darwin-arm64",
-        ("linux", "x86_64") => "linux-x64-gnu",
-        ("linux", "aarch64") => "linux-arm64-gnu",
-        _ => "",
-    }
-}
-
-/// Build a `CtlProbe` from the real process environment. `bundled_dirs` walks up
-/// from the cwd (where `ctl init` runs = project root) collecting `node_modules`
-/// dirs, mirroring how the hook's `createRequire` resolves a locally-installed
-/// `@velo-ai/ctl` upward from the hook file.
+/// Build a `CtlProbe` from the real process environment.
 fn real_ctl_probe() -> CtlProbe<'static> {
     let windows = cfg!(windows);
     let path_dirs = std::env::var_os("PATH")
@@ -1604,33 +1525,12 @@ fn real_ctl_probe() -> CtlProbe<'static> {
     } else {
         std::env::var("HOME").ok()
     };
-    // Local node_modules roots a hook's createRequire would walk up to — covers
-    // `omp plugin link` / local `npm i @velo-ai/omp` installs.
-    let mut bundled_dirs: Vec<std::path::PathBuf> = Vec::new();
-    let mut dir = std::env::current_dir().ok();
-    while let Some(d) = dir {
-        bundled_dirs.push(d.join("node_modules"));
-        // Bound the walk at the current repository: a `.git` marks the project
-        // (or monorepo) root. The hook's createResolve walks up from the hook
-        // file (under this repo), so anything above `.git` is out of scope and
-        // would only add unrelated/empty node_modules dirs — noise plus
-        // unbounded I/O toward the filesystem root. Falls through to the root
-        // if this isn't a git repo.
-        if d.join(".git").exists() {
-            break;
-        }
-        dir = d.parent().map(std::path::Path::to_path_buf);
-    }
     CtlProbe {
         windows,
         bin_name: if windows { "ctl.exe" } else { "ctl" },
-        platform_dir: current_platform_dir(),
         ctl_bin: std::env::var("CTL_BIN").ok(),
-        npm_prefix: std::env::var("npm_config_prefix").ok(),
-        appdata: std::env::var("APPDATA").ok(),
         home,
         path_dirs,
-        bundled_dirs,
         exists: &|p| p.is_file(),
     }
 }
@@ -1681,41 +1581,99 @@ fn exec_ctl_version(bin: &Path) -> Result<String> {
     }
 }
 
+/// B-lite version-skew check: every EXISTING candidate on the chain is exec'd
+/// (`--version`) and compared against the resolved one. Silent version skew —
+/// a stale binary shadowing a fresh install — was the single worst binary pit;
+/// this turns it into a visible warning at `ctl init` time.
+fn report_version_skew(resolved: &Path, resolved_ver: &str, p: &CtlProbe) {
+    let mut candidates: Vec<(&str, std::path::PathBuf)> = Vec::new();
+    if let Some(bin) = nonempty(&p.ctl_bin) {
+        candidates.push(("CTL_BIN", Path::new(bin).to_path_buf()));
+    }
+    if let Some(home) = nonempty(&p.home) {
+        candidates.push((
+            "cargo",
+            Path::new(home).join(".cargo").join("bin").join(p.bin_name),
+        ));
+    }
+    for dir in &p.path_dirs {
+        let exe = Path::new(dir).join(p.bin_name);
+        if (p.exists)(&exe) {
+            candidates.push(("PATH", exe));
+            break;
+        }
+    }
+    for (label, cand) in candidates {
+        if cand == resolved || !(p.exists)(&cand) {
+            continue;
+        }
+        if let Ok(ver) = exec_ctl_version(&cand) {
+            if ver != resolved_ver {
+                println!(
+                    "  ⚠️  version skew: {} at {} reports \"{}\" but the hooks resolve \"{}\" — \
+                     the older one runs stale governance rules. Reinstall or remove it.",
+                    label,
+                    cand.display(),
+                    ver,
+                    resolved_ver
+                );
+            }
+        }
+    }
+}
+
 /// Print a reachability line after `ctl init`: PASS (with the resolved path and
 /// a real `--version` run) when a hook would exec a runnable `ctl`, or a WARNING
 /// and remediation when it would fail closed. Existence alone is not enough —
-/// the resolved binary is exec'd to prove it runs.
+/// the resolved binary is exec'd to prove it runs. Also reports version skew
+/// across the remaining chain candidates and python availability (the .claude
+/// hooks are python scripts — without python the gate never fires).
 fn report_ctl_reachability() {
-    let (path, how, shim) = resolve_ctl_path(&real_ctl_probe());
+    let probe = real_ctl_probe();
+    let (path, how, shim) = resolve_ctl_path(&probe);
     match path {
         Some(bin) => match exec_ctl_version(&bin) {
             Ok(ver) => {
                 println!("  ctl reachable by gate hooks (resolved via {how}; runs: {ver}).");
+                report_version_skew(&bin, &ver, &probe);
             }
             Err(e) => {
                 println!(
                     "  ⚠️  `ctl` resolved via {how} at {} but FAILED to run ({e}); gate hooks \
                      will FAIL CLOSED (block writes/bash).\n     \
                      Fix: set CTL_BIN to a runnable ctl(.exe), or reinstall \
-                     (npm i -g @velo-ai/ctl, or cargo install).",
+                     (`cargo install --path .`, or a GitHub release binary).",
                     bin.display()
                 );
             }
         },
         None if shim => {
             println!(
-                "  ⚠️  `ctl` is on PATH only as an npm shim (.cmd/.ps1), not a real executable.\n     \
+                "  ⚠️  `ctl` is on PATH only as a shim (.cmd/.ps1), not a real executable.\n     \
                  Gate hooks exec `ctl` without a shell and will FAIL CLOSED (block writes/bash).\n     \
-                 Fix: set CTL_BIN to the real ctl(.exe), or put a real ctl on PATH (e.g. `cargo install`)."
+                 Fix: set CTL_BIN to the real ctl(.exe), or put a real ctl on PATH (e.g. `cargo install --path .`)."
             );
         }
         None => {
             println!(
                 "  ⚠️  No runnable `ctl` binary found for the gate hooks; they will FAIL CLOSED \
                  until one is.\n     \
-                 Fix: install `ctl` (npm i -g @velo-ai/ctl, or cargo install) or set CTL_BIN to its path."
+                 Fix: install `ctl` (`cargo install --path .`, or a GitHub release binary) or set CTL_BIN to its path."
             );
         }
+    }
+    // The .claude hooks run as `python <hook>.py` — no python, no gate.
+    if std::process::Command::new("python")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        println!(
+            "  ⚠️  `python` not found on PATH — the .claude hooks (gate/context/wrap-up) \
+             cannot run, so Claude Code governance never fires. Install Python 3."
+        );
     }
 }
 
@@ -7587,20 +7545,9 @@ mod tests {
         assert_eq!(long.chars().count(), 5);
     }
 
-    // ── ctl-init reachability self-check (init-ctl-reachability-check-v1) ──
-    // Mirrors the hook resolution order so `ctl init` can warn at install time
-    // instead of the gate failing closed later.
-
-    fn npm_global_target(appdata: &str, platform_dir: &str, bin: &str) -> PathBuf {
-        Path::new(appdata)
-            .join("npm")
-            .join("node_modules")
-            .join("@velo-ai")
-            .join("ctl")
-            .join("platforms")
-            .join(platform_dir)
-            .join(bin)
-    }
+    // ── ctl-init reachability self-check ──
+    // Mirrors the ONE blessed hook resolution chain (B-lite):
+    // CTL_BIN → ~/.cargo/bin → real exe on PATH.
 
     #[test]
     fn ctl_bin_override_resolves_first() {
@@ -7608,13 +7555,9 @@ mod tests {
         let p = CtlProbe {
             windows: true,
             bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
             ctl_bin: Some("  C:/x/ctl.exe  ".into()),
-            npm_prefix: None,
-            appdata: None,
             home: None,
             path_dirs: vec![],
-            bundled_dirs: vec![],
             exists: &exists,
         };
         assert_eq!(
@@ -7629,51 +7572,24 @@ mod tests {
         let p = CtlProbe {
             windows: true,
             bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
             ctl_bin: Some("   ".into()),
-            npm_prefix: None,
-            appdata: None,
             home: None,
             path_dirs: vec![],
-            bundled_dirs: vec![],
             exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::NotFound);
     }
 
     #[test]
-    fn npm_global_appdata_resolves_on_windows() {
-        let target = npm_global_target("C:/Users/u/AppData/Roaming", "win32-x64-msvc", "ctl.exe");
-        let exists = move |q: &Path| q == target;
-        let p = CtlProbe {
-            windows: true,
-            bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
-            ctl_bin: None,
-            npm_prefix: None,
-            appdata: Some("C:/Users/u/AppData/Roaming".into()),
-            home: None,
-            path_dirs: vec![],
-            bundled_dirs: vec![],
-            exists: &exists,
-        };
-        assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "npm" });
-    }
-
-    #[test]
-    fn cargo_install_resolves() {
+    fn cargo_install_resolves_before_path() {
         let cargo = Path::new("/home/u").join(".cargo").join("bin").join("ctl");
-        let exists = move |q: &Path| q == cargo;
+        let exists = move |q: &Path| q == cargo || q == Path::new("/tools").join("ctl");
         let p = CtlProbe {
             windows: false,
             bin_name: "ctl",
-            platform_dir: "linux-x64-gnu",
             ctl_bin: None,
-            npm_prefix: None,
-            appdata: None,
             home: Some("/home/u".into()),
-            path_dirs: vec![],
-            bundled_dirs: vec![],
+            path_dirs: vec!["/tools".into()],
             exists: &exists,
         };
         assert_eq!(
@@ -7684,20 +7600,17 @@ mod tests {
 
     #[test]
     fn windows_only_shim_on_path_is_flagged_as_only_shim() {
-        // Only a bare-name shim (ctl.cmd) is on PATH; no real ctl.exe anywhere.
-        // execFile/subprocess (no shell) cannot run it → the gate fails closed.
+        // Only a bare-name shim (ctl.cmd) is on PATH — e.g. a stale npm-era
+        // leftover; no real ctl.exe anywhere. execFile/subprocess (no shell)
+        // cannot run it → the gate fails closed.
         let shim = Path::new("C:/npm").join("ctl.cmd");
         let exists = move |q: &Path| q == shim;
         let p = CtlProbe {
             windows: true,
             bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
             ctl_bin: None,
-            npm_prefix: None,
-            appdata: None,
             home: None,
             path_dirs: vec!["C:/npm".into()],
-            bundled_dirs: vec![],
             exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::OnlyShim);
@@ -7710,13 +7623,9 @@ mod tests {
         let p = CtlProbe {
             windows: true,
             bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
             ctl_bin: None,
-            npm_prefix: None,
-            appdata: None,
             home: None,
             path_dirs: vec!["C:/tools".into()],
-            bundled_dirs: vec![],
             exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::Resolved { how: "PATH" });
@@ -7728,74 +7637,11 @@ mod tests {
         let p = CtlProbe {
             windows: true,
             bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
             ctl_bin: None,
-            npm_prefix: None,
-            appdata: None,
             home: None,
             path_dirs: vec!["C:/x".into()],
-            bundled_dirs: vec![],
             exists: &exists,
         };
         assert_eq!(resolve_ctl_for_hook(&p), CtlReach::NotFound);
-    }
-
-    #[test]
-    fn local_node_modules_bundled_resolves_before_global() {
-        // A local node_modules @velo-ai/ctl/platforms/<plat>/ctl.exe resolves
-        // (mirrors `omp plugin link` / local `npm i @velo-ai/omp`) — the path the
-        // old init-check omitted, producing a false "not found" even though the
-        // hook would resolve ctl fine.
-        let local = Path::new("/proj")
-            .join("node_modules")
-            .join("@velo-ai")
-            .join("ctl")
-            .join("platforms")
-            .join("win32-x64-msvc")
-            .join("ctl.exe");
-        let exists = move |q: &Path| q == local;
-        let p = CtlProbe {
-            windows: true,
-            bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
-            ctl_bin: None,
-            npm_prefix: None,
-            appdata: Some("C:/Users/u/AppData/Roaming".into()),
-            home: None,
-            path_dirs: vec![],
-            bundled_dirs: vec![Path::new("/proj").join("node_modules")],
-            exists: &exists,
-        };
-        assert_eq!(
-            resolve_ctl_for_hook(&p),
-            CtlReach::Resolved { how: "npm(local)" }
-        );
-    }
-
-    #[test]
-    fn local_node_modules_platform_dep_resolves() {
-        // Optional platform-dep layout: .../@velo-ai/ctl-<plat>/ctl.exe
-        let local = Path::new("/proj")
-            .join("node_modules")
-            .join("@velo-ai")
-            .join("ctl-win32-x64-msvc")
-            .join("ctl.exe");
-        let exists = move |q: &Path| q == local;
-        let p = CtlProbe {
-            windows: true,
-            bin_name: "ctl.exe",
-            platform_dir: "win32-x64-msvc",
-            ctl_bin: None,
-            npm_prefix: None,
-            appdata: None,
-            home: None,
-            path_dirs: vec![],
-            bundled_dirs: vec![Path::new("/proj").join("node_modules")],
-            exists: &exists,
-        };
-        assert_eq!(
-            resolve_ctl_for_hook(&p),
-            CtlReach::Resolved { how: "npm(local)" }
-        );
     }
 }

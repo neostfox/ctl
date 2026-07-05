@@ -1,5 +1,25 @@
 # Release Notes — ctl v0.0.10
 
+## Unreleased (0.0.11) — B-lite part 2: npm binary distribution retired
+
+- **`npm/` is gone**: the five platform binary packages and the `@velo-ai/ctl`
+  meta-package are no longer built or published. Install story: `cargo install
+  --path .` (dev) or a GitHub release binary (users); `ctl update` remains the
+  in-band self-updater. Existing registry versions stay published.
+- **`@velo-ai/omp` is a pure hooks + skills package**: the generator
+  (`src/infrastructure/omp_plugin.rs`) drops the `@velo-ai/ctl` dependency and
+  the README/description now state the separate-binary install story.
+  `release.yml`'s npm job shrinks from 3 stages + version stamping to a single
+  `npm publish` of the committed `npm-omp/` (its version already tracks
+  Cargo.toml via `ctl skills sync`).
+- **`ctl init`'s reachability check mirrors the single chain** (CTL_BIN →
+  `~/.cargo/bin` → PATH; stale-shim detection retained for npm-era leftovers)
+  and adds two doctor-grade checks: **version skew** — every existing chain
+  candidate is exec'd (`--version`) and a mismatch against the resolved binary
+  warns that stale governance rules are running; **python availability** — the
+  `.claude` hooks are python scripts, so a missing python is called out
+  instead of the gate silently never firing.
+
 ## Unreleased (0.0.11) — B-lite part 1: one resolver chain + version visibility
 
 - **Every ctl binary resolver is now the same three-step chain**:

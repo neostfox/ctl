@@ -161,23 +161,20 @@ jobs:
           generate_release_notes: true
           files: dist/*
 
-  # Publish the npm packages under the @velo-ai org: the five platform binary
-  # packages, the @velo-ai/ctl meta-package (which bundles every platform binary
-  # under platforms/ — that is what bin/ctl.js resolves), and the @velo-ai/omp
-  # OMP plugin. Versions are stamped to the release tag at publish time, so the
-  # committed package.json versions need not be bumped per release (they still
-  # track Cargo.toml via the generator's drift check).
+  # Publish the ONE remaining npm package: the @velo-ai/omp plugin (pure
+  # hooks + skills — the npm binary distribution was retired in B-lite; the
+  # binary ships via the GitHub Release above and `cargo install`). The
+  # committed npm-omp/package.json version is generated from Cargo.toml by
+  # `ctl skills sync` and the tag is verified to equal Cargo.toml, so no
+  # publish-time version stamping is needed.
   #
-  # Auth is OIDC TRUSTED PUBLISHING — no NPM_TOKEN. Each publish exchanges the
+  # Auth is OIDC TRUSTED PUBLISHING — no NPM_TOKEN. The publish exchanges the
   # job's GitHub OIDC id-token for a short-lived npm credential and emits
-  # provenance automatically (no --provenance flag, no long-lived secret that
-  # npm's 2FA enforcement would reject). PREREQUISITES on npmjs.com: every
-  # package must already exist AND have a trusted publisher configured for this
-  # repo + workflow file (`release.yml`). npm cannot create a package on first
-  # publish via OIDC (npm/cli#8544), so brand-new packages are bootstrapped once
-  # out-of-band before this job can publish them.
+  # provenance automatically. PREREQUISITE on npmjs.com: the package must
+  # already exist AND have a trusted publisher configured for this repo +
+  # workflow file (`release.yml`).
   npm-publish:
-    name: publish npm packages (@velo-ai)
+    name: publish @velo-ai/omp (hooks + skills)
     needs: [verify, build]
     runs-on: ubuntu-latest
     permissions:
@@ -196,78 +193,8 @@ jobs:
       - name: Upgrade npm for OIDC trusted publishing
         run: npm install -g npm@latest
 
-      - name: Resolve release version
-        shell: bash
-        run: |
-          REF="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "VERSION=${REF#v}" >> "$GITHUB_ENV"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Stage binaries into platform packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          # build matrix target -> "<platform package dir> <binary name>"
-          declare -A MAP=(
-            [x86_64-unknown-linux-gnu]="linux-x64-gnu ctl"
-            [aarch64-unknown-linux-gnu]="linux-arm64-gnu ctl"
-            [x86_64-apple-darwin]="darwin-x64 ctl"
-            [aarch64-apple-darwin]="darwin-arm64 ctl"
-            [x86_64-pc-windows-msvc]="win32-x64-msvc ctl.exe"
-          )
-          for target in "${!MAP[@]}"; do
-            read -r dir bin <<< "${MAP[$target]}"
-            dest="npm/platforms/$dir"
-            if [ "$bin" = "ctl.exe" ]; then
-              unzip -o "artifacts/ctl-$target.zip" ctl.exe -d "$dest"
-            else
-              tar -xzf "artifacts/ctl-$target.tar.gz" -C "$dest" ctl
-              chmod +x "$dest/ctl"
-            fi
-          done
-
-      - name: Stamp versions to the release tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          node -e '
-            const fs = require("fs");
-            const v = process.env.VERSION;
-            const setv = (f, fn) => {
-              const p = JSON.parse(fs.readFileSync(f, "utf8"));
-              p.version = v;
-              if (fn) fn(p);
-              fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
-            };
-            for (const d of ["win32-x64-msvc","darwin-x64","darwin-arm64","linux-x64-gnu","linux-arm64-gnu"])
-              setv(`npm/platforms/${d}/package.json`);
-            setv("npm/package.json", p => {
-              for (const k of Object.keys(p.optionalDependencies || {})) p.optionalDependencies[k] = v;
-            });
-            setv("npm-omp/package.json", p => {
-              for (const k of Object.keys(p.dependencies || {})) p.dependencies[k] = v;
-            });
-          '
-
       # No NODE_AUTH_TOKEN: npm detects the GitHub OIDC environment (id-token:
-      # write) and exchanges it for a short-lived publish credential per package.
-      - name: Publish platform packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          for dir in win32-x64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
-            ( cd "npm/platforms/$dir" && npm publish --access public )
-          done
-
-      - name: Publish meta package
-        shell: bash
-        run: cd npm && npm publish --access public
-
+      # write) and exchanges it for a short-lived publish credential.
       - name: Publish OMP plugin
         shell: bash
         run: cd npm-omp && npm publish --access public
