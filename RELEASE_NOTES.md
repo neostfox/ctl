@@ -1,5 +1,19 @@
 # Release Notes — ctl v0.0.10
 
+## Unreleased (0.0.11) — Two-tier memory: global `~/.ctl/memory/` + project `.ctl/spec/`
+
+- **The global memory tier exists.** `~/.ctl/memory/` is ctl's platform-neutral
+  user-level tier: one fact per file plus a `MEMORY.md` index (mirrors the
+  proven auto-memory shape). `ctl-spec-update` (3 copies) opens with a tier
+  classifier — decision rule: *would this still be true in a brand-new
+  repository?* yes → global, no → project; when unsure, project. Global
+  writes are out-of-repo and ride observe mode (recorded, never denied).
+- **Sessions start with the global index.** The SessionStart context hook
+  injects `~/.ctl/memory/MEMORY.md` (capped at 30 entries) — after task
+  boundaries when a task is active, alone when idle (an idle session with
+  memory is real state, not fabricated context; the never-fabricate rule now
+  reads "no task AND no memory → inject nothing"). Hook tests: 35.
+
 ## Unreleased (0.0.11) — Wrap-up automation: Stop-hook capture reminder
 
 - **`ctl hook wrapup-check`** (new `hook` subcommand): reports whether the most

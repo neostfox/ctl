@@ -58,9 +58,12 @@ class ContextHookTest(unittest.TestCase):
     def setUp(self):
         self.mod = _load_hook()
 
-    def _invoke(self, *, ctx=None, ctx_exc=None, ctx_stdout=None):
+    def _invoke(self, *, ctx=None, ctx_exc=None, ctx_stdout=None,
+                memory_index=None):
         """Run main() over a mocked `ctl hook context`; return the injected
-        additionalContext string, or None when the hook injected nothing."""
+        additionalContext string, or None when the hook injected nothing.
+        The global memory index defaults to a nonexistent path so tests stay
+        independent of the developer machine's real ~/.ctl/memory."""
         if ctx_stdout is None and ctx is not None:
             ctx_stdout = json.dumps(ctx)
 
@@ -69,8 +72,12 @@ class ContextHookTest(unittest.TestCase):
                 raise ctx_exc
             return _FakeCompleted(0, ctx_stdout or "")
 
+        index = memory_index or str(
+            Path(__file__).with_name("no-such-memory-index.md")
+        )
         out = io.StringIO()
         with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(self.mod, "GLOBAL_MEMORY_INDEX", index), \
                 redirect_stdout(out):
             try:
                 self.mod.main()
@@ -87,14 +94,49 @@ class ContextHookTest(unittest.TestCase):
 
     # ── never fabricate context ──
 
-    def test_no_active_task_injects_nothing(self):
+    def test_no_active_task_and_no_memory_injects_nothing(self):
         self.assertIsNone(self._invoke(ctx=_ctx()))
 
-    def test_ctl_unavailable_injects_nothing(self):
+    def test_ctl_unavailable_and_no_memory_injects_nothing(self):
         self.assertIsNone(self._invoke(ctx_exc=OSError("ctl missing")))
 
-    def test_unparseable_context_injects_nothing(self):
+    def test_unparseable_context_and_no_memory_injects_nothing(self):
         self.assertIsNone(self._invoke(ctx_stdout="not json"))
+
+    # ── global memory tier (memory-two-tier-v1) ──
+
+    def _write_index(self, tmp, *entries):
+        p = Path(tmp) / "MEMORY.md"
+        p.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        return str(p)
+
+    def test_global_memory_injects_even_when_idle(self):
+        # Real state, not fabrication: an idle session still gets the index.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = self._write_index(
+                tmp, "- [confirm intent](confirm-intent.md) -- propose then confirm"
+            )
+            ctx = self._invoke(ctx=_ctx(), memory_index=idx)
+        self.assertIsNotNone(ctx)
+        self.assertIn("Global memory index", ctx)
+        self.assertIn("confirm-intent.md", ctx)
+
+    def test_global_memory_appends_after_task_context(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = self._write_index(tmp, "- [x](x.md) -- y")
+            ctx = self._invoke(ctx=_ctx(_task("t-7")), memory_index=idx)
+        self.assertIn("t-7", ctx)
+        self.assertIn("Global memory index", ctx)
+        self.assertLess(ctx.index("t-7"), ctx.index("Global memory index"))
+
+    def test_empty_or_missing_index_is_silent(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = self._write_index(tmp, "")  # whitespace-only
+            self.assertIsNone(self._invoke(ctx=_ctx(), memory_index=idx))
+        self.assertEqual(self.mod.global_memory_lines("no/such/path.md"), [])
 
     # ── boundary rendering ──
 

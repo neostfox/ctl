@@ -1,6 +1,6 @@
 ---
 name: ctl-spec-update
-description: "Capture knowledge from debugging, implementation, or discussion into .ctl/spec/. Auto-triggered by control-guard after a task finishes (ctl task finish) or after ctl-diagnose reveals a pattern worth preserving."
+description: "Capture knowledge from debugging, implementation, or discussion into two tiers: project facts into .ctl/spec/, stable cross-project preferences into ~/.ctl/memory/ (global, adapter-referenced). Auto-triggered by control-guard after a task finishes (ctl task finish) or after ctl-diagnose reveals a pattern worth preserving."
 ---
 
 # /ctl-spec-update — Knowledge Capture into Specs
@@ -13,6 +13,28 @@ Auto-triggered after task completion or when a debugging session reveals somethi
 - After Bayesian diagnosis identifies a root cause that future sessions should avoid
 - When the user says "remember this" or "note this down"
 - When a gate failure reveals a missing spec check
+
+## Step 0: Choose the tier — global vs project
+
+Every captured fact lands in exactly one tier:
+
+| Tier | Location | What belongs there |
+|---|---|---|
+| **Global** | `~/.ctl/memory/` (user-level, cross-project) | Stable user preferences and ways of working: how the user wants proposals confirmed, review style, risk tolerance, recurring cross-repo workflows |
+| **Project** | `.ctl/spec/` (this repo) | Everything derived from THIS codebase: conventions, patterns, gotchas, design decisions, root causes |
+
+Decision rule: **would this still be true in a brand-new repository?** Yes →
+global. No → project. When unsure, choose project — a repo fact leaking into
+the global tier pollutes every session, while a preference kept project-local
+merely waits to be promoted.
+
+Global-tier format (one truth across platforms, adapters reference it): one
+fact per file (`<slug>.md` — the fact, why, how to apply, a few lines), plus a
+one-line pointer appended to `~/.ctl/memory/MEMORY.md` — the index a session
+loads first. Never store project paths, file names, or repo-specific commands
+in the global tier. Writing `~/.ctl/memory/` is an out-of-repo write: the gate
+observes and records it (`.ctl/decisions.jsonl`) rather than denying —
+expected and disclosed.
 
 ## Step 1: Identify what was learned
 
