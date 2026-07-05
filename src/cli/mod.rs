@@ -2063,8 +2063,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             // best-effort: never fail the finish on a log-read error.
             let decisions_path = app.project_root.join(".ctl").join("decisions.jsonl");
             if let Ok(content) = std::fs::read_to_string(&decisions_path) {
-                let records: Vec<&str> =
-                    content.lines().filter(|l| !l.trim().is_empty()).collect();
+                let records: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
                 if !records.is_empty() {
                     let since = first_event_epoch(&app.project_root, id);
                     let windowed = since.map(|s| {
