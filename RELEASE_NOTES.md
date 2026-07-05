@@ -1,6 +1,13 @@
-# Release Notes — ctl v0.0.10
+# Release Notes — ctl v0.0.11
 
-## Unreleased (0.0.11) — Backlog sweep: classifier prose fix, windowed summaries, adapter wrap-up parity
+Follows **v0.0.10**. `ctl --version` reports `CARGO_PKG_VERSION`; the release
+tag must equal `Cargo.toml` (enforced by `release.yml`). Binaries ship via the
+GitHub Release and `cargo install`; the only npm package is `@velo-ai/omp`
+(pure hooks + skills), generated at the matching version by `ctl skills sync`.
+
+This is a factual changelog. It contains no scores or quality grades.
+
+## Included in 0.0.11 — Backlog sweep: classifier prose fix, windowed summaries, adapter wrap-up parity
 
 - **`classify_bash` no longer reads quoted prose.** Single- and double-quoted
   spans are stripped before segment-splitting, so a commit MESSAGE containing
@@ -20,7 +27,7 @@
 - **`scripts/npm-bootstrap-publish.ps1` deleted** — it published the retired
   npm binary packages and would fail if run.
 
-## Unreleased (0.0.11) — B-lite part 2: npm binary distribution retired
+## Included in 0.0.11 — B-lite part 2: npm binary distribution retired
 
 - **`npm/` is gone**: the five platform binary packages and the `@velo-ai/ctl`
   meta-package are no longer built or published. Install story: `cargo install
@@ -40,7 +47,7 @@
   `.claude` hooks are python scripts, so a missing python is called out
   instead of the gate silently never firing.
 
-## Unreleased (0.0.11) — B-lite part 1: one resolver chain + version visibility
+## Included in 0.0.11 — B-lite part 1: one resolver chain + version visibility
 
 - **Every ctl binary resolver is now the same three-step chain**:
   `CTL_BIN → ~/.cargo/bin → PATH`. The local/global npm probing is deleted
@@ -56,7 +63,7 @@
   every session sees WHICH binary is answering, turning silent version skew
   into a visible fact.
 
-## Unreleased (0.0.11) — Two-tier memory: global `~/.ctl/memory/` + project `.ctl/spec/`
+## Included in 0.0.11 — Two-tier memory: global `~/.ctl/memory/` + project `.ctl/spec/`
 
 - **The global memory tier exists.** `~/.ctl/memory/` is ctl's platform-neutral
   user-level tier: one fact per file plus a `MEMORY.md` index (mirrors the
@@ -70,7 +77,7 @@
   memory is real state, not fabricated context; the never-fabricate rule now
   reads "no task AND no memory → inject nothing"). Hook tests: 35.
 
-## Unreleased (0.0.11) — Wrap-up automation: Stop-hook capture reminder
+## Included in 0.0.11 — Wrap-up automation: Stop-hook capture reminder
 
 - **`ctl hook wrapup-check`** (new `hook` subcommand): reports whether the most
   recent `task_completed` still lacks a knowledge capture — compared against
@@ -90,12 +97,11 @@
   `.ctl/spec/prd/wrapup-memory-capture.md` (recorded via `ctl brainstorm
   record`, BS-wrapup-001 — first live use of the create-hint → record loop).
 
-Follows **v0.0.9**. `ctl --version` reports `CARGO_PKG_VERSION`; the release tag
-must equal `Cargo.toml` (enforced by `release.yml`), and the npm `@velo-ai/ctl`
-meta-package plus its five platform packages carry the matching version (stamped
-to the tag at publish time).
+# Earlier — ctl v0.0.10
 
-This is a factual changelog. It contains no scores or quality grades.
+Follows **v0.0.9**. (Distribution note as of 0.0.10: the npm `@velo-ai/ctl`
+meta-package plus five platform packages carried the matching version — that
+distribution was retired in 0.0.11.)
 
 ## Included in 0.0.10 — Observe-mode consumers + verified subagent gating
 

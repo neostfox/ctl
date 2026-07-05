@@ -1,6 +1,6 @@
 {
   "name": "@velo-ai/omp",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "OMP plugin for the ctl control plane: governance hook + skills. Pure integration package — install ctl separately (cargo install, or a GitHub release); the hook resolves it via CTL_BIN, ~/.cargo/bin, then PATH.",
   "license": "MIT",
   "repository": {
