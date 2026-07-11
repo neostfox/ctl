@@ -26,12 +26,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize the local task ledger and inject a platform integration
+    /// Initialize ctl and configure one or more agent platforms.
     Init {
-        /// Which agent platform to wire up. Omit to choose interactively (a TTY
-        /// is required); in a non-interactive shell the flag is mandatory.
-        #[arg(long, value_enum)]
-        platform: Option<PlatformArg>,
+        /// Platform to configure; repeat for multiple platforms. Omit to choose interactively.
+        #[arg(long = "platform", value_enum)]
+        platform: Vec<PlatformArg>,
+        /// Configure Claude Code (.claude/).
+        #[arg(long)]
+        claude: bool,
+        /// Configure opencode (.opencode/).
+        #[arg(long)]
+        opencode: bool,
+        /// Configure OMP (.omp/).
+        #[arg(long)]
+        omp: bool,
+        /// Configure all supported platforms.
+        #[arg(long)]
+        all: bool,
+        /// Skip prompts; use explicit platforms, detected integrations, or all on a fresh project.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Task lifecycle commands (create through archive)
     Task {
@@ -360,6 +374,65 @@ enum PlatformArg {
     Omp,
     /// All of the above
     All,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PlatformSelection {
+    claude: bool,
+    opencode: bool,
+    omp: bool,
+}
+
+impl PlatformSelection {
+    fn all() -> Self {
+        Self {
+            claude: true,
+            opencode: true,
+            omp: true,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.claude || self.opencode || self.omp
+    }
+}
+
+fn resolve_platform_selection(
+    explicit: &[PlatformArg],
+    claude: bool,
+    opencode: bool,
+    omp: bool,
+    all: bool,
+) -> Result<PlatformSelection> {
+    let mut selection = PlatformSelection {
+        claude,
+        opencode,
+        omp,
+    };
+    if all {
+        selection = PlatformSelection::all();
+    }
+    for platform in explicit {
+        match platform {
+            PlatformArg::Claude => selection.claude = true,
+            PlatformArg::Opencode => selection.opencode = true,
+            PlatformArg::Omp => selection.omp = true,
+            PlatformArg::All => selection = PlatformSelection::all(),
+        }
+    }
+    if selection.any() {
+        Ok(selection)
+    } else {
+        Err(anyhow::anyhow!("no platform selected"))
+    }
+}
+
+fn detected_platform_selection(project_root: &Path) -> PlatformSelection {
+    PlatformSelection {
+        claude: project_root.join(".claude").exists(),
+        opencode: project_root.join(".opencode").exists(),
+        omp: project_root.join(".omp").exists(),
+    }
 }
 
 impl TaskKindArg {
@@ -1236,7 +1309,14 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let dry_run = cli.dry_run;
     match &cli.command {
-        Commands::Init { platform } => cmd_init(*platform, dry_run),
+        Commands::Init {
+            platform,
+            claude,
+            opencode,
+            omp,
+            all,
+            yes,
+        } => cmd_init(platform, *claude, *opencode, *omp, *all, *yes, dry_run),
         Commands::Skills { command } => cmd_skills(command),
         Commands::Task { command } => cmd_task(command, dry_run),
         Commands::Replay { task } => cmd_replay(task.as_deref()),
@@ -1302,19 +1382,35 @@ fn app_open(dry_run: bool) -> Result<ControlApp> {
     ControlApp::open(&std::env::current_dir()?, dry_run)
 }
 
-fn cmd_init(platform: Option<PlatformArg>, dry_run: bool) -> Result<()> {
+fn cmd_init(
+    explicit: &[PlatformArg],
+    claude: bool,
+    opencode: bool,
+    omp: bool,
+    all: bool,
+    yes: bool,
+    dry_run: bool,
+) -> Result<()> {
     use std::io::IsTerminal;
     let project_root = std::env::current_dir()?;
 
-    // Resolve the platform: an explicit --platform wins; otherwise prompt when
-    // attached to a TTY, and require the flag in a non-interactive shell (CI).
-    let platform = match platform {
-        Some(p) => p,
-        None if std::io::stdin().is_terminal() => prompt_platform()?,
-        None => {
+    // Explicit flags win. In scripted mode, reuse detected integrations; a fresh
+    // project defaults to all supported platforms so onboarding is complete.
+    let selection = match resolve_platform_selection(explicit, claude, opencode, omp, all) {
+        Ok(selection) => selection,
+        Err(_) if yes => {
+            let detected = detected_platform_selection(&project_root);
+            if detected.any() {
+                detected
+            } else {
+                PlatformSelection::all()
+            }
+        }
+        Err(_) if std::io::stdin().is_terminal() => prompt_platform(&project_root)?,
+        Err(_) => {
             return Err(anyhow::anyhow!(
-                "ctl init: --platform is required in a non-interactive shell \
-                 (no TTY to prompt). Choose one of: claude, opencode, omp, all."
+                "ctl init: choose at least one platform with --platform <name>, --claude, \
+                 --opencode, --omp, or --all; use --yes for scripted onboarding."
             ));
         }
     };
@@ -1322,7 +1418,7 @@ fn cmd_init(platform: Option<PlatformArg>, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "[dry-run] Would initialize the local task ledger and inject the {} integration.",
-            platform_label(platform)
+            platform_label(selection)
         );
         return Ok(());
     }
@@ -1365,7 +1461,7 @@ T6_architecture_mismatch = true
     }
 
     // Inject the chosen platform integration(s).
-    inject_platform(platform, &project_root)?;
+    inject_platform(selection, &project_root)?;
 
     // Self-check: the hooks just installed exec `ctl` from a separate process
     // (no shell). Warn now if that process would not resolve a runnable binary,
@@ -1376,7 +1472,7 @@ T6_architecture_mismatch = true
     // one prerequisite `ctl init` cannot check itself — that the plugin is
     // actually installed/linked (the hook only loads from an installed/linked
     // plugin; a marketplace install does not load it).
-    if matches!(platform, PlatformArg::Omp | PlatformArg::All) {
+    if selection.omp {
         // The OMP hook runs inside the omp process, whose env is fixed at
         // launch — pin CTL_BIN in the agent .env OMP merges at startup so
         // resolution stops depending on which shell launched omp.
@@ -1384,22 +1480,31 @@ T6_architecture_mismatch = true
         report_omp_integration(&project_root);
     }
 
-    println!("Control-plane active for {}.", platform_label(platform));
+    println!("Control-plane active for {}.", platform_label(selection));
+    println!("Next steps:");
+    println!("  1. Open your configured coding agent and describe the work.");
+    println!("  2. Inspect task state with `ctl board`.");
+    println!("  3. For a small scoped change, start with `ctl task quick --write-allow <path>`.");
     Ok(())
 }
 
-/// Human label for a platform selection (used in init output).
-fn platform_label(p: PlatformArg) -> &'static str {
-    match p {
-        PlatformArg::Claude => "Claude Code (.claude/)",
-        PlatformArg::Opencode => "opencode (.opencode/)",
-        PlatformArg::Omp => "OMP (.omp/)",
-        PlatformArg::All => "all platforms (.claude/ + .opencode/ + .omp/)",
+/// Human label for the selected platforms (used in init output).
+fn platform_label(selection: PlatformSelection) -> String {
+    let mut labels = Vec::new();
+    if selection.claude {
+        labels.push("Claude Code (.claude/)");
     }
+    if selection.opencode {
+        labels.push("opencode (.opencode/)");
+    }
+    if selection.omp {
+        labels.push("OMP (.omp/)");
+    }
+    labels.join(" + ")
 }
 
 /// Inject the integration files for the selected platform(s), reporting each.
-fn inject_platform(p: PlatformArg, project_root: &Path) -> Result<()> {
+fn inject_platform(selection: PlatformSelection, project_root: &Path) -> Result<()> {
     use crate::infrastructure::skills;
     let injected = |n: usize| -> String {
         if n > 0 {
@@ -1408,18 +1513,18 @@ fn inject_platform(p: PlatformArg, project_root: &Path) -> Result<()> {
             "already present".to_string()
         }
     };
-    if matches!(p, PlatformArg::Omp | PlatformArg::All) {
+    if selection.omp {
         let n = skills::inject_all(project_root)?;
         println!("  .omp/      {} (skills + hooks + settings)", injected(n));
     }
-    if matches!(p, PlatformArg::Claude | PlatformArg::All) {
+    if selection.claude {
         let n = skills::inject_claude(project_root)?;
         println!(
             "  .claude/   {} (hooks + settings + workflow skills)",
             injected(n)
         );
     }
-    if matches!(p, PlatformArg::Opencode | PlatformArg::All) {
+    if selection.opencode {
         let n = skills::inject_opencode(project_root)?;
         println!(
             "  .opencode/ {} (gate plugin + agents + skills)",
@@ -1881,28 +1986,59 @@ fn cmd_skills(command: &SkillsCommands) -> Result<()> {
     }
 }
 
-/// Interactive platform picker (only reached when stdin is a TTY).
-fn prompt_platform() -> Result<PlatformArg> {
+/// Interactive platform picker. Multiple entries may be separated by commas or spaces.
+fn prompt_platform(project_root: &Path) -> Result<PlatformSelection> {
     use std::io::Write as _;
-    println!("Select the agent platform to wire up:");
+
+    let detected = detected_platform_selection(project_root);
+    println!("Select one or more agent platforms to wire up:");
     println!("  1) claude    Claude Code  (.claude/)");
     println!("  2) opencode  opencode     (.opencode/)");
     println!("  3) omp       OMP          (.omp/)");
-    println!("  4) all       all of the above");
-    print!("Choice [1-4]: ");
+    println!("  4) all       all supported platforms");
+    if detected.any() {
+        println!(
+            "Detected existing integrations: {}",
+            platform_label(detected)
+        );
+    }
+    print!("Choice(s) [Enter keeps detected, or all on a fresh project]: ");
     std::io::stdout().flush().ok();
+
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    match line.trim().to_lowercase().as_str() {
-        "1" | "claude" => Ok(PlatformArg::Claude),
-        "2" | "opencode" => Ok(PlatformArg::Opencode),
-        "3" | "omp" => Ok(PlatformArg::Omp),
-        "4" | "all" => Ok(PlatformArg::All),
-        other => Err(anyhow::anyhow!(
-            "Unrecognized choice '{}'. Re-run and pick 1-4, or pass --platform <claude|opencode|omp|all>.",
-            other
-        )),
+    let input = line.trim();
+    if input.is_empty() {
+        return Ok(if detected.any() {
+            detected
+        } else {
+            PlatformSelection::all()
+        });
     }
+
+    let mut selection = PlatformSelection::default();
+    for token in input.split([',', ' ', ';']) {
+        let token = token.trim().to_lowercase();
+        if token.is_empty() {
+            continue;
+        }
+        match token.as_str() {
+            "1" | "claude" => selection.claude = true,
+            "2" | "opencode" => selection.opencode = true,
+            "3" | "omp" => selection.omp = true,
+            "4" | "all" => selection = PlatformSelection::all(),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unrecognized platform '{}'. Choose claude, opencode, omp, all, or 1-4.",
+                    other
+                ));
+            }
+        }
+    }
+    if !selection.any() {
+        return Err(anyhow::anyhow!("No platform selected."));
+    }
+    Ok(selection)
 }
 
 /// Resolve a task's gates: explicit `--gates` win; otherwise derive the project
@@ -7971,5 +8107,19 @@ mod tests {
         assert!(!is_cargo_target_build(Path::new(
             "/tools/targeted/debug/ctl"
         )));
+    }
+    #[test]
+    fn init_platform_selection_supports_multiple_platforms() {
+        let selection = super::resolve_platform_selection(
+            &[super::PlatformArg::Claude, super::PlatformArg::Opencode],
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(selection.claude);
+        assert!(selection.opencode);
+        assert!(!selection.omp);
     }
 }
