@@ -124,7 +124,13 @@ impl PathNormalizer {
         // requiring a human to bypass the boundary. The canonical ledger
         // (`.ctl/tasks`) is NOT carved out and stays protected.
         let s_fwd = s.replace('\\', "/");
-        for w in [".ctl/config.toml", ".ctl/workflow.md", ".ctl/scripts"] {
+        for w in [
+            ".ctl/config.toml",
+            ".ctl/workflow.md",
+            ".ctl/scripts",
+            ".ctl/spec",
+            ".ctl/handoffs",
+        ] {
             if s_fwd == w || s_fwd.starts_with(&format!("{w}/")) {
                 return false;
             }
@@ -416,6 +422,18 @@ mod tests {
             norm.normalize("src/link/file.txt").is_err(),
             "Symlink/Junction path must be rejected"
         );
+        cleanup(&dir);
+    }
+    #[test]
+    fn accept_non_canonical_workflow_artifacts() {
+        let dir = unique_dir();
+        std::fs::create_dir_all(dir.join(".ctl/spec/alignment")).unwrap();
+        std::fs::create_dir_all(dir.join(".ctl/spec/prd")).unwrap();
+        std::fs::create_dir_all(dir.join(".ctl/handoffs")).unwrap();
+        let norm = PathNormalizer::new(dir.clone());
+        assert!(norm.normalize_write(".ctl/spec/alignment/brief.md").is_ok());
+        assert!(norm.normalize_write(".ctl/spec/prd/plan.md").is_ok());
+        assert!(norm.normalize_write(".ctl/handoffs/task.md").is_ok());
         cleanup(&dir);
     }
 }
