@@ -1,5 +1,5 @@
 pub mod schedule;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2041,6 +2041,7 @@ impl ControlApp {
                 })
             })
             .collect();
+        let capture = self.read_handoff_capture(task_id)?;
 
         Ok(serde_json::json!({
             "schema": "control.handoff.v1",
@@ -2059,7 +2060,64 @@ impl ControlApp {
             "next_action": next_action,
             "uncommitted_in_scope": uncommitted,
             "recent_events": recent_events,
+            "capture": capture,
         }))
+    }
+
+    /// Read a captured, non-canonical handoff judgment if one exists.
+    fn read_handoff_capture(&self, task_id: &str) -> Result<Option<serde_json::Value>> {
+        let path = self
+            .project_root
+            .join(".ctl")
+            .join("handoffs")
+            .join(format!("{task_id}.json"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Invalid handoff capture {}: {e}", path.display()))?;
+        validate_handoff_capture(&value, task_id)?;
+        Ok(Some(value))
+    }
+
+    /// Persist explicit agent/human judgment beside, but outside, canonical task state.
+    pub fn capture_handoff(&self, task_id: &str, input_path: &Path) -> Result<serde_json::Value> {
+        self.replay_task(task_id)?;
+        let normalized = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        )
+        .normalize(&input_path.to_string_lossy())?;
+        let source_path = self.project_root.join(normalized);
+        let content = std::fs::read_to_string(&source_path)
+            .with_context(|| format!("reading handoff capture {}", source_path.display()))?;
+        let mut value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Invalid handoff capture input: {e}"))?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("Handoff capture input must be a JSON object"))?;
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!("control.handoff.capture.v1"),
+        );
+        object.insert("task_id".to_string(), serde_json::json!(task_id));
+        object.insert(
+            "source".to_string(),
+            serde_json::json!("agent_or_human_supplied"),
+        );
+        object.insert("captured_at".to_string(), serde_json::json!(now_iso8601()));
+        validate_handoff_capture(&value, task_id)?;
+
+        let dir = self.project_root.join(".ctl").join("handoffs");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{task_id}.json"));
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&value)?)?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        Ok(value)
     }
 
     /// Read-only GO / NO-GO safety evaluation for an unattended (ralph)
@@ -4534,6 +4592,34 @@ fn new_validator_if_available() -> Option<SchemaValidator> {
 /// Build the drift signals from a task's events, its reduced state, and its
 /// telemetry entries. Kept free-standing so both `collect_drift_signals` and
 /// the `control.json` board projection derive signals identically.
+fn validate_handoff_capture(value: &serde_json::Value, task_id: &str) -> Result<()> {
+    if value.get("schema").and_then(|v| v.as_str()) != Some("control.handoff.capture.v1") {
+        return Err(anyhow!(
+            "handoff capture schema must be control.handoff.capture.v1"
+        ));
+    }
+    if value.get("task_id").and_then(|v| v.as_str()) != Some(task_id) {
+        return Err(anyhow!(
+            "handoff capture task_id does not match '{task_id}'"
+        ));
+    }
+    if value.get("source").and_then(|v| v.as_str()) != Some("agent_or_human_supplied") {
+        return Err(anyhow!(
+            "handoff capture source must be agent_or_human_supplied"
+        ));
+    }
+    if value
+        .get("next_safe_action")
+        .and_then(|v| v.as_str())
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        return Err(anyhow!(
+            "handoff capture requires a non-empty next_safe_action"
+        ));
+    }
+    Ok(())
+}
+
 fn drift_signals_from(
     events: &[Event],
     state: &TaskState,
@@ -6587,6 +6673,34 @@ mod tests {
             before,
             "handoff export must not append events"
         );
+    }
+
+    #[test]
+    fn handoff_export_includes_captured_judgment() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_planning_task(&app, "t1");
+        app.mark_ready("t1").unwrap();
+        app.start_task("t1").unwrap();
+        let handoffs = dir.path().join(".ctl/handoffs");
+        std::fs::create_dir_all(&handoffs).unwrap();
+        std::fs::write(
+            handoffs.join("t1.json"),
+            r#"{
+                "schema": "control.handoff.capture.v1",
+                "task_id": "t1",
+                "source": "agent_or_human_supplied",
+                "next_safe_action": "run the required gate",
+                "decisions": ["keep the scope narrow"],
+                "uncertainties": ["reviewer availability"]
+            }"#,
+        )
+        .unwrap();
+
+        let h = app.handoff_export("t1").unwrap();
+        assert_eq!(h["capture"]["next_safe_action"], "run the required gate");
+        assert_eq!(h["capture"]["source"], "agent_or_human_supplied");
+        assert_eq!(h["capture"]["decisions"][0], "keep the scope narrow");
     }
 
     // ── ralph safety supervisor (ralph-safe-run-v1) ──

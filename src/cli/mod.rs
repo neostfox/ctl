@@ -944,6 +944,18 @@ enum HandoffCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Capture explicit agent/human judgment for the next session.
+    Capture {
+        /// Task identifier
+        #[arg(long)]
+        id: String,
+        /// JSON file containing decisions, uncertainties, hazards, and next_safe_action.
+        #[arg(long)]
+        file: String,
+        /// Print the captured artifact as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2971,6 +2983,20 @@ fn cmd_handoff(command: &HandoffCommands) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&h)?);
             } else {
                 render_handoff_human(&h);
+            }
+            Ok(())
+        }
+        HandoffCommands::Capture { id, file, json } => {
+            let app = app_open(false)?;
+            let capture = app.capture_handoff(id, Path::new(file))?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&capture)?);
+            } else {
+                println!(
+                    "Captured handoff judgment for '{}' at .ctl/handoffs/{}.json",
+                    id, id
+                );
+                println!("Next safe action: {}", capture["next_safe_action"]);
             }
             Ok(())
         }
