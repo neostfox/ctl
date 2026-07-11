@@ -69,11 +69,29 @@ enum Commands {
     Validate,
     /// Diagnose local task ledger health
     Doctor,
-    /// Update the ctl binary in place to the latest GitHub release (ADR 0002).
-    /// The only command that performs network I/O: it downloads and
-    /// sha256-verifies the release archive, then replaces the running binary.
+    /// Update ctl-managed project files. Use --merge for conflict-safe template sync.
+    /// Without --merge, this retains the legacy binary self-update behavior.
     Update {
-        /// Install a specific release tag (e.g. v0.0.6) instead of the latest.
+        /// Install a specific binary release tag (legacy self-update mode).
+        #[arg(long)]
+        version: Option<String>,
+        /// Report whether a newer binary exists (legacy self-update mode).
+        #[arg(long)]
+        check: bool,
+        /// Merge embedded workflow, hook, and skill templates into configured platforms.
+        #[arg(long)]
+        merge: bool,
+        /// Overwrite locally modified managed files in --merge mode.
+        #[arg(long)]
+        force: bool,
+        /// Leave locally modified managed files untouched in --merge mode.
+        #[arg(long)]
+        skip: bool,
+    },
+    /// Update the ctl binary in place to the latest GitHub release (ADR 0002).
+    /// This is the only command that performs network I/O.
+    SelfUpdate {
+        /// Install a specific release tag instead of the latest.
         #[arg(long)]
         version: Option<String>,
         /// Report whether a newer version exists without installing anything.
@@ -1323,7 +1341,35 @@ pub fn run() -> Result<()> {
         Commands::Reconcile => cmd_reconcile(),
         Commands::Validate => cmd_validate(),
         Commands::Doctor => cmd_doctor(),
-        Commands::Update { version, check } => {
+        Commands::Update {
+            version,
+            check,
+            merge,
+            force,
+            skip,
+        } => {
+            if !merge && (*force || *skip) {
+                return Err(anyhow::anyhow!(
+                    "ctl update --force/--skip require --merge; use `ctl self-update` for the binary."
+                ));
+            }
+            if *merge {
+                if version.is_some() || *check {
+                    return Err(anyhow::anyhow!(
+                        "ctl update --merge cannot be combined with --version or --check; use `ctl self-update` for the binary."
+                    ));
+                }
+                if *force && *skip {
+                    return Err(anyhow::anyhow!(
+                        "ctl update --merge --force and --skip are mutually exclusive."
+                    ));
+                }
+                cmd_project_update(*force, *skip, dry_run)
+            } else {
+                crate::infrastructure::self_update::run(version.clone(), *check)
+            }
+        }
+        Commands::SelfUpdate { version, check } => {
             crate::infrastructure::self_update::run(version.clone(), *check)
         }
         Commands::Repair {
@@ -1380,6 +1426,34 @@ pub fn run() -> Result<()> {
 
 fn app_open(dry_run: bool) -> Result<ControlApp> {
     ControlApp::open(&std::env::current_dir()?, dry_run)
+}
+
+fn cmd_project_update(force: bool, skip: bool, dry_run: bool) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let summary = crate::infrastructure::project_update::update_project(
+        &project_root,
+        crate::infrastructure::project_update::UpdateOptions {
+            force,
+            skip_conflicts: skip,
+            dry_run,
+        },
+    )?;
+    if dry_run {
+        println!("[dry-run] Project update preview:");
+    } else {
+        println!("Project update complete:");
+    }
+    println!(
+        "  added: {} · updated: {} · unchanged: {} · conflicts: {} · skipped: {}",
+        summary.added, summary.updated, summary.unchanged, summary.conflicts, summary.skipped
+    );
+    for file in summary.files {
+        println!("  {}  {}", file.action, file.path);
+    }
+    if summary.conflicts > 0 && !force && !skip {
+        println!("Conflicts were preserved; review `.new` files or rerun with --force/--skip.");
+    }
+    Ok(())
 }
 
 fn cmd_init(
@@ -1462,6 +1536,10 @@ T6_architecture_mismatch = true
 
     // Inject the chosen platform integration(s).
     inject_platform(selection, &project_root)?;
+    let tracked = crate::infrastructure::project_update::record_initial_manifest(&project_root)?;
+    if tracked > 0 {
+        println!("Recorded {} managed template baseline file(s).", tracked);
+    }
 
     // Self-check: the hooks just installed exec `ctl` from a separate process
     // (no shell). Warn now if that process would not resolve a runnable binary,
@@ -4802,6 +4880,7 @@ fn check_milestone_scope() -> Result<()> {
             "run",
             "schedule",
             "schema",
+            "self-update",
             "skills",
             "task",
             "telemetry",

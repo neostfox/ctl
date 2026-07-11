@@ -4,6 +4,8 @@ pub mod boundary;
 pub mod gates;
 #[allow(dead_code)]
 pub mod omp_plugin;
+#[allow(dead_code)]
+pub mod project_update;
 pub mod schema_validator;
 #[allow(dead_code)]
 pub mod self_update;
