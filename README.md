@@ -70,14 +70,14 @@ irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | 
 
 ```bash
 # bash
-curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.3 --dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.11 --dir ~/.local/bin
 # 或用环境变量
-CTL_VERSION=v0.0.3 CTL_INSTALL_DIR=~/.local/bin sh install.sh
+CTL_VERSION=v0.0.11 CTL_INSTALL_DIR=~/.local/bin sh install.sh
 ```
 
 ```powershell
 # PowerShell
-$env:CTL_VERSION="v0.0.3"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
+$env:CTL_VERSION="v0.0.11"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
 ```
 
 **从源码构建：**
@@ -92,11 +92,16 @@ cargo build --release        # 产物：target/release/ctl
 
 ### 2. 初始化
 
-在你的项目根目录：
+在你的项目根目录，选择你要接入的 AI 编码平台（可多选）：
 
 ```bash
-ctl init                     # 创建 .ctl/ 任务账本，注入治理 hook
+ctl init --claude --omp              # 配置 Claude Code + OMP
+ctl init --all --yes                 # 全部平台，跳过提示（适合脚本）
+ctl init                             # 交互式选择
 ```
+
+`ctl init` 会创建 `.ctl/` 任务账本、写入默认配置、注入所选平台的治理 hook/skill/settings，
+并打印下一步指引。
 
 ### 3. 跑一个受控任务
 
@@ -111,6 +116,23 @@ ctl gate run --id 06-14-fix-login --gate cargo_test   # 跑验收闸门，记录
 ctl task submit --id 06-14-fix-login
 ctl task finish --id 06-14-fix-login
 ctl task archive --id 06-14-fix-login
+```
+
+### 4. 查看任务看板
+
+```bash
+ctl board                            # 终端 Kanban（默认）
+ctl board --active                   # 只看未归档任务
+ctl board --table                    # 传统表格格式
+ctl board --json                     # 机器可读 JSON
+```
+
+### 5. 更新与升级
+
+```bash
+ctl update --merge                   # 同步项目内的 ctl 模板（安全合并，不改你的定制）
+ctl self-update                      # 升级 ctl 二进制
+ctl self-update --check              # 检查是否有新版本
 ```
 
 ---
@@ -184,27 +206,24 @@ proposal → approval → scoped lease → implement → audit_hold
 ## 命令一览
 
 ```text
-ctl init                              初始化 .ctl/ 账本与治理 hook
-ctl task create|ready|start|submit|finish|archive|status
-                                      任务生命周期
-ctl task quick --write-allow <p>      create+ready+start 一步到位（边界仍显式）
-ctl context build                     生成 implement / check 上下文 manifest
+ctl init [--claude] [--opencode] [--omp] [--all] [--yes]   多平台初始化
+ctl task create|ready|start|submit|finish|archive|status   任务生命周期
+ctl task quick --write-allow <p>      create+ready+start 一步到位
+ctl board [--kanban|--table] [--active] [--json]   Kanban 看板 / 表格 / JSON
+ctl update --merge [--force|--skip]   同步项目模板（安全合并）
+ctl self-update [--check]             升级 ctl 二进制
+ctl handoff export --id <id>          导出只读任务快照
+ctl handoff capture --id <id> --file <json>   持久化交接判断
 ctl gate run|record                   执行 / 记录验收闸门
-ctl assignment export                 导出结构化任务包（manual adapter）
-ctl run ingest                        回填执行结果为 evidence
 ctl boundary check                    校验某次写入是否越界
 ctl replay | reconcile | validate     重建投影 / 校验事件流
-ctl audit | report | board            审计报告 / 任务总览 / 跨任务控制板
-ctl architecture check                架构合规（依赖方向、domain 纯度）
-ctl doctor                            诊断账本健康（含跨账本一致性检测）
-ctl repair --task <id> [--apply]      截断崩溃残留的尾部坏记录（显式、先备份）
+ctl architecture check|review         架构合规
+ctl doctor                            诊断账本健康
 
 # 认识状态层（V1）：只记录与披露，从不门禁 / 评分 / 裁决
 ctl brainstorm record|attach-critic|skip-critic|show
-                                      记录任务的思考产物来源与挑战痕迹
 ctl uncertainty record|evidence|dispose|status
-                                      记录并披露任务携带的未知与其了结证据
-ctl research record|status            研究 / spike 任务：以证据 + 未知了结产出，而非代码
+ctl research record|status
 ```
 
 完整子命令见 `ctl --help`。

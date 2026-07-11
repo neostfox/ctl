@@ -6,7 +6,7 @@
 
 ## Overview
 
-The CLI layer uses `clap` derive macros to define the `control` command surface. It delegates all business logic to `application::ControlApp` and handles output formatting, error reporting, and exit codes.
+The CLI layer uses `clap` derive macros to define the `ctl` command surface. It delegates all business logic to `application::ControlApp` and handles output formatting, error reporting, and exit codes.
 
 ```
 src/cli/mod.rs → Cli struct, Commands enum, run() entry point
@@ -14,31 +14,33 @@ src/cli/mod.rs → Cli struct, Commands enum, run() entry point
 
 ---
 
-## Command Surface (M0–M1)
+## Command Surface (0.0.11+)
 
 ```text
-control init
-control task create --id <id> --objective <text> --read-scope <path>... --write-allow <path>... --gates <gate>...
-control task revise --id <id> [--objective <text>] [--read-scope <path>...] ...
-control task ready --id <id>
-control task status --id <id>
-control task cancel --id <id>
-control replay [--task <id>]
-control validate
-control doctor
-control schema validate --file <path>
-control boundary check --path <path>
-control boundary explain --path <path>
-control architecture check
+ctl init [--claude] [--opencode] [--omp] [--all] [--platform <name>] [--yes]
+ctl task create|quick|revise|ready|start|submit|reopen|finish|cancel|archive|status
+ctl board [--kanban|--table] [--active] [--include-archived] [--json]
+ctl update --merge [--force|--skip]
+ctl self-update [--version <tag>] [--check]
+ctl handoff export|capture
+ctl gate run|record
+ctl replay [--task <id>]
+ctl reconcile | validate | doctor
+ctl schema validate --file <path>
+ctl boundary check|explain|check-by-id
+ctl architecture check|review
 ```
+
+> The binary name is `ctl` (not `control`). The old `control` name was retired before 0.0.1.
 
 ### Architecture Guard
 
-`control architecture check` verifies:
-- Only M1 commands are exposed (no M2+ commands in M0 build)
+`ctl architecture check` verifies:
+- Dependency direction (cli → application → domain)
 - Schema contracts are valid
-- No `.control/events.jsonl` canonical store usage
-- Dependency direction is maintained
+- Module purity (domain has no I/O)
+- Command surface matches the expected subcommand list
+- State transitions, fixture/gate shape, baseline manifest
 
 ---
 
@@ -48,7 +50,7 @@ control architecture check
 
 ```rust
 #[derive(Parser)]
-#[command(name = "control")]
+#[command(name = "ctl")]
 #[command(about = "AI Dev Control Plane CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -65,30 +67,12 @@ Multi-value flags use `Vec<String>` with explicit long names:
 read_scope: Vec<String>,
 ```
 
-### Optional Flags
+### Multi-Platform Init
 
-```rust
-#[arg(long = "write-deny")]
-write_deny: Vec<String>,  // defaults to empty Vec
-```
-
----
-
-## Entry Point Pattern
-
-```rust
-pub fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Commands::Init => { /* ... */ },
-        Commands::Task { command } => { /* ... */ },
-        // ...
-    }
-    Ok(())
-}
-```
-
-**Important**: `run()` returns `anyhow::Result<()>`. The `main()` function calls `cli::run()` and lets the error propagate. `anyhow` error formatting goes to stderr.
+`ctl init` accepts repeated `--platform`, individual flags (`--claude`, `--opencode`,
+`--omp`, `--all`), and `--yes` for scripted onboarding. `PlatformSelection` resolves
+all sources into a struct of bools; `detected_platform_selection` inspects the project
+root for existing `.claude/`, `.opencode/`, `.omp/` directories.
 
 ---
 
@@ -98,68 +82,27 @@ pub fn run() -> anyhow::Result<()> {
 
 ```rust
 println!("Task '{}' created (Planning phase).", id);
-println!("Next: control task ready --id {}", id);
+println!("Next: ctl task ready --id {}", id);
 ```
 
-### Status Display
+### Kanban Board
 
-```rust
-println!("Task: {}", state.id);
-println!("Phase: {:?}", state.phase);
-println!("Objective: {}", state.objective.as_deref().unwrap_or("(none)"));
-println!("Read scope: {:?}", state.read_scope);
-println!("Gates: {:?}", state.gates);
-if state.is_held {
-    println!("Status: HELD");
-}
-```
+`ctl board` defaults to a terminal Kanban (phase columns: PLANNING / READY /
+IN PROGRESS / REVIEW / DONE). `--table` falls back to the legacy flat table.
+`--json` returns the same structured JSON (unchanged contract).
 
-### Error Output
+### Project Update
 
-Errors from `application` are caught and formatted:
-
-```rust
-if let Err(e) = app.create_task(&id, input) {
-    eprintln!("Error: {}", e);
-    std::process::exit(1);
-}
-```
+`ctl update --merge` syncs embedded workflow/hook/skill templates into configured
+platforms. User-modified files get a `.new` sibling by default (never overwritten);
+`--force` overwrites; `--skip` leaves them untouched. A baseline manifest
+(`.ctl/ctl-template-hashes.json`) tracks which files are ctl-owned.
 
 ---
 
 ## Project Root Discovery
 
-The CLI discovers the project root by walking up from `std::env::current_dir()` looking for `.ctl/`:
-
-```rust
-fn find_project_root() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join(".ctl").exists() {
-            return Some(dir);
-        }
-        if !dir.pop() { return None; }
-    }
-}
-```
-
----
-
-## Architecture Checks
-
-### Command Surface Whitelist
-
-The `architecture check` command verifies that only M1-allowed commands are exposed in the binary. This prevents accidental milestone-scope creep.
-
-### Schema Contract Verification
-
-- All schemas in `schemas/` are loadable.
-- No unknown `unevaluatedProperties` violations.
-
-### Store Path Verification
-
-- No code writes to `.control/events.jsonl`.
-- Canonical events only go to `.ctl/tasks/<id>/events.jsonl`.
+The CLI discovers the project root by walking up from `std::env::current_dir()` looking for `.ctl/`.
 
 ---
 
@@ -167,50 +110,18 @@ The `architecture check` command verifies that only M1-allowed commands are expo
 
 ### Mistake 1: Business Logic in CLI
 
-```rust
-// BAD: validation logic in CLI
-if objective.is_empty() {
-    eprintln!("Error: objective must not be empty");
-    return Ok(());
-}
-
-// GOOD: delegate to application layer
-if let Err(e) = app.create_task(&id, input) {
-    eprintln!("Error: {}", e);
-}
-```
+Delegate to the application layer; the CLI formats output and reads flags.
 
 ### Mistake 2: Missing Next-Step Hint
 
-Every successful mutating command should print a suggestion for the next command. Users should never wonder "what now?"
+Every successful mutating command should print a suggestion for the next command.
 
 ### Mistake 3: Hardcoded Paths
 
-```rust
-// BAD
-let root = Path::new("C:\\Users\\shaob\\project");
-
-// GOOD: discover from environment
-let root = find_project_root().expect("Not in a control project");
-```
-
-### Mistake 4: Panicking on User Input
-
-```rust
-// BAD
-let id = args.id.unwrap();
-
-// GOOD: clap handles required args; Optional args use if-let
-```
+Always discover from `std::env::current_dir()`, never hardcode.
 
 ### Gotcha: classify_bash reads prose, not just commands
 
-> **Warning**: `classify_bash` splits the WHOLE bash string on `; \n & | ( ) `` `
-> and classifies every segment — including text inside a `git commit -m "…"`
-> message. A message containing `(cargo install /` produces a segment starting
-> with `cargo install` → classified `cargo_deps` → the commit is denied for a
-> "dependency change" that is only prose (observed live, decisions.jsonl line
-> 90, 2026-07-05). Until the classifier learns to skip quoted arguments, keep
-> trigger phrases (`cargo install`, `git push`, `cargo add`) off segment starts
-> in commit messages — e.g. write "cargo-install". A fix should classify only
-> the first token-position of each segment's actual command, not quoted prose.
+> **Warning**: `classify_bash` strips quoted spans before segment-splitting (fixed in
+> 0.0.11). Keep trigger phrases (`cargo install`, `git push`) off segment starts in
+> commit messages as a defensive habit.

@@ -21,6 +21,8 @@ src/
     gates/          → GateTemplate registry + live gate runner (cargo_check/test/fmt/clippy)
     workspace/      → worktree isolation, diff/apply changesets (M4)
     skills/         → embedded skills/hooks injected by `ctl init`
+    project_update.rs → conflict-safe template sync (`ctl update --merge`)
+    self_update.rs    → binary self-updater (`ctl self-update`, network I/O)
     schema_validator.rs → JSON Schema validation against schemas/
   adapters/         → manual (M3), omp + opencode (M4) executor adapters
 ```
@@ -41,6 +43,7 @@ events.jsonl   = append-only canonical truth (per task, under .ctl/tasks/<id>/)
 telemetry.jsonl = append-only evidence index (cross-task, .ctl/; M5)
 task.json      = replay projection (delete and rebuild, never hand-edit)
 control.json   = reconcile projection — per-task board + M5 drift/next-action decision
+handoffs/      = non-canonical agent/human judgment (.ctl/handoffs/<id>.json)
 ```
 
 - External actors (agents, adapters, humans) CANNOT append canonical events directly.
@@ -49,7 +52,7 @@ control.json   = reconcile projection — per-task board + M5 drift/next-action 
 
 ## Milestone Gate
 
-Current scope (0.0.3): **M0–M6 shipped + hard review layer (M-a…M-g) + V1 cognitive layer**.
+Current scope (0.0.11): **M0–M6 shipped + hard review layer (M-a…M-g) + V1 cognitive layer**.
 
 | Milestone | Focus | Key Constraint |
 |-----------|-------|----------------|
@@ -76,7 +79,7 @@ code — it plans, governs, and ingests results; an external executor (OMP/openc
 2. **Reducer**: Pure function `apply(&mut TaskState, &Event)`. No side effects. State machine: `Planning → Ready → InProgress → Review → Completed` (plus `Cancelled`).
 3. **Hold**: Orthogonal to phase. Violation, gate failure, or human pause triggers hold. No `start`/`submit`/`finish` while held.
 4. **Gates**: Only predefined templates (Rust: `cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`; TypeScript/Node: `tsc_check`, `eslint_check`, `vitest_run`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
-5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md` and `.ctl/scripts`.
+5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md`, `.ctl/scripts`, `.ctl/spec`, and `.ctl/handoffs`.
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
 7. **Gate observe mode**: the host write gate (`ctl hook gate`) allows-and-records out-of-scope / task-less mutations and out-of-window commits/pushes to the non-canonical `.ctl/decisions.jsonl`, returning a model-visible `warning`; protected paths, deps step-up, held tasks, cross-task overlap, and multi-active ambiguity remain hard denies. See `.ctl/spec/prd/gate-observe-mode.md`.
 
@@ -106,7 +109,8 @@ tasks  → ctl-to-tasks          vertical, independently verifiable slices; each
                                declares scope, gates, AFK/HITL, blocking uncertainties
 TDD    → ctl-tdd-loop          one behavior, red→green (the `--tdd` / `tdd-red-green`
                                interlock proves it on the ledger)
-handoff→ ctl-handoff           compact context (builds on `ctl handoff export`)
+handoff→ ctl-handoff           compact context (builds on `ctl handoff export` +
+                               `ctl handoff capture`)
 ```
 
 These are **agent workflow disciplines**, not new governance. They do not prove
@@ -115,33 +119,31 @@ reviewer independence, and do not create L3 tamper evidence. The frameworks are
 placed, not floating: **First Principles** in grill, **Bayesian reasoning** in
 `ctl-diagnose`. External inspiration (Matt Pocock's skills; Trellis PR #335) is L0
 reference material — adapted, never vendored (see `.omp/skills/NOTICE.md`).
-Follow-ups deferred: a `ctl-architecture-review` skill (the `ctl architecture
-review` CLI already exists) and a diagnose-v2 skill.
 
 ## Commands (core subset — run `ctl --help` for the full surface)
 
-The full CLI spans task lifecycle, gates, context, assignment, run/workspace/approval (M4),
-schedule/agent-report (M6), telemetry/drift/next-action (M5), review/apply (hard gate), and the
-V1 layer (brainstorm/uncertainty/research/handoff/prd/ralph). Core entry points:
-
 ```text
-ctl init
+ctl init [--claude] [--opencode] [--omp] [--all] [--yes]  # multi-platform onboarding
 ctl task create --id <id> --objective <text> --read-scope <path> --write-allow <path> --gates <gate>
 ctl task quick --write-allow <path>          # fuse create+ready+start
 ctl task ready|start|submit|finish|archive --id <id>
 ctl gate run --id <id> --gate <template>
-ctl board [--json]                            # cross-task control board
+ctl board [--kanban|--table] [--active] [--include-archived] [--json]
+ctl update --merge [--force|--skip]           # sync project templates
+ctl self-update [--check]                     # upgrade binary
+ctl handoff export --id <id>                  # read-only task snapshot
+ctl handoff capture --id <id> --file <json>   # persist agent/human judgment
 ctl replay [--task <id>] | ctl validate | ctl doctor
 ctl schema validate --file <path>
 ctl boundary check|explain --path <path>
-ctl architecture check
+ctl architecture check|review
 ```
 
 ## Forbidden
 
 - Modifying `events.jsonl` entries in-place (append-only).
 - Writing `task.json` by hand or via agent.
-- Adding dependencies beyond: `clap`, `serde`/`serde_json`, `anyhow`, `sha2`, and `libc` (unix-only, for process-group signalling). (See DEP-001..DEP-004.)
+- Adding dependencies beyond: `clap`, `serde`/`serde_json`, `anyhow`, `sha2`, `libc` (unix-only), and `ureq` (self-update only, ADR 0002). (See DEP-001..DEP-004.)
 - Introducing `tokio`, `reqwest`, or any async runtime into the `ctl` core.
 - Skipping phase transitions (e.g., `Planning → InProgress` without `Ready`).
 
