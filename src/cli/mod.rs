@@ -168,6 +168,15 @@ enum Commands {
         /// Output as JSON (default is a human-readable table)
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Show the legacy table format instead of Kanban columns
+        #[arg(long, default_value_t = false)]
+        table: bool,
+        /// Show only active (non-archived) tasks
+        #[arg(long, default_value_t = false)]
+        active: bool,
+        /// Include archived tasks (hidden by default)
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
     },
     /// View the NON-CANONICAL gate-decision log (`.ctl/decisions.jsonl`):
     /// advisory records of blocked/flagged tool calls written by the host gate
@@ -1406,7 +1415,12 @@ pub fn run() -> Result<()> {
         Commands::Assignment { command } => cmd_assignment(command, dry_run),
         Commands::Audit { id } => cmd_audit(id),
         Commands::Report => cmd_report(),
-        Commands::Board { json } => cmd_board(*json),
+        Commands::Board {
+            json,
+            table,
+            active,
+            include_archived,
+        } => cmd_board(*json, *table, *active, *include_archived),
         Commands::Decisions { limit, json } => cmd_decisions(*limit, *json),
         Commands::Run { command } => cmd_run(command, dry_run),
         Commands::Workspace { command } => cmd_workspace(command, dry_run),
@@ -2700,7 +2714,7 @@ fn cmd_report() -> Result<()> {
     Ok(())
 }
 
-fn cmd_board(json: bool) -> Result<()> {
+fn cmd_board(json: bool, table: bool, active_only: bool, include_archived: bool) -> Result<()> {
     let app = app_open(false)?;
     let board = app.generate_board()?;
 
@@ -2710,16 +2724,150 @@ fn cmd_board(json: bool) -> Result<()> {
     }
 
     let empty = Vec::new();
-    let tasks = board
+    let all_tasks = board
         .get("tasks")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty);
-    if tasks.is_empty() {
+    if all_tasks.is_empty() {
         println!("No tasks found.");
         return Ok(());
     }
 
-    // Size the TASK column to the widest id (min 4 for the "TASK" header).
+    // Filter: --active hides archived; --include-archived overrides.
+    let tasks: Vec<&Value> = all_tasks
+        .iter()
+        .filter(|t| {
+            let archived = t.get("archived").and_then(|v| v.as_bool()).unwrap_or(false);
+            if active_only && archived {
+                return false;
+            }
+            if !include_archived && archived {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    if tasks.is_empty() {
+        println!("No tasks match the filter.");
+        return Ok(());
+    }
+
+    if table {
+        render_board_table(&tasks, &board);
+    } else {
+        render_board_kanban(&tasks);
+    }
+    Ok(())
+}
+
+/// Group tasks into Kanban columns by phase and render side by side.
+fn render_board_kanban(tasks: &[&Value]) {
+    // Column order mirrors the task lifecycle.
+    let columns = [
+        ("PLANNING", vec!["planning"]),
+        ("READY", vec!["ready"]),
+        ("IN PROGRESS", vec!["in_progress"]),
+        ("REVIEW", vec!["review"]),
+        ("DONE", vec!["completed", "cancelled"]),
+    ];
+
+    let phase_of = |t: &Value| -> String {
+        t.get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string()
+    };
+    let id_of = |t: &Value| -> String {
+        t.get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string()
+    };
+    let held_of = |t: &Value| -> bool { t.get("held").and_then(|v| v.as_bool()).unwrap_or(false) };
+
+    // Group tasks into columns.
+    let mut grouped: Vec<Vec<String>> = Vec::with_capacity(columns.len());
+    for (_, phases) in &columns {
+        grouped.push(
+            tasks
+                .iter()
+                .filter(|t| phases.contains(&phase_of(t).as_str()))
+                .map(|t| {
+                    let id = id_of(t);
+                    if held_of(t) {
+                        format!("{id} [HELD]")
+                    } else {
+                        id
+                    }
+                })
+                .collect(),
+        );
+    }
+
+    // Column width: max(header_len, widest_entry, 4) + 2 padding.
+    let widths: Vec<usize> = columns
+        .iter()
+        .zip(grouped.iter())
+        .map(|((label, _), entries)| {
+            let max_entry = entries.iter().map(|e| e.len()).max().unwrap_or(0);
+            label.len().max(max_entry).max(4) + 2
+        })
+        .collect();
+
+    // Header row.
+    let mut header = String::new();
+    for (i, ((label, _), w)) in columns.iter().zip(widths.iter()).enumerate() {
+        if i > 0 {
+            header.push_str("│ ");
+        }
+        header.push_str(&format!("{:<w$}", label, w = w - 2));
+    }
+    println!("{header}");
+
+    // Separator.
+    let mut sep = String::new();
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            sep.push_str("┼─");
+        }
+        sep.push_str(&"─".repeat(w.saturating_sub(2)));
+    }
+    println!("{sep}");
+
+    // Body rows.
+    let max_rows = grouped.iter().map(|c| c.len()).max().unwrap_or(0);
+    for row in 0..max_rows {
+        let mut line = String::new();
+        for (i, entries) in grouped.iter().enumerate() {
+            if i > 0 {
+                line.push_str("│ ");
+            }
+            let cell = entries.get(row).map(|s| s.as_str()).unwrap_or("");
+            line.push_str(&format!("{:<w$}", cell, w = widths[i] - 2));
+        }
+        println!("{line}");
+    }
+
+    // Summary line.
+    let total: usize = grouped.iter().map(|c| c.len()).sum();
+    let archived = tasks
+        .iter()
+        .filter(|t| t.get("archived").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    println!(
+        "\n{} task(s) shown{}",
+        total,
+        if archived > 0 {
+            format!(" · {archived} archived (hidden: use --include-archived)")
+        } else {
+            String::new()
+        }
+    );
+}
+
+/// Legacy table renderer (used with --table).
+fn render_board_table(tasks: &[&Value], board: &Value) {
     let id_w = tasks
         .iter()
         .filter_map(|t| t.get("task_id").and_then(|v| v.as_str()).map(str::len))
@@ -2764,7 +2912,6 @@ fn cmd_board(json: bool) -> Result<()> {
         g("completed"),
         g("archived"),
     );
-    Ok(())
 }
 
 fn cmd_telemetry(command: &TelemetryCommands, dry_run: bool) -> Result<()> {
