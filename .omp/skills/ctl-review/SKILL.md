@@ -55,6 +55,12 @@ Keep it tight — this is a gate on one change, not a full audit.
 
 Dispatched by control-guard before `ctl task submit` / `ctl task finish`.
 
+**Tier check (ceremony scheme 6):** read the task's `audit_tier` (`ctl task status
+--id <id>`). If `light`, run ONLY the closure checklist (step 3) — skip the
+R1-R6/T1-T6 decay scan (step 2) and the Health Score (step 4). Light still
+requires reviewer ≠ implementer and a hard verdict; it narrows rubric breadth,
+never independence. If `full` (default), run the complete audit below.
+
 1. Read the **whole task diff**: `git diff` (and `git diff --staged`) for the working tree.
 2. Apply R1-R6 + T1-T6 across every changed file.
 3. Run the **closure checklist** from `review-contract.md` — and this is non-negotiable:

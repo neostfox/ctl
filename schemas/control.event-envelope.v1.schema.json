@@ -278,6 +278,11 @@
                 "description": "Research/Spike V1: task kind. Optional; absent means implementation (legacy default). Fixed at creation, never revised.",
                 "type": "string",
                 "enum": ["implementation", "research"]
+              },
+              "audit_tier": {
+                "description": "Completion-audit depth (ceremony scheme 6). Optional; absent means full (legacy default). Fixed at creation.",
+                "type": "string",
+                "enum": ["full", "light"]
               }
             },
             "additionalProperties": false

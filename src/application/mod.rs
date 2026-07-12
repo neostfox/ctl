@@ -11,7 +11,7 @@ use crate::adapters::adapter_for;
 use crate::domain::event::Event;
 use crate::domain::lease::LeaseStatus;
 use crate::domain::run::{apply_run, AgentRunState, RunPhase};
-use crate::domain::task::{apply, Phase, TaskKind, TaskState};
+use crate::domain::task::{apply, AuditTier, Phase, TaskKind, TaskState};
 use crate::infrastructure::schema_validator::SchemaValidator;
 use crate::infrastructure::store::run_store::RunEventStore;
 use crate::infrastructure::store::FileEventStore;
@@ -314,7 +314,7 @@ impl ControlApp {
     // ── Commands ──
 
     pub fn create_task(&self, id: &str, input: CreateTaskInput<'_>) -> Result<Event> {
-        self.create_task_with_kind(id, input, TaskKind::Implementation)
+        self.create_task_with_kind(id, input, TaskKind::Implementation, AuditTier::Full)
     }
 
     /// Create a task with an explicit kind (Research/Spike V1). `create_task`
@@ -326,6 +326,7 @@ impl ControlApp {
         id: &str,
         input: CreateTaskInput<'_>,
         kind: TaskKind,
+        audit_tier: AuditTier,
     ) -> Result<Event> {
         let existing = self.store.read_for_task(id)?;
         if !existing.is_empty() {
@@ -353,6 +354,9 @@ impl ControlApp {
         }
         if kind != TaskKind::Implementation {
             payload["task_kind"] = serde_json::json!(kind.as_str());
+        }
+        if audit_tier != AuditTier::Full {
+            payload["audit_tier"] = serde_json::json!(audit_tier.as_str());
         }
         let event = self.build_event(id, "task_created", payload)?;
         self.validate_and_append(&event)?;
@@ -8814,6 +8818,7 @@ mod tests {
                 depends_on: &[],
             },
             TaskKind::Research,
+            AuditTier::Full,
         )
         .unwrap();
     }

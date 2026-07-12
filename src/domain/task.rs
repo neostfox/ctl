@@ -474,6 +474,28 @@ impl TaskKind {
     }
 }
 
+/// Completion-audit depth (ceremony scheme 6). `Full` (default) runs the complete
+/// decay rubric (R1–R6/T1–T6) + Health Score; `Light` runs only the closure
+/// checklist (build/test/lint evidence existence + protected-path + scope
+/// compliance), skipping the decay scan. Both are reviewer-isolated with a hard
+/// verdict — `Light` never relaxes reviewer independence, only rubric breadth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditTier {
+    #[default]
+    Full,
+    Light,
+}
+
+impl AuditTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuditTier::Full => "full",
+            AuditTier::Light => "light",
+        }
+    }
+}
+
 /// The kind of a produced research artifact. Fixed enum (no free string, no
 /// `other`): a free taxonomy invites labels that pretend to be meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +611,10 @@ pub struct TaskState {
     /// create, immutable. Defaults to `Implementation` for legacy/absent streams.
     #[serde(default)]
     pub task_kind: TaskKind,
+    /// Ceremony scheme 6: completion-audit depth. Default `Full`; `Light` for
+    /// small tasks skips the decay rubric. Set at creation, like task_kind.
+    #[serde(default)]
+    pub audit_tier: AuditTier,
     /// Research/Spike V1: tracked research artifacts this task produced, in
     /// record order. Default empty; absent in old streams, which replay unchanged.
     #[serde(default)]
@@ -621,6 +647,7 @@ impl TaskState {
             risk_triggers: BTreeSet::new(),
             gates: BTreeSet::new(),
             depends_on: BTreeSet::new(),
+            audit_tier: AuditTier::Full,
             gate_results: HashMap::new(),
             active_run: None,
             active_runs: Vec::new(),
@@ -791,6 +818,18 @@ fn decode_task_kind(payload: &serde_json::Value) -> Result<TaskKind, String> {
     }
 }
 
+/// Decode `audit_tier` from a `task_created` payload. Absent → `Full` (legacy
+/// default). Unknown value → rejected.
+fn decode_audit_tier(payload: &serde_json::Value) -> Result<AuditTier, String> {
+    match payload.get("audit_tier").and_then(|v| v.as_str()) {
+        None | Some("full") => Ok(AuditTier::Full),
+        Some("light") => Ok(AuditTier::Light),
+        Some(other) => Err(format!(
+            "task_created: unknown audit_tier '{other}' (full | light)"
+        )),
+    }
+}
+
 /// Decode the fixed `oracle_kind` enum. Required; unknown value → rejected (no
 /// free string, no `other`).
 fn decode_oracle_kind(payload: &serde_json::Value) -> Result<OracleKind, String> {
@@ -910,6 +949,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.depends_on = boundary.depends_on;
             // Research/Spike V1: kind is fixed at creation and never revised.
             state.task_kind = decode_task_kind(&event.payload)?;
+            state.audit_tier = decode_audit_tier(&event.payload)?;
         }
         "task_revised" => {
             if state.phase != Phase::Planning {

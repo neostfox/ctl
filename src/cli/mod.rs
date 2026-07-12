@@ -392,6 +392,14 @@ enum TaskKindArg {
     Research,
 }
 
+/// Completion-audit depth argument (ceremony scheme 6). `light` skips the decay
+/// rubric; default `full`.
+#[derive(Clone, Copy, ValueEnum)]
+enum AuditTierArg {
+    Full,
+    Light,
+}
+
 #[derive(Subcommand)]
 enum SkillsCommands {
     /// Generate every platform's SKILL.md from `.agent/skills/<skill>/source.md`
@@ -481,6 +489,15 @@ impl TaskKindArg {
         match self {
             TaskKindArg::Implementation => crate::domain::task::TaskKind::Implementation,
             TaskKindArg::Research => crate::domain::task::TaskKind::Research,
+        }
+    }
+}
+
+impl AuditTierArg {
+    fn to_domain(self) -> crate::domain::task::AuditTier {
+        match self {
+            AuditTierArg::Full => crate::domain::task::AuditTier::Full,
+            AuditTierArg::Light => crate::domain::task::AuditTier::Light,
         }
     }
 }
@@ -773,6 +790,10 @@ enum TaskCommands {
         /// Task kind: implementation (default) or research. Immutable after create.
         #[arg(long, value_enum, default_value_t = TaskKindArg::Implementation)]
         kind: TaskKindArg,
+        /// Completion-audit depth: `full` (default, full decay rubric) or `light`
+        /// (closure checklist only — reviewer-isolated, skips R1-R6/T1-T6).
+        #[arg(long = "audit-tier", value_enum, default_value_t = AuditTierArg::Full)]
+        audit_tier: AuditTierArg,
     },
     /// Fuse create + ready + start into one command with sensible defaults.
     /// Keeps the write boundary explicit (`--write-allow` required) but removes
@@ -2363,6 +2384,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             gates,
             depends_on,
             kind,
+            audit_tier,
         } => {
             // `--tdd` is sugar for adding the opt-in risk trigger.
             let mut triggers = risk_triggers.clone();
@@ -2389,6 +2411,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                     depends_on,
                 },
                 kind.to_domain(),
+                audit_tier.to_domain(),
             )?;
             println!(
                 "Created {} task '{}' at seq {}.",
@@ -4205,6 +4228,7 @@ fn print_task_state(
         "risk_triggers": state.risk_triggers,
         "gates": state.gates,
         "depends_on": state.depends_on,
+        "audit_tier": state.audit_tier,
         // M6: derived dependency-gating view — declared deps not yet Completed.
         // Display-only (this richer CLI JSON is already a superset of the frozen
         // persisted task-view); empty array means nothing blocks a start.
@@ -4234,6 +4258,9 @@ fn print_task_human(
     println!("Phase: {:?}", state.phase);
     if state.task_kind == crate::domain::task::TaskKind::Research {
         println!("Kind: research");
+    }
+    if state.audit_tier == crate::domain::task::AuditTier::Light {
+        println!("Audit tier: light");
     }
     if state.is_held {
         println!("HELD");
