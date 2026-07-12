@@ -5044,7 +5044,7 @@ fn boundary_explain(path_str: &str) -> Result<()> {
     ];
     for p in &protected {
         if path_str == *p || path_str.starts_with(&format!("{}/", p)) {
-            println!("  Rule PATH-003: protected path '{}' is rejected", p);
+            println!("  Rule PATH-003: path '{}' is protected — allowed in write_allow, but the runtime gate denies writes unless a `ctl apply` exception is granted", p);
         }
     }
 
@@ -6911,12 +6911,13 @@ fn is_spec_path(project_root: &Path, path: &str) -> bool {
 }
 /// Gate-side classification of a Write/Edit target path (observe mode).
 ///
-/// Unlike `PathNormalizer::normalize_write` — which validates task boundaries
-/// at create/revise time and requires an existing, canonicalizable parent —
+/// Unlike `PathNormalizer::normalize` (the structural boundary check run at
+/// create/revise time, which requires an existing, canonicalizable parent),
 /// this is a lexical check for the hook path: targets arrive absolute from the
-/// host and may name files that do not exist yet. Protection must be checked
-/// explicitly here because out-of-scope writes are now observed, not denied,
-/// so a protected path no longer falls into the generic scope deny.
+/// host and may name files that do not exist yet. Protection is checked
+/// explicitly here and stays a hard deny (unless a `ctl apply` exception is
+/// granted): create/revise no longer reject protected paths — they may be
+/// declared in write_allow — so this gate is the single enforcement point.
 enum WriteTarget {
     /// Inside the repo, not protected.
     InRepo,

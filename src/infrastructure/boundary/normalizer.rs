@@ -26,8 +26,10 @@ impl PathNormalizer {
     /// Normalize and validate a path against boundary rules.
     ///
     /// Rejects: absolute paths, `..`, UNC (`\\server\share`), drive prefixes,
-    /// symlinks, junctions, and root escapes. Does NOT check protected paths
-    /// (use `normalize_write` for write-scope validation).
+    /// symlinks, junctions, and root escapes. Does NOT enforce protected
+    /// paths — protection is the runtime gate's job (`is_protected`); a
+    /// protected path may be declared in write_allow and still requires a
+    /// `ctl apply` exception before it can be written.
     pub fn normalize(&self, path_str: &str) -> Result<PathBuf> {
         // Reject Windows UNC paths explicitly before component parsing
         if path_str.starts_with("\\\\") || path_str.starts_with("//") {
@@ -95,17 +97,6 @@ impl PathNormalizer {
             return Err(anyhow!("Path escapes root directory: {}", path_str));
         }
 
-        Ok(normalized)
-    }
-
-    /// Normalize and validate a path for write operations.
-    ///
-    /// Performs all `normalize()` checks plus protected-path enforcement.
-    pub fn normalize_write(&self, path_str: &str) -> Result<PathBuf> {
-        let normalized = self.normalize(path_str)?;
-        if self.is_protected(&normalized) {
-            return Err(anyhow!("Write path is protected: {}", normalized.display()));
-        }
         Ok(normalized)
     }
 
@@ -229,90 +220,67 @@ mod tests {
         assert!(norm.normalize("src\\main.rs").is_ok());
         cleanup(&dir);
     }
-    // ---- Protected path tests (write paths) ----
+    // ---- Protected-path classification ----
+    // Protection is enforced once, at the runtime gate (`classify_write_target`
+    // → `is_protected`). Task create/revise no longer reject protected paths;
+    // they may be declared in write_allow and require a `ctl apply` exception
+    // at write time. These tests pin the protected set the gate relies on, and
+    // the carve-outs that stay AI-writable.
     #[test]
-    fn reject_protected_git_root() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write(".git").is_err());
-    }
-    #[test]
-    fn reject_protected_git_nested() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write(".git/config").is_err());
-    }
-    #[test]
-    fn reject_protected_trellis() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write(".ctl/control/events.jsonl").is_err());
-    }
-    #[test]
-    fn reject_canonical_task_events_path() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm
-            .normalize_write(".ctl/tasks/example-task/events.jsonl")
-            .is_err());
-    }
-    #[test]
-    fn reject_protected_control_events() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write(".control/events.jsonl").is_err());
-    }
-    #[test]
-    fn reject_protected_schemas() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write("schemas/foo.json").is_err());
-    }
-    #[test]
-    fn reject_protected_cargo_toml() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write("Cargo.toml").is_err());
-    }
-    #[test]
-    fn reject_protected_cargo_lock() {
-        let root = PathBuf::from(".");
-        let norm = PathNormalizer::new(root);
-        assert!(norm.normalize_write("Cargo.lock").is_err());
-    }
-    #[test]
-    fn accept_carveout_ctl_workflow_md() {
-        // Carved out of .ctl protection — the workflow doc is AI-writable config.
-        // Use a temp root that actually contains `.ctl/`: `normalize` canonicalizes
-        // the parent dir, and `.ctl/` is gitignored (absent on a fresh checkout),
-        // so a root of "." only works where ctl has already run.
-        let dir = unique_dir();
-        let norm = PathNormalizer::new(dir.clone());
-        assert!(norm.normalize_write(".ctl/workflow.md").is_ok());
-        cleanup(&dir);
-    }
-    #[test]
-    fn accept_carveout_ctl_scripts() {
-        let dir = unique_dir();
-        let norm = PathNormalizer::new(dir.clone());
-        assert!(norm.normalize_write(".ctl/scripts").is_ok());
-        cleanup(&dir);
-    }
-    #[test]
-    fn accept_carveout_ctl_config_toml() {
-        // Carved out of .ctl protection — the project config (incl. the
-        // [project].default_gates floor) is AI-writable control-plane config,
-        // so /ctl-spec-bootstrap can record the floor under governance.
-        let dir = unique_dir();
-        let norm = PathNormalizer::new(dir.clone());
-        assert!(norm.normalize_write(".ctl/config.toml").is_ok());
-        cleanup(&dir);
-    }
-    #[test]
-    fn ctl_tasks_still_protected_after_carveout() {
-        // The carve-out must not widen to the canonical ledger.
+    fn is_protected_canonical_ledgers_and_manifests() {
         let norm = PathNormalizer::new(PathBuf::from("."));
-        assert!(norm.normalize_write(".ctl/tasks/foo/events.jsonl").is_err());
+        for p in [
+            ".git",
+            ".git/config",
+            ".git/objects/ab/cdef",
+            ".ctl",
+            ".ctl/control/events.jsonl",
+            ".ctl/tasks",
+            ".ctl/tasks/example-task/events.jsonl",
+            ".control",
+            ".control/events.jsonl",
+            "schemas",
+            "schemas/foo.json",
+            "Cargo.toml",
+            "Cargo.lock",
+        ] {
+            assert!(
+                norm.is_protected(&PathBuf::from(p)),
+                "{p} must be protected"
+            );
+        }
+    }
+
+    #[test]
+    fn is_protected_carveouts_are_writable() {
+        // Carved out of the blanket `.ctl` protection: AI-writable control-
+        // plane config. The canonical ledger (`.ctl/tasks`) is NOT carved out.
+        let norm = PathNormalizer::new(PathBuf::from("."));
+        for p in [
+            ".ctl/config.toml",
+            ".ctl/workflow.md",
+            ".ctl/scripts",
+            ".ctl/spec",
+            ".ctl/spec/alignment/brief.md",
+            ".ctl/spec/prd/plan.md",
+            ".ctl/handoffs",
+            ".ctl/handoffs/task.md",
+        ] {
+            assert!(
+                !norm.is_protected(&PathBuf::from(p)),
+                "{p} must NOT be protected (carve-out)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_protected_separator_bound_and_case_insensitive() {
+        // Lower-cased, and separator-boundary: ".git" must not match
+        // "gitignored"; "schemas" must not match "schemas-backup".
+        let norm = PathNormalizer::new(PathBuf::from("."));
+        assert!(norm.is_protected(&PathBuf::from("CARGO.TOML")));
+        assert!(!norm.is_protected(&PathBuf::from("gitignored/foo")));
+        assert!(!norm.is_protected(&PathBuf::from("schemas-backup/x.json")));
     }
     #[test]
     fn accept_protected_paths_for_read() {
@@ -431,9 +399,9 @@ mod tests {
         std::fs::create_dir_all(dir.join(".ctl/spec/prd")).unwrap();
         std::fs::create_dir_all(dir.join(".ctl/handoffs")).unwrap();
         let norm = PathNormalizer::new(dir.clone());
-        assert!(norm.normalize_write(".ctl/spec/alignment/brief.md").is_ok());
-        assert!(norm.normalize_write(".ctl/spec/prd/plan.md").is_ok());
-        assert!(norm.normalize_write(".ctl/handoffs/task.md").is_ok());
+        assert!(norm.normalize(".ctl/spec/alignment/brief.md").is_ok());
+        assert!(norm.normalize(".ctl/spec/prd/plan.md").is_ok());
+        assert!(norm.normalize(".ctl/handoffs/task.md").is_ok());
         cleanup(&dir);
     }
 }

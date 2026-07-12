@@ -333,9 +333,9 @@ impl ControlApp {
             return Err(anyhow!("Task '{}' already exists", id));
         }
 
-        let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope, false)?;
-        let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow, true)?;
-        let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny, true)?;
+        let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope)?;
+        let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow)?;
+        let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny)?;
         let gates = validate_gate_templates(input.gates)?;
         validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
 
@@ -381,15 +381,15 @@ impl ControlApp {
             .or_else(|| state.objective.clone())
             .unwrap_or_default();
         let read_scope = match input.read_scope {
-            Some(paths) => self.normalize_boundary_paths("read_scope", paths, false)?,
+            Some(paths) => self.normalize_boundary_paths("read_scope", paths)?,
             None => state.read_scope.iter().cloned().collect(),
         };
         let write_allow = match input.write_allow {
-            Some(paths) => self.normalize_boundary_paths("write_allow", paths, true)?,
+            Some(paths) => self.normalize_boundary_paths("write_allow", paths)?,
             None => state.write_allow.iter().cloned().collect(),
         };
         let write_deny = match input.write_deny {
-            Some(paths) => self.normalize_boundary_paths("write_deny", paths, true)?,
+            Some(paths) => self.normalize_boundary_paths("write_deny", paths)?,
             None => state.write_deny.iter().cloned().collect(),
         };
         let risk_triggers = input
@@ -1219,15 +1219,28 @@ impl ControlApp {
         );
 
         for task in &doc.tasks {
-            // Boundary normalization catches path escape, protected paths,
-            // symlinks/junctions/UNC. Check each path so one bad path doesn't
-            // hide the rest.
+            // Structural boundary check: path escape, symlinks/junctions/UNC.
+            // Protected paths are NOT errors here (they mirror create/revise:
+            // a protected path may be declared in write_allow) — but a write to
+            // one still requires a `ctl apply` exception at the runtime gate, so
+            // surface it as a non-blocking warning (record-and-disclose).
             for path in &task.write_allow {
-                if let Err(e) = normalizer.normalize(path) {
-                    v.error(
+                match normalizer.normalize(path) {
+                    Ok(normalized) => {
+                        if normalizer.is_protected(&normalized) {
+                            v.warning(
+                                Some(&task.id),
+                                format!(
+                                    "write-allow path '{}' is protected — the runtime gate requires a reviewed `ctl apply` exception before it can be written",
+                                    path
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => v.error(
                         Some(&task.id),
                         format!("write-allow path '{}': {}", path, e),
-                    );
+                    ),
                 }
             }
             for path in &task.read_scope {
@@ -3126,24 +3139,27 @@ impl ControlApp {
         })
     }
 
-    fn normalize_boundary_paths(
-        &self,
-        field: &str,
-        paths: &[String],
-        write: bool,
-    ) -> Result<Vec<String>> {
+    /// Normalize boundary-scope paths (read_scope / write_allow / write_deny)
+    /// against structural boundary rules: rejects escape (`..`), absolute,
+    /// UNC, drive prefixes, symlinks/junctions, and root escapes.
+    ///
+    /// Protected paths are NOT rejected here. Protection is enforced once, at
+    /// the runtime gate (`classify_write_target` → `is_protected`): a protected
+    /// path declared in write_allow is accepted at create/revise but still
+    /// requires a `ctl apply` exception before it can actually be written. This
+    /// converges protected handling with gate-observe-mode — the create-time
+    /// reject was a redundant early-deny that blocked governed work on
+    /// protected paths (Cargo.toml, schemas, ledgers).
+    fn normalize_boundary_paths(&self, field: &str, paths: &[String]) -> Result<Vec<String>> {
         let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
             self.project_root.clone(),
         );
         let mut normalized = Vec::with_capacity(paths.len());
         for path in paths {
-            let path = if write {
-                normalizer.normalize_write(path)
-            } else {
-                normalizer.normalize(path)
-            }
-            .map_err(|e| anyhow!("Invalid {} path '{}': {}", field, path, e))?;
-            normalized.push(path_to_payload_string(&path));
+            let np = normalizer
+                .normalize(path)
+                .map_err(|e| anyhow!("Invalid {} path '{}': {}", field, path, e))?;
+            normalized.push(path_to_payload_string(&np));
         }
         Ok(normalized)
     }
@@ -5764,6 +5780,72 @@ mod tests {
             .exists());
         assert!(dir.path().join(".ctl/tasks/ledger-task/task.json").exists());
         assert!(!dir.path().join(".control").join("events.jsonl").exists());
+    }
+    #[test]
+    fn create_task_accepts_protected_path_in_write_allow() {
+        // converge-protected-proposal: a protected path may be DECLARED in
+        // write_allow at create time. Protection is enforced once, at the
+        // runtime gate (deny unless a `ctl apply` exception is granted) — not
+        // duplicated as a create-time reject. This unblocks governed tasks that
+        // legitimately touch Cargo.toml / schemas / the ledgers.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let write_allow = vec!["src".to_string(), "Cargo.toml".to_string()];
+        app.create_task(
+            "protected-scope",
+            CreateTaskInput {
+                objective: "touch a protected manifest",
+                read_scope: &["src".to_string()],
+                write_allow: &write_allow,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+
+        let state = app.replay_task("protected-scope").unwrap();
+        let expected: std::collections::BTreeSet<String> = write_allow.iter().cloned().collect();
+        assert_eq!(state.write_allow, expected);
+    }
+
+    #[test]
+    fn revise_task_accepts_protected_path_in_write_allow() {
+        // revise_task runs in Planning; widening write_allow to a protected
+        // path must also succeed for the same reason as create.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        app.create_task(
+            "t",
+            CreateTaskInput {
+                objective: "x",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        let widened = vec!["src".to_string(), "Cargo.toml".to_string()];
+        app.revise_task(
+            "t",
+            ReviseTaskInput {
+                objective: None,
+                read_scope: None,
+                write_allow: Some(&widened),
+                write_deny: None,
+                risk_triggers: None,
+                gates: None,
+                depends_on: None,
+            },
+        )
+        .unwrap();
+        let state = app.replay_task("t").unwrap();
+        let expected: std::collections::BTreeSet<String> = widened.iter().cloned().collect();
+        assert_eq!(state.write_allow, expected);
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -9123,6 +9205,29 @@ mod tests {
                 .any(|p| p.message.contains("Unknown gate")),
             "{:?}",
             v.errors()
+        );
+    }
+    #[test]
+    fn prd_validate_warns_on_protected_write_allow() {
+        // A protected path declared in write_allow is allowed (mirrors create/
+        // revise) but surfaced as a non-blocking warning: the runtime gate
+        // still requires a `ctl apply` exception before the path can be written.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = CONFIRMED_PRD.replace("src/config.rs", "Cargo.toml");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        let v = app.prd_validate(&doc).unwrap();
+        assert!(
+            v.ok(),
+            "protected write_allow must not be an error: {:?}",
+            v.errors()
+        );
+        assert!(
+            v.warnings()
+                .iter()
+                .any(|p| { p.message.contains("protected") && p.message.contains("Cargo.toml") }),
+            "expected a protected-path warning for Cargo.toml: {:?}",
+            v.warnings()
         );
     }
 
