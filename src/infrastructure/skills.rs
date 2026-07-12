@@ -594,6 +594,10 @@ pub const WORKFLOW_CANONICAL_PROTOCOL_PATH: &str = ".agent/protocols/workflow-sk
 
 const WORKFLOW_CORE_START_PREFIX: &str = "<!-- ctl:workflow-core:start version=";
 const WORKFLOW_CORE_END_MARKER: &str = "<!-- ctl:workflow-core:end -->";
+/// Marker splitting the canonical workflow core into the embedded part (before)
+/// and the reference-only part (phase map / frameworks / provenance, after).
+/// Mirrors `skill_sync::REFERENCE_MARKER`.
+pub const WORKFLOW_CORE_REFERENCE_MARKER: &str = "<!-- ctl:workflow-core-reference:start -->";
 
 /// One workflow skill file carrying the managed workflow-core block.
 pub struct WorkflowSkill {
@@ -1107,7 +1111,7 @@ mod control_guard_protocol_sync {
 mod workflow_protocol_sync {
     use super::{
         all_embedded_files, extract_workflow_core, normalize_protocol, workflow_phase_body,
-        workflow_skills, WORKFLOW_CANONICAL_PROTOCOL_PATH,
+        workflow_skills, WORKFLOW_CANONICAL_PROTOCOL_PATH, WORKFLOW_CORE_REFERENCE_MARKER,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1176,7 +1180,13 @@ mod workflow_protocol_sync {
     /// canonically. Editing the canonical without re-syncing a skill fails here.
     #[test]
     fn managed_core_identical_across_canonical_and_all_skills() {
-        let canonical = normalize_protocol(&read(WORKFLOW_CANONICAL_PROTOCOL_PATH));
+        let canonical_raw = read(WORKFLOW_CANONICAL_PROTOCOL_PATH);
+        let canonical = normalize_protocol(
+            canonical_raw
+                .split_once(WORKFLOW_CORE_REFERENCE_MARKER)
+                .map(|(embedded, _)| embedded)
+                .unwrap_or_else(|| panic!("canonical missing reference marker")),
+        );
         let mut prev_version: Option<String> = None;
         for ws in workflow_skills() {
             let skill = read(ws.path);

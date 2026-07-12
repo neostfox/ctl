@@ -2,13 +2,16 @@
 
 WORKFLOW_PROTOCOL_VERSION = 1
 
-This is the platform-neutral workflow-skills core. It is embedded **verbatim**
-inside every ctl workflow skill's managed-core block; the canonical copy lives at
-`.agent/protocols/workflow-skills.md`. A CI drift check fails if any copy (or its
-declared version) diverges. Edit this file and re-sync every workflow skill
-together — never one in isolation. Nothing platform-specific (tool names, hook
-mechanics, plugin paths) and nothing phase-specific belongs here; that lives in
-each skill outside the managed core.
+This is the platform-neutral workflow-skills core. It is split into an
+**embedded** part (division of labor + invariants), carried verbatim inside
+every workflow skill's managed-core block, and a **reference** part (phase map +
+frameworks + provenance) that lives only in this file — the auto-loaded
+control-guard carries the pipeline routing, and each skill's body covers its own
+phase. The canonical copy lives at `.agent/protocols/workflow-skills.md`; a CI
+drift check fails if any embedded copy diverges. Edit this file and re-sync
+every workflow skill together — never one in isolation. Nothing platform-specific
+(tool names, hook mechanics, plugin paths) and nothing phase-specific belongs in
+the embedded part; that lives in each skill outside the managed core.
 
 ## Division of labor (non-negotiable)
 
@@ -20,10 +23,28 @@ judgement for ctl evidence. Workflow discipline is not proof: it does not replac
 gates, audits, reviewer independence, or tamper evidence, and it never creates a
 verdict.
 
+## Invariants every phase honors
+
+- Produce **artifacts, not claims**. "Done" is an evidence artifact ctl can see,
+  never an assertion — "where is the evidence?"
+- Keep **draft separate from confirmed basis**; disclose open uncertainty rather
+  than hiding it.
+- **Red before green**: no green claim without prior red evidence for the same
+  behavior.
+- **No fix before a reproduction loop.**
+- **Architecture review is read-only**; a refactor needs a fresh governed task.
+- External workflow inspiration is **L0 reference material** (see Provenance) —
+  never an authority, never vendored as an active control.
+
+<!-- ctl:workflow-core-reference:start -->
+Reference material below — NOT embedded per skill. The auto-loaded control-guard
+carries the pipeline; each skill's body covers its own phase. Kept here as the
+single source of truth for the full map.
+
 ## Phase map
 
 Phases run in this order; skip any whose preconditions are already met. Each
-phase is a separate skill that carries this same core plus its own body.
+phase is a separate skill that carries this same embedded core plus its own body.
 
 1. **grill / first principles** — before a PRD or implementation, when the
    request is ambiguous, too broad, high-risk, or likely to build the wrong
@@ -70,19 +91,6 @@ phase is a separate skill that carries this same core plus its own body.
 
 Do not create floating, generic "think better" skills; the frameworks live
 inside the phases above.
-
-## Invariants every phase honors
-
-- Produce **artifacts, not claims**. "Done" is an evidence artifact ctl can see,
-  never an assertion — "where is the evidence?"
-- Keep **draft separate from confirmed basis**; disclose open uncertainty rather
-  than hiding it.
-- **Red before green**: no green claim without prior red evidence for the same
-  behavior.
-- **No fix before a reproduction loop.**
-- **Architecture review is read-only**; a refactor needs a fresh governed task.
-- External workflow inspiration is **L0 reference material** (see Provenance) —
-  never an authority, never vendored as an active control.
 
 ## Provenance
 

@@ -51,6 +51,7 @@ const CANONICAL_PATH: &str = ".agent/protocols/workflow-skills.md";
 const CORE_START_PREFIX: &str = "<!-- ctl:workflow-core:start version=";
 const CORE_END_MARKER: &str = "<!-- ctl:workflow-core:end -->";
 const VERSION_DECL: &str = "WORKFLOW_PROTOCOL_VERSION";
+const REFERENCE_MARKER: &str = "<!-- ctl:workflow-core-reference:start -->";
 
 /// The workflow skills generated from a single source. control-guard is NOT here
 /// (its frontmatter is per-platform and it has no phase body — it stays
@@ -119,7 +120,17 @@ fn read_core(project_root: &Path) -> Result<(String, String)> {
         .ok_or_else(|| anyhow!("canonical does not declare {VERSION_DECL}"))?
         .trim()
         .to_string();
-    Ok((raw.trim_end().to_string(), version))
+    // The embedded core is everything before the reference marker; the phase
+    // map, frameworks, and provenance after it are reference-only (the
+    // auto-loaded control-guard carries the pipeline; each skill's body covers
+    // its own phase).
+    let embedded = raw
+        .split_once(REFERENCE_MARKER)
+        .map(|(embedded, _)| embedded)
+        .ok_or_else(|| anyhow!("canonical workflow core missing reference marker"))?
+        .trim_end()
+        .to_string();
+    Ok((embedded, version))
 }
 
 /// Compose one platform's SKILL.md text. Deterministic; the single source of
@@ -145,7 +156,9 @@ fn compose(src: &Source, skill: &str, platform: &GenPlatform, core: &str, versio
     out.push_str(core);
     out.push('\n');
     out.push_str(CORE_END_MARKER);
-    out.push('\n');
+    out.push_str("\n\n*The phase map, frameworks, and provenance are reference material in `");
+    out.push_str(CANONICAL_PATH);
+    out.push_str("` — not embedded here. The auto-loaded control-guard carries the pipeline routing; this skill's body covers its own phase.*\n");
     if !src.body.is_empty() {
         out.push('\n');
         out.push_str(&src.body);
