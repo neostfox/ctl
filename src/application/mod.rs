@@ -588,13 +588,58 @@ impl ControlApp {
         }
         if !tree_stale.is_empty() || !policy_stale.is_empty() {
             let tcur = current_tree.as_deref().unwrap_or("n/a (non-git)");
+            let scope: Vec<String> = state.write_allow.iter().cloned().collect();
+            let hint = match current_tree.as_deref() {
+                Some(cur) => {
+                    // A stale gate with no recorded tree (legacy unbound) is
+                    // incomputable — finish counts it stale, but it cannot be
+                    // diffed, so suppress the no-rework hint for the whole set.
+                    let has_unbound = tree_stale
+                        .iter()
+                        .filter_map(|g| state.gate_results.get(*g))
+                        .any(|r| r.tree_hash.is_none());
+                    let evidence_trees: Vec<&str> = tree_stale
+                        .iter()
+                        .filter_map(|g| state.gate_results.get(*g))
+                        .filter_map(|r| r.tree_hash.as_deref())
+                        .filter(|et| *et != cur)
+                        .collect();
+                    if evidence_trees.is_empty() {
+                        String::new()
+                    } else {
+                        let mut all_changes: Vec<String> = Vec::new();
+                        let mut all_computed = !has_unbound;
+                        for et in &evidence_trees {
+                            match crate::infrastructure::workspace::scoped_tree_diff(
+                                &self.project_root,
+                                et,
+                                cur,
+                                &scope,
+                            ) {
+                                Some(c) => all_changes.extend(c),
+                                None => all_computed = false,
+                            }
+                        }
+                        all_changes.sort();
+                        all_changes.dedup();
+                        if !all_computed {
+                            String::new()
+                        } else if all_changes.is_empty() {
+                            "\n  write-scope unchanged across all stale gate evidence trees: rerun gates + re-audit under HEAD (no rework)".to_string()
+                        } else {
+                            format!("\n  write-scope changed since stale evidence: {all_changes:?} — rework, then rerun gates + re-audit")
+                        }
+                    }
+                }
+                None => String::new(),
+            };
             return Err(anyhow!(
                 "Completion interlock: completion evidence is stale.\n\
                  current tree:        {tcur}\n\
                  current policy:      {current_policy}\n\
                  tree-stale gate(s):  {tree_stale:?}\n\
                  policy-stale gate(s): {policy_stale:?}\n\
-                 rerun required gates (and re-audit) under the current code and policy"
+                 canonical order: submit → commit → gate run → review accept → finish{hint}"
             ));
         }
 
@@ -718,9 +763,22 @@ impl ControlApp {
                     stale.push("policy");
                 }
                 if !stale.is_empty() {
+                    let scope: Vec<String> = state.write_allow.iter().cloned().collect();
+                    let audit_tree = e.payload.get("tree_hash").and_then(|v| v.as_str());
+                    let hint = match (audit_tree, current_tree.as_deref()) {
+                        (Some(et), Some(cur)) if et != cur => {
+                            match crate::infrastructure::workspace::scoped_tree_diff(&self.project_root, et, cur, &scope) {
+                                Some(c) if c.is_empty() => format!("\n  write-scope unchanged since audit tree {et}: re-audit under HEAD (no rework)"),
+                                Some(c) => format!("\n  write-scope changed since audit tree {et}: {c:?} — rework, then re-audit"),
+                                None => String::new(),
+                            }
+                        }
+                        _ => String::new(),
+                    };
                     return Err(anyhow!(
                         "Completion interlock: completion audit is stale ({}); \
-                         re-audit under the current code and policy before finishing",
+                         re-audit under the current code and policy before finishing.{hint}\n\
+                         canonical order: submit → commit → gate run → review accept → finish",
                         stale.join(" + ")
                     ));
                 }

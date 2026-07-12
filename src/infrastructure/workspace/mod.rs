@@ -354,6 +354,40 @@ pub fn head_tree_hash(project_root: &Path) -> Result<Option<String>> {
     Ok(Some(hash))
 }
 
+/// Files changed within `scope` between two tree hashes (`git diff --name-only
+/// from..to -- scope`). `None` outside a git repo or on git failure (degrade
+/// gracefully); `Some(vec)` where empty = no scoped changes (stale is pure
+/// tree-binding drift, not a content change). Turns a bare "evidence is stale"
+/// finish error into an actionable hint (ceremony scheme 7).
+pub fn scoped_tree_diff(
+    project_root: &Path,
+    from_tree: &str,
+    to_tree: &str,
+    scope: &[String],
+) -> Option<Vec<String>> {
+    let mut args: Vec<String> = vec!["diff".into(), "--name-only".into()];
+    args.push(format!("{from_tree}..{to_tree}"));
+    if !scope.is_empty() {
+        args.push("--".into());
+        args.extend(scope.iter().cloned());
+    }
+    let output = std::process::Command::new("git")
+        .args(&args)
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
 /// Detect high-risk changes from a changeset.
 /// Returns a list of (risk_type, file_path) pairs.
 pub fn detect_high_risk(changes: &[Change]) -> Vec<(String, String)> {
@@ -671,6 +705,34 @@ mod tests {
                 to: "src/new.rs".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn scoped_tree_diff_filters_to_write_scope() {
+        let d = TmpDir::new("scoped-diff");
+        git_init(d.path());
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::create_dir_all(d.path().join("docs")).unwrap();
+        std::fs::write(d.path.join("src/a.rs").as_path(), "fn a() {}\n").unwrap();
+        std::fs::write(d.path.join("docs/b.md").as_path(), "b\n").unwrap();
+        git(d.path(), &["add", "-A"]);
+        git(d.path(), &["commit", "-q", "-m", "base"]);
+        let from = head_tree_hash(d.path()).unwrap().unwrap();
+        std::fs::write(d.path.join("src/a.rs").as_path(), "fn a() -> u32 { 0 }\n").unwrap();
+        std::fs::write(d.path.join("docs/b.md").as_path(), "changed\n").unwrap();
+        git(d.path(), &["add", "-A"]);
+        git(d.path(), &["commit", "-q", "-m", "edit"]);
+        let to = head_tree_hash(d.path()).unwrap().unwrap();
+        // scoped to src/ → only a.rs reported
+        let in_src = scoped_tree_diff(d.path(), &from, &to, &["src".to_string()]).unwrap();
+        assert_eq!(in_src, vec!["src/a.rs".to_string()]);
+        // unscoped → both files
+        let all = scoped_tree_diff(d.path(), &from, &to, &[]).unwrap();
+        assert!(all.contains(&"src/a.rs".to_string()));
+        assert!(all.contains(&"docs/b.md".to_string()));
+        // identical trees → empty (no drift)
+        let same = scoped_tree_diff(d.path(), &from, &from, &[]).unwrap();
+        assert!(same.is_empty());
     }
 
     #[test]
