@@ -1037,21 +1037,7 @@ impl ControlApp {
         }
 
         let result = crate::infrastructure::gates::run_gate(gate_id, &self.project_root)?;
-        let evidence = if result.timed_out {
-            // Reaching here means run_gate confirmed the process tree was reaped
-            // (containment failure would have returned Err and recorded nothing).
-            "exit=timeout termination=process_tree termination_result=confirmed".to_string()
-        } else if result.passed {
-            format!("exit={} stdout={}B", result.exit_code, result.stdout.len())
-        } else {
-            // Include stderr for failed gates (truncated for evidence field)
-            let stderr_preview = if result.stderr.len() > 512 {
-                format!("{}...", &result.stderr[..512])
-            } else {
-                result.stderr.clone()
-            };
-            format!("exit={} stderr={}", result.exit_code, stderr_preview)
-        };
+        let evidence = format_gate_evidence(&result);
 
         self.record_gate(task_id, gate_id, result.passed, &evidence)
     }
@@ -5034,6 +5020,61 @@ impl ControlApp {
             self.rebuild_task_view(task_id)?;
         }
         Ok(event)
+    }
+}
+
+/// Truncate to at most `n` bytes on a UTF-8 char boundary (never panics by
+/// splitting a multi-byte char), trimming surrounding whitespace and appending
+/// "..." when truncated. Used to keep gate-evidence previews bounded.
+fn truncate_preview(s: &str, n: usize) -> String {
+    let s = s.trim();
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+/// Like `truncate_preview` but keeps the **last** `n` bytes (char-boundary
+/// safe) and prefixes "…". For streams whose actionable detail lives at the
+/// end: cargo writes `test result: FAILED` + the failing-test name + panic at
+/// the END of stdout, so a head window buries them under hundreds of `… ok`
+/// lines. The tail window surfaces the failure identity.
+fn truncate_tail_preview(s: &str, n: usize) -> String {
+    let s = s.trim();
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut start = s.len() - n;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", s[start..].trim_start())
+}
+
+/// Format the recorded `evidence` string for a gate result. Pure (no IO) so it
+/// is unit-testable in isolation. Failed gates include BOTH a stdout and a
+/// stderr preview: cargo writes the failing-test name + panic to **stdout**, so
+/// omitting stdout makes the failing test's identity unrecoverable from the
+/// recorded evidence (the original bug — a failed cargo_test gate showed only
+/// `exit=101 stderr=error: test failed` with no test name).
+fn format_gate_evidence(result: &crate::infrastructure::gates::GateRunResult) -> String {
+    if result.timed_out {
+        // Reaching here means run_gate confirmed the process tree was reaped
+        // (containment failure would have returned Err and recorded nothing).
+        "exit=timeout termination=process_tree termination_result=confirmed".to_string()
+    } else if result.passed {
+        format!("exit={} stdout={}B", result.exit_code, result.stdout.len())
+    } else {
+        format!(
+            "exit={} stdout={} stderr={}",
+            result.exit_code,
+            truncate_tail_preview(&result.stdout, 1024),
+            truncate_preview(&result.stderr, 512),
+        )
     }
 }
 
@@ -9229,6 +9270,118 @@ mod tests {
             "expected a protected-path warning for Cargo.toml: {:?}",
             v.warnings()
         );
+    }
+    #[test]
+    fn format_gate_evidence_failed_gate_includes_stdout_preview() {
+        // cargo writes the failing-test name + panic to STDOUT, not stderr. A
+        // failed gate's recorded evidence must carry a stdout preview or the
+        // failing test's identity is unrecoverable from the ledger.
+        use crate::infrastructure::gates::GateRunResult;
+        let r = GateRunResult {
+            gate_id: "cargo_test".into(),
+            passed: false,
+            exit_code: 101,
+            stdout: "running 540 tests\n\
+                     test foo::bar::adds ... FAILED\n\
+                     ---- foo::bar::adds stdout ----\n\
+                     panicked at 'assertion failed', src/x.rs:10"
+                .into(),
+            stderr: "error: test failed, to rerun pass --bin ctl".into(),
+            timed_out: false,
+        };
+        let ev = format_gate_evidence(&r);
+        assert!(ev.starts_with("exit=101 "), "lead with exit code: {ev}");
+        assert!(
+            ev.contains("stdout="),
+            "failed-gate evidence must include stdout: {ev}"
+        );
+        assert!(
+            ev.contains("foo::bar"),
+            "stdout preview must carry the failing test name: {ev}"
+        );
+        assert!(ev.contains("stderr="), "stderr must still be present: {ev}");
+    }
+
+    #[test]
+    fn format_gate_evidence_failed_stdout_keeps_tail_not_head() {
+        // Real cargo shape (seen live): a long run of "… ok" lines, then the
+        // failure summary + failing-test panic at the END. A head window shows
+        // only "running 543 tests" + passing tests and buries the failure; the
+        // evidence must keep the TAIL to surface the failing test's identity.
+        use crate::infrastructure::gates::GateRunResult;
+        let mut stdout = String::from("running 543 tests\n");
+        for _ in 0..200 {
+            stdout.push_str("test some::long::path::test_case_name ... ok\n");
+        }
+        stdout.push_str("test result: FAILED. 542 passed; 1 failed;\n");
+        stdout.push_str("---- real::failing::test stdout ----\n");
+        stdout.push_str("panicked at 'boom', src/real.rs:42\n");
+        let r = GateRunResult {
+            gate_id: "cargo_test".into(),
+            passed: false,
+            exit_code: 101,
+            stdout,
+            stderr: "error: test failed, to rerun pass --bin ctl".into(),
+            timed_out: false,
+        };
+        let ev = format_gate_evidence(&r);
+        assert!(
+            ev.contains("real::failing::test"),
+            "tail window must surface the failing test name: {ev}"
+        );
+        assert!(
+            ev.contains("panicked at"),
+            "tail window must include the panic: {ev}"
+        );
+        assert!(
+            !ev.contains("running 543 tests"),
+            "head must not crowd out the failure detail: {ev}"
+        );
+    }
+
+    #[test]
+    fn truncate_tail_preview_is_char_boundary_safe() {
+        let s = "é".repeat(600); // 1200 bytes; tail window 512 must back off
+        let p = truncate_tail_preview(&s, 512);
+        assert!(p.starts_with('…'));
+        assert!(p.len() <= "…".len() + 512);
+        assert_eq!(truncate_tail_preview("  hi  ", 512), "hi");
+        assert_eq!(truncate_tail_preview("", 512), "");
+    }
+
+    #[test]
+    fn truncate_preview_never_splits_a_char_boundary() {
+        // A 512-byte cut landing inside a multi-byte char must back off to a
+        // boundary instead of panicking.
+        let s = "é".repeat(600); // 2 bytes/char → 1200 bytes
+        let p = truncate_preview(&s, 512);
+        assert!(p.ends_with("..."));
+        assert!(p.len() <= 512 + "...".len());
+        assert_eq!(truncate_preview("  hi  ", 512), "hi");
+        assert_eq!(truncate_preview("", 512), "");
+    }
+
+    #[test]
+    fn format_gate_evidence_passed_and_timed_out_shapes() {
+        use crate::infrastructure::gates::GateRunResult;
+        let pass = GateRunResult {
+            gate_id: "cargo_check".into(),
+            passed: true,
+            exit_code: 0,
+            stdout: "ignored".into(),
+            stderr: String::new(),
+            timed_out: false,
+        };
+        assert_eq!(format_gate_evidence(&pass), "exit=0 stdout=7B");
+        let to = GateRunResult {
+            gate_id: "cargo_test".into(),
+            passed: false,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
+        };
+        assert!(format_gate_evidence(&to).contains("exit=timeout"));
     }
 
     #[test]

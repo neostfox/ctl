@@ -49,6 +49,30 @@ impl Drop for DirLock {
     }
 }
 
+/// Whether an error from the lock-file `create_new` open is a transient
+/// contention signal that `lock_dir` should retry within `acquire_timeout`,
+/// rather than a fatal failure.
+///
+/// `AlreadyExists` is the obvious case (another holder's file is present). On
+/// Windows, a concurrent `create_new` racing another process's `remove_file`
+/// (the `Drop` of a just-released lock) can transiently surface as
+/// `ERROR_ACCESS_DENIED` (os error 5) instead of `ERROR_FILE_EXISTS` — a known
+/// `CreateFile(CREATE_NEW)` quirk. Treating that as fatal made `lock_dir` (and
+/// every gate/test exercising it) flaky under concurrent writers; retry it.
+fn is_lock_contention(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
+        return true;
+    }
+    // Windows: ERROR_ACCESS_DENIED (5) under concurrent create/delete of the
+    // lock file. Scoped to Windows: on Unix, PermissionDenied on create_new is
+    // almost always a genuine access problem, not a create-race quirk.
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(5) {
+        return true;
+    }
+    false
+}
+
 /// Acquire an exclusive lock on `<dir>/.lock` (cross-process, advisory). Shared by
 /// the task ledger, run ledger, and run registry. `kind`/`id` only shape the
 /// error message ("task"/"run"/"run-registry"). Creates `dir` first, so a lock
@@ -74,7 +98,7 @@ pub(crate) fn lock_dir(
                 let _ = writeln!(f, "pid={}", std::process::id());
                 return Ok(DirLock { path, nonce });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(e) if is_lock_contention(&e) => {
                 if start.elapsed() >= acquire_timeout {
                     let holder = fs::read_to_string(&path).unwrap_or_default();
                     let holder_pid = holder.lines().nth(1).unwrap_or("pid=unknown");
@@ -574,6 +598,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+    #[test]
+    fn is_lock_contention_treats_windows_access_denied_as_retryable() {
+        use std::io::{Error, ErrorKind};
+        // Always retry when another holder's lock file is present.
+        assert!(is_lock_contention(&Error::from(ErrorKind::AlreadyExists)));
+        // Windows: a concurrent `create_new` racing another process's
+        // `remove_file` (lock Drop) transiently surfaces as ERROR_ACCESS_DENIED
+        // (os error 5) instead of ERROR_FILE_EXISTS. It must be retried within
+        // acquire_timeout, not treated as fatal — otherwise lock_dir (and every
+        // gate/test that exercises it) flakes under concurrent writers.
+        #[cfg(windows)]
+        {
+            let e = Error::from_raw_os_error(5);
+            assert!(
+                is_lock_contention(&e),
+                "ACCESS_DENIED must be retryable on Windows"
+            );
+        }
+        // A genuine, unrelated I/O error is NOT contention.
+        assert!(!is_lock_contention(&Error::from(ErrorKind::UnexpectedEof)));
     }
 
     static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
