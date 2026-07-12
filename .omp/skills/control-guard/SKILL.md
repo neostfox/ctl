@@ -203,11 +203,5 @@ do not replicate it:
 Subtasks: use OMP **todo** within the parent's `write_allow`. Reviewers run as the
 read-only **`explore`** subagent type (always spawnable). Writable subagents
 (`task`/`oracle`/`designer`) require an active in_progress task and inherit its
-boundaries. Routing: `ctl-grill-with-spec` to align/scope (`/ctl-new` and the
-retired `ctl-brainstorm` alias land here), `ctl-review` for
-edit review / completion audit, `ctl-diagnose` for defects, `/ctl-spec-bootstrap`
-and `/ctl-spec-update` for specs. Workflow phases (see
-`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align from first
-principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
-vertical task proposals, `ctl-tdd-loop` for red→green implementation, and
-`ctl-handoff` to compact context for the next agent.
+boundaries. Skill routing follows each skill's trigger contract; the pipeline
+map lives in the core above (Pipeline Routing).
