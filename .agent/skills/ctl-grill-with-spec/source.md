@@ -1,18 +1,14 @@
 ---
 name: ctl-grill-with-spec
-description: "Align before building — the single entry to the alignment station. Grills an ambiguous, broad, multi-option, or high-risk request from first principles via a micro-decision interview: one question at a time, each with a recommended answer; facts come from the repo, direction comes from the user; nothing is built until the user confirms shared understanding. Produces a confirmed alignment note at .ctl/spec/alignment/ that feeds ctl-to-prd (and, only when the user confirms, a domain/ADR note) — never a claim of truth. Absorbs the retired ctl-brainstorm. Triggers when: the request is vague, too broad, has multiple valid approaches, is high-risk, or likely to produce the wrong thing; also on /ctl-new. Do NOT trigger for: an already well-scoped request (go to ctl-to-prd or ctl-to-tasks), a trivial single-file edit, code review (ctl-review), or debugging (ctl-diagnose)."
+description: "Align before building — the single entry to the alignment station. Grills an ambiguous, broad, multi-option, or high-risk request into a confirmed alignment note via a micro-decision interview. Triggers when: the request is vague, too broad, has multiple valid approaches, is high-risk, or likely to produce the wrong thing; also on /ctl-new. Do NOT trigger for: an already well-scoped request (go to ctl-to-prd or ctl-to-tasks), a trivial single-file edit, code review (ctl-review), or debugging (ctl-diagnose)."
 ---
 
 
 ## Station contract
 
 - **Upstream**: control-guard triage — any non-trivial request enters here first.
-- **Produces**: an alignment note at `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md`
-  (status: `draft` until the user confirms → `confirmed`), registered as
-  brainstorm provenance on the eventual task (record-only — never gates).
-- **Downstream**: `ctl-to-prd` consumes the **confirmed** alignment note. For a
-  single obvious task, control-guard may take the converged proposal straight to
-  `ctl task create` — the alignment note still carries the provenance.
+- **Produces**: alignment note at `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md` (`draft` → `confirmed`); registered as brainstorm provenance (record-only).
+- **Downstream**: `ctl-to-prd` consumes the **confirmed** note; for a single obvious task, control-guard may go straight to `ctl task create`.
 
 ## The grill (alignment phase body)
 
@@ -60,15 +56,7 @@ see control-guard).
 When converging directly to tasks, append the task proposal fields (objective ·
 read scope · minimal write_allow · gates · risks) for control-guard.
 
-**Challenge inherited assumptions.** For each assumption ask: *are we doing this
-because the domain requires it, or because the existing architecture/framework
-suggests it?* Strike or downgrade anything that is convention masquerading as a
-constraint.
-
-**Outputs are artifacts, not truth.** A grill records what you currently believe
-and why — it never asserts the answer is correct. `ctl-to-prd` turns confirmed
-alignment into a PRD; unconfirmed items travel forward as OpenUncertainty, never
-silently resolved.
+**Challenge inherited assumptions.** For each assumption ask: *domain requirement, or convention from the existing architecture/framework?* Strike anything that is convention masquerading as a constraint.
 
 ### Where artifacts go
 
@@ -81,29 +69,12 @@ silently resolved.
   domain/ADR doc on your own judgement — an ADR records a *confirmed* decision,
   not a draft thought.
 
-### Quality bar
-
-- Every "fact" cites where it came from; unconfirmed beliefs are labelled
-  assumptions, not facts.
-- Every repository-answerable question was answered by inspection, not asked;
-  every direction-shaping decision was confirmed by the user, not assumed.
-- At least one inherited assumption was challenged and resolved (kept / struck).
-- Non-goals are explicit, not implied.
-- Unknowns are disclosed, not buried; the riskiest one names the experiment that
-  would settle it.
-- write_allow in any proposal is the smallest set that lets the work happen.
-
 ### Anti-patterns
 
 - ❌ Asking the user something the repository already answers.
-- ❌ Deciding a trade-off, priority, or acceptance bar for the user because you
-  were confident.
-- ❌ Multiple questions in one message, or a question without a recommended
-  answer.
+- ❌ Multiple questions in one message, or a question without a recommended answer.
 - ❌ Building, or creating the implementation task, before the user confirms.
-- ❌ Presenting an assumption as an observed fact.
 - ❌ Writing a domain/ADR doc without user confirmation or outside write scope.
-- ❌ Treating the grill's conclusions as proven rather than as artifacts.
 
 <!-- integration:omp -->
 
