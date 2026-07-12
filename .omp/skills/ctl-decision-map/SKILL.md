@@ -1,11 +1,11 @@
 ---
-name: ctl-to-tasks
-description: "Convert a confirmed PRD or plan into ctl task proposals — vertical slices, each independently verifiable, each declaring objective, read scope, write scope, gates, acceptance evidence, an AFK/HITL label, and blocking uncertainties. Triggers when: a PRD or plan exists and you need to break it into governed tasks. Do NOT trigger for: scoping a single fuzzy request (ctl-grill-with-spec), or fabricating task state without a plan. Never creates tasks that bypass protected-path controls and never synthesizes completed ctl events from a plan."
+name: ctl-decision-map
+description: "Maintain a project-level decision map for an effort too big to plan upfront — one that grill found has fog (decisions blocked on frontier work advancing). The map is an index, not a store: it tracks Destination, Frontier (ctl task links), Fog (unresolved decisions), and Out of scope; fog graduates into tasks incrementally via ctl-to-tasks rather than one upfront slice pass. Lives at .ctl/spec/maps/<slug>.md (spec tier, human-writable). Triggers when: grill surfaces fog during alignment on a large effort, or a multi-session effort re-opens and needs re-orientation. Do NOT trigger for: a no-fog effort (go straight to ctl-to-tasks), a single well-scoped task, or anything that fits one session."
 ---
 
-# ctl-to-tasks (OMP)
+# ctl-decision-map (OMP)
 
-The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-to-tasks/source.md` by `ctl skills sync`. OMP-specific mechanics live after the core.
+The **managed core** below is the platform-neutral ctl workflow protocol, byte-checked by CI against `.agent/protocols/workflow-skills.md` across platforms. Do not edit it here — it is generated from `.agent/skills/ctl-decision-map/source.md` by `ctl skills sync`. OMP-specific mechanics live after the core.
 
 <!-- ctl:workflow-core:start version=1 -->
 # ctl Workflow Skills — Core Protocol
@@ -105,69 +105,88 @@ does not place them inside its trust boundary.
 
 ## Station contract
 
-- **Upstream**: a **confirmed** PRD from `ctl-to-prd` (`.ctl/spec/prd/<prd-id>.md`),
-  or — for a single obvious task — a confirmed alignment note straight from
-  `ctl-grill-with-spec`.
-- **Produces**: task proposals handed to control-guard for `ctl task create`;
-  each created task records `ctl brainstorm` provenance back to the alignment
-  note / PRD it derived from (record-only — never gates).
-- **Downstream**: execution under control-guard (`ctl-tdd-loop` for behavior
-  changes), then wrap-up (finish → `ctl-spec-update`).
+- **Upstream**: `ctl-grill-with-spec` — when alignment finds an effort has fog
+  (decisions that can't resolve until the frontier advances), it seeds a map here
+  instead of converging to a single upfront `ctl-to-tasks` pass.
+- **Produces**: a decision map at `.ctl/spec/maps/<slug>.md` (status: `draft` →
+  `living` while fog remains → `closed` when Destination is reached and no fog
+  remains).
+- **Downstream**: graduation — each resolved fog item hands off to `ctl-to-tasks`
+  (or `ctl task create` for a trivial slice); the new task ID re-enters Frontier.
 
-## Decompose into tasks (phase body)
+## When to build a map — and when not to
 
-Prefer **vertical slices** over horizontal layers. Each proposal must declare:
+Read [`decision-map.md`](../../spec/guides/decision-map.md) first. It defines the
+format, sections, and graduation rule.
 
-| Field | Rule |
-|---|---|
-| objective | one testable sentence |
-| read scope | what the task may read |
-| write scope | the **minimal** `write_allow` (start narrow, widen only on approval) |
-| gates | required gate templates (`cargo_fmt_check`, `cargo_check`, `cargo_clippy`, `cargo_test`) |
-| acceptance evidence | the artifact that proves done (test output, run output) |
-| AFK / HITL | can it run unattended, or does it need a human in the loop? |
-| blocking uncertainties | the OpenUncertainty items that must resolve first |
+Build a map **only** when grill surfaces fog. The test: are there decisions that
+cannot be made until work on the frontier advances? If yes, the effort is too big
+to plan upfront — build a map. If every decision resolves in the alignment
+interview, the effort fits one session: **go straight to `ctl-to-tasks`** and skip
+the map. A no-fog effort gets no map.
 
-**AFK vs HITL.** Label each task: **AFK** (away-from-keyboard — deterministic,
-low-risk, fully gated, safe to run unattended) or **HITL** (human-in-the-loop —
-needs a decision, touches a protected path via exception, or carries unresolved
-risk). When unsure, label HITL.
+## The map discipline
 
-### Hard rules
+**The map is an index, not a store.** A decision lives in exactly one place — its
+ctl task once it graduates. The map gists and links; it never restates a task's
+objective or scope (that is what `ctl board` and the task itself are for).
 
-- Prefer vertical slices; split anything too big to finish inside one boundary.
-- Each task is independently verifiable on its own evidence.
-- Non-overlapping `write_allow` across sibling tasks (overlap forces sequencing).
-- **Do not create tasks that bypass protected-path controls** (`.git/`,
-  `events.jsonl`, `schemas/`, `Cargo.toml`).
-- **Do not synthesize completed ctl events from a PRD/plan.** A plan describes
-  intended work; only real execution + evidence may close a task.
+Four sections (see the guide for the full schema):
 
-### Output: proposals, then governed creation
+- **Destination** — the outcome that must be true when done. One sentence.
+- **Frontier** — ctl task IDs ready/active; links only, no restatement.
+- **Fog** — decisions blocked on frontier work. Each names: the decision · its
+  blocker · graduating `kind` (implementation/research) · AFK/HITL.
+- **Out of scope** — ruled beyond the destination. Closed, never graduates.
 
-Write proposals to `.ctl/tasks/<task-id>/proposal.md` (within scope), or dry-run
-the boundary before committing to it:
+### Graduation (the core mechanic)
 
 ```
-ctl task create --dry-run --id <id> --objective "..." \
-  --read-scope <p> --write-allow <p> --gates cargo_check --gates cargo_test
+fog item  --blocker completes, decision resolves (HITL via grill if needed)-->
+          ctl-to-tasks slice (or ctl task create)
+          --> new task ID enters Frontier
+          --> fog item struck from the map
 ```
 
-`--dry-run` validates and shows what would happen without persisting — a safe way
-to check a proposed boundary before the real create. Hand approved proposals to
-control-guard for the actual `ctl task create`.
+Nothing lingers in two places. Graduating fog clears the patch.
 
-### Anti-patterns
+### The per-session loop
 
-- ❌ Horizontal layer tasks that can't be verified alone.
-- ❌ A broad `write_allow` "to be safe".
-- ❌ Overlapping write scopes across sibling tasks.
-- ❌ Marking a risky task AFK to avoid asking.
-- ❌ Emitting events that claim work is done before it ran.
+1. Open the map; re-read **Destination**.
+2. `ctl board` / `ctl next-task` confirm the takeable Frontier; claim or resume one.
+3. Work it under normal governance (scope, gates, evidence).
+4. New decisions found while working → add to **Fog** with their blocker.
+   Ruled-out work → **Out of scope**.
+5. A completed frontier task may unblock fog → resolve and graduate.
+6. **Close** when Destination is reached and no fog remains.
+
+## Anti-patterns
+
+- ❌ Restating a task's objective/scope in the map instead of linking its ID
+  (the map is an index, not a store).
+- ❌ Building a map for a no-fog effort that fits one session.
+- ❌ Letting a decision live in both the map's Fog *and* a graduated task —
+  graduate fully: strike the fog.
+- ❌ Treating Out-of-scope as deferred Fog — out-of-scope is ruled out, never
+  graduates.
+- ❌ Letting the map drift from `ctl board` — the Frontier mirrors the machine
+  view; if they disagree, the task ledger is truth, the map follows.
+- ❌ Using the map as a substitute for governance — it orients a human; it does
+  not replace gates, scope, evidence, or `ctl task` lifecycle.
+
+## Provenance
+
+Inspired by Matt Pocock's `wayfinder` skill (v1.1) — the fog-of-war / frontier /
+"map is an index, not a store" framing — adapted to ctl's governed-task model:
+the map links into ctl tasks and graduates fog via `ctl-to-tasks`, rather than
+managing its own ticket tracker. External skill text is L0 reference material;
+this is a ctl-native rewrite, not a vendored control.
 
 ## OMP Integration (platform-specific)
 
-Proposals are notes; the real `ctl task create` is dispatched by control-guard and gated
-by the OMP PreToolUse hook. Use `ctl task create --dry-run` to preview a boundary, and
-`ctl board` to check sibling tasks for write-scope overlap before creating. Record PRD
-provenance on the created task with `ctl brainstorm` (record-only).
+The map lives at `.ctl/spec/maps/<slug>.md` (spec tier — writable under the OMP
+PreToolUse ctl gate; protected paths remain hard-denied). Seed it from the
+confirmed alignment note. Graduation writes (`ctl-to-tasks`, `ctl task create`)
+go through normal governance. The map itself is a Markdown working artifact —
+mutating it is a spec-tier write, recorded by the gate. Read the Frontier from
+`ctl board` / `ctl next-task` rather than recomputing it by hand.

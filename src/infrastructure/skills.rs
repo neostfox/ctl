@@ -67,6 +67,10 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.omp/skills/ctl-architecture-review/SKILL.md"),
         },
         EmbeddedFile {
+            relative_path: "skills/ctl-decision-map/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-decision-map/SKILL.md"),
+        },
+        EmbeddedFile {
             relative_path: "skills/ctl-cli-reference/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-cli-reference/SKILL.md"),
         },
@@ -196,6 +200,10 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.claude/skills/ctl-architecture-review/SKILL.md"),
         },
         EmbeddedFile {
+            relative_path: "skills/ctl-decision-map/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-decision-map/SKILL.md"),
+        },
+        EmbeddedFile {
             relative_path: "skills/ctl-cli-reference/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
         },
@@ -271,6 +279,10 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-architecture-review/SKILL.md",
             content: include_str!("../../.opencode/skills/ctl-architecture-review/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-decision-map/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-decision-map/SKILL.md"),
         },
     ]
 }
@@ -457,8 +469,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 15,
-            "claude injects 4 integration files + control-guard + 6 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
+            n, 16,
+            "claude injects 4 integration files + control-guard + 7 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -472,6 +484,7 @@ mod tests {
             "skills/ctl-tdd-loop/SKILL.md",
             "skills/ctl-handoff/SKILL.md",
             "skills/ctl-architecture-review/SKILL.md",
+            "skills/ctl-decision-map/SKILL.md",
             "skills/ctl-cli-reference/SKILL.md",
             "skills/ctl-spec-bootstrap/SKILL.md",
             "skills/ctl-spec-update/SKILL.md",
@@ -674,6 +687,18 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             path: ".opencode/skills/ctl-architecture-review/SKILL.md",
             platform_marker: "opencode Integration",
         },
+        WorkflowSkill {
+            skill: "ctl-decision-map",
+            platform: "omp",
+            path: ".omp/skills/ctl-decision-map/SKILL.md",
+            platform_marker: "OMP Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-decision-map",
+            platform: "opencode",
+            path: ".opencode/skills/ctl-decision-map/SKILL.md",
+            platform_marker: "opencode Integration",
+        },
         // Claude Code mirror: same managed core + phase body, only the
         // `## Claude Code Integration` section differs (drift-checked below).
         WorkflowSkill {
@@ -710,6 +735,12 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             skill: "ctl-architecture-review",
             platform: "claude",
             path: ".claude/skills/ctl-architecture-review/SKILL.md",
+            platform_marker: "Claude Code Integration",
+        },
+        WorkflowSkill {
+            skill: "ctl-decision-map",
+            platform: "claude",
+            path: ".claude/skills/ctl-decision-map/SKILL.md",
             platform_marker: "Claude Code Integration",
         },
     ]

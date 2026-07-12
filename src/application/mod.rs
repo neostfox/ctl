@@ -1,4 +1,6 @@
+pub mod prd;
 pub mod schedule;
+pub mod spec;
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -259,6 +261,21 @@ pub struct LeaseExpiryReport {
     pub age_secs: Option<u64>,
     pub ttl_secs: Option<u64>,
     pub detail: String,
+}
+
+/// Deterministic "what should I work on next" recommendation. Ranks Ready
+/// tasks by satisfied dependencies + lowest drift + no active scope conflict;
+/// falls back to Planning tasks when no Ready task is actionable. Read-only.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NextTaskRecommendation {
+    /// "start" (a Ready task is actionable) | "ready" (a Planning task is next)
+    /// | "none" (nothing actionable).
+    pub action: &'static str,
+    pub task_id: Option<String>,
+    pub objective: Option<String>,
+    pub rationale: String,
+    pub ready_candidates: usize,
+    pub planning_candidates: usize,
 }
 
 impl ControlApp {
@@ -1117,6 +1134,226 @@ impl ControlApp {
         })
     }
 
+    // ── PRD plan / validate / status (workflow-prd-to-tasks-v1) ──
+    //
+    // Closes the cognitive loop: a confirmed PRD's `## Tasks` section becomes
+    // governed tasks in one call. No new event types — reuses create_task +
+    // record_brainstorm_artifacts. Pure parsing lives in `application::prd`;
+    // these methods add the IO-bound boundary/gate validation and orchestration.
+
+    /// Validate a parsed PRD against format, boundary, gate, and overlap rules.
+    /// Read-only — emits no events. Returns every problem found (does not stop
+    /// at the first), so the user sees the full picture before planning.
+    pub fn prd_validate(
+        &self,
+        doc: &crate::application::prd::PrdDocument,
+    ) -> Result<crate::application::prd::PrdValidation> {
+        use crate::application::prd::{overlap_problems, validate_format};
+
+        let mut v = validate_format(doc);
+
+        let normalizer = crate::infrastructure::boundary::normalizer::PathNormalizer::new(
+            self.project_root.clone(),
+        );
+
+        for task in &doc.tasks {
+            // Boundary normalization catches path escape, protected paths,
+            // symlinks/junctions/UNC. Check each path so one bad path doesn't
+            // hide the rest.
+            for path in &task.write_allow {
+                if let Err(e) = normalizer.normalize(path) {
+                    v.error(
+                        Some(&task.id),
+                        format!("write-allow path '{}': {}", path, e),
+                    );
+                }
+            }
+            for path in &task.read_scope {
+                if let Err(e) = normalizer.normalize(path) {
+                    v.error(Some(&task.id), format!("read-scope path '{}': {}", path, e));
+                }
+            }
+
+            // Gate templates must be known.
+            if let Err(e) = validate_gate_templates(&task.gates) {
+                v.error(Some(&task.id), format!("{}", e));
+            }
+        }
+
+        // Cross-task write-allow overlap — each colliding pair is an error.
+        for (a, b, overlap) in overlap_problems(doc) {
+            v.error(
+                None,
+                format!(
+                    "tasks '{}' and '{}' have overlapping write-allow: {}",
+                    a,
+                    b,
+                    overlap.join(", ")
+                ),
+            );
+        }
+
+        Ok(v)
+    }
+
+    /// Plan a confirmed PRD: validate, then create each task (gated) and record
+    /// brainstorm provenance. A `draft` PRD is refused unless `dry_run`; a
+    /// `superseded` PRD is always refused. In `dry_run`, nothing is persisted —
+    /// the returned outcomes describe what would be created.
+    pub fn prd_plan(
+        &self,
+        doc: &crate::application::prd::PrdDocument,
+        alignment_path: Option<&str>,
+        convergence_path: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Vec<crate::application::prd::PrdPlanOutcome>> {
+        use crate::application::prd::PrdStatus;
+
+        // Status gate — superseded is never plannable, even as a dry run.
+        if doc.status == PrdStatus::Superseded {
+            return Err(anyhow!(
+                "PRD status is 'superseded' — superseded by a later PRD; not plannable"
+            ));
+        }
+        if !dry_run && doc.status != PrdStatus::Confirmed {
+            return Err(anyhow!(
+                "PRD status is '{}' — set it to 'confirmed' before planning, \
+                 or run with --dry-run to preview",
+                doc.status.as_str()
+            ));
+        }
+
+        // Full validation — fail fast, create nothing on any error.
+        let validation = self.prd_validate(doc)?;
+        if !validation.ok() {
+            let mut lines = String::from("PRD validation failed:\n");
+            for p in validation.errors() {
+                match &p.task_id {
+                    Some(tid) => lines.push_str(&format!("  [{}] {}\n", tid, p.message)),
+                    None => lines.push_str(&format!("  {}\n", p.message)),
+                }
+            }
+            return Err(anyhow!("{}", lines.trim_end()));
+        }
+
+        let bs_id = crate::application::prd::brainstorm_id_for(&doc.title);
+        let mut outcomes = Vec::with_capacity(doc.tasks.len());
+
+        for task in &doc.tasks {
+            // read-scope defaults to write-allow per the PRD convention.
+            let read_scope: Vec<String> = if task.read_scope.is_empty() {
+                task.write_allow.clone()
+            } else {
+                task.read_scope.clone()
+            };
+
+            if dry_run {
+                outcomes.push(crate::application::prd::PrdPlanOutcome {
+                    task_id: task.id.clone(),
+                    objective: task.objective.clone(),
+                    write_allow: task.write_allow.clone(),
+                    gates: task.gates.clone(),
+                    depends_on: task.depends_on.clone(),
+                    created: false,
+                    seq: None,
+                    provenance_recorded: false,
+                });
+                continue;
+            }
+
+            let event = self.create_task(
+                &task.id,
+                CreateTaskInput {
+                    objective: &task.objective,
+                    read_scope: &read_scope,
+                    write_allow: &task.write_allow,
+                    write_deny: &[],
+                    risk_triggers: &[],
+                    gates: &task.gates,
+                    depends_on: &task.depends_on,
+                },
+            )?;
+
+            // Record brainstorm provenance when an alignment (divergence) path is
+            // available. The PRD file is the convergence. Without a divergence
+            // path, skip — record_brainstorm_artifacts requires one.
+            let mut provenance_recorded = false;
+            if let Some(divergence) = alignment_path {
+                if self
+                    .record_brainstorm_artifacts(
+                        &task.id,
+                        &bs_id,
+                        divergence,
+                        convergence_path,
+                        None,
+                    )
+                    .is_ok()
+                {
+                    provenance_recorded = true;
+                }
+            }
+
+            outcomes.push(crate::application::prd::PrdPlanOutcome {
+                task_id: task.id.clone(),
+                objective: task.objective.clone(),
+                write_allow: task.write_allow.clone(),
+                gates: task.gates.clone(),
+                depends_on: task.depends_on.clone(),
+                created: true,
+                seq: Some(event.seq),
+                provenance_recorded,
+            });
+        }
+
+        Ok(outcomes)
+    }
+
+    /// Build the observable-loop status view for a parsed PRD: each task's
+    /// existence, phase, and brainstorm provenance, plus a completion summary.
+    /// Read-only — emits no events. Tasks not yet created show `exists: false`.
+    pub fn prd_status_view(
+        &self,
+        doc: &crate::application::prd::PrdDocument,
+    ) -> Result<crate::application::prd::PrdStatusView> {
+        let mut rows = Vec::with_capacity(doc.tasks.len());
+        let mut completed = 0;
+
+        for task in &doc.tasks {
+            match self.get_status(&task.id) {
+                Ok(state) => {
+                    let phase = format!("{:?}", state.phase).to_ascii_lowercase();
+                    if state.phase == Phase::Completed {
+                        completed += 1;
+                    }
+                    let provenance = self.brainstorm_provenance_view(&state);
+                    rows.push(crate::application::prd::PrdTaskStatusRow {
+                        id: task.id.clone(),
+                        exists: true,
+                        phase: Some(phase),
+                        provenance,
+                    });
+                }
+                Err(_) => {
+                    // Task not created yet — it lives only in the PRD.
+                    rows.push(crate::application::prd::PrdTaskStatusRow {
+                        id: task.id.clone(),
+                        exists: false,
+                        phase: None,
+                        provenance: None,
+                    });
+                }
+            }
+        }
+
+        Ok(crate::application::prd::PrdStatusView {
+            title: doc.title.clone(),
+            status: doc.status,
+            total: doc.tasks.len(),
+            completed,
+            rows,
+        })
+    }
+
     // ── Uncertainty Ledger V1: record-and-disclose unknowns ──
     //
     // record_uncertainty + record_uncertainty_disposition emit the two canonical
@@ -1891,6 +2128,262 @@ impl ControlApp {
             },
             "tasks": rows,
         }))
+    }
+
+    /// Recommend the next task to advance. Deterministic: among Ready tasks whose
+    /// dependencies are all Completed and whose write scope does not overlap any
+    /// active in_progress task, pick the lowest drift score (ties broken by task id
+    /// for stable output). Falls back to the lowest-drift Planning task when no
+    /// Ready task is actionable. Read-only — emits no events.
+    pub fn next_task(&self) -> Result<NextTaskRecommendation> {
+        use crate::application::schedule::detect_write_scope_overlap;
+        use std::collections::HashMap;
+
+        let board = self.generate_board()?;
+        let empty = vec![];
+        let tasks = board["tasks"].as_array().unwrap_or(&empty);
+
+        // Phase lookup for dependency satisfaction (Completed satisfies).
+        let phase_by_id: HashMap<String, String> = tasks
+            .iter()
+            .filter_map(|t| {
+                Some(t["task_id"].as_str()?.to_string()).zip(t["phase"].as_str().map(String::from))
+            })
+            .collect();
+
+        // Active in_progress write scopes (for overlap detection).
+        let active_scopes: Vec<BTreeSet<String>> = tasks
+            .iter()
+            .filter(|t| {
+                t["phase"].as_str() == Some("in_progress")
+                    && !t["archived"].as_bool().unwrap_or(false)
+            })
+            .filter_map(|t| {
+                let set: BTreeSet<String> = t["write_scope"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect();
+                Some(set)
+            })
+            .collect();
+
+        let deps_satisfied = |task: &serde_json::Value| -> bool {
+            match task["depends_on"].as_array() {
+                None => true,
+                Some(deps) => deps.iter().all(|d| {
+                    let dep_id = d.as_str().unwrap_or("");
+                    phase_by_id
+                        .get(dep_id)
+                        .map(|p| p == "completed")
+                        .unwrap_or(false)
+                }),
+            }
+        };
+
+        let no_scope_conflict = |task: &serde_json::Value| -> bool {
+            let scopes: BTreeSet<String> = task["write_scope"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            active_scopes
+                .iter()
+                .all(|active| detect_write_scope_overlap(&scopes, active).is_empty())
+        };
+
+        let rank = |a: &serde_json::Value, b: &serde_json::Value| {
+            let sa = a["drift_score"].as_i64().unwrap_or(0);
+            let sb = b["drift_score"].as_i64().unwrap_or(0);
+            sa.cmp(&sb).then_with(|| {
+                a["task_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["task_id"].as_str().unwrap_or(""))
+            })
+        };
+
+        let is_ready = |t: &serde_json::Value| {
+            t["phase"].as_str() == Some("ready")
+                && !t["held"].as_bool().unwrap_or(false)
+                && !t["archived"].as_bool().unwrap_or(false)
+                && deps_satisfied(t)
+                && no_scope_conflict(t)
+        };
+        let is_planning = |t: &serde_json::Value| {
+            t["phase"].as_str() == Some("planning")
+                && !t["held"].as_bool().unwrap_or(false)
+                && !t["archived"].as_bool().unwrap_or(false)
+        };
+
+        let mut ready: Vec<&serde_json::Value> = tasks.iter().filter(|t| is_ready(t)).collect();
+        ready.sort_by(|a, b| rank(a, b));
+
+        let mut planning: Vec<&serde_json::Value> =
+            tasks.iter().filter(|t| is_planning(t)).collect();
+        planning.sort_by(|a, b| rank(a, b));
+
+        let ready_count = ready.len();
+        let planning_count = planning.len();
+
+        if let Some(best) = ready.first() {
+            let score = best["drift_score"].as_i64().unwrap_or(0);
+            return Ok(NextTaskRecommendation {
+                action: "start",
+                task_id: best["task_id"].as_str().map(String::from),
+                objective: best["objective"].as_str().map(String::from),
+                rationale: format!(
+                    "ready, dependencies satisfied, lowest drift (score {score}), \
+                 no active scope conflict"
+                ),
+                ready_candidates: ready_count,
+                planning_candidates: planning_count,
+            });
+        }
+
+        if let Some(best) = planning.first() {
+            return Ok(NextTaskRecommendation {
+                action: "ready",
+                task_id: best["task_id"].as_str().map(String::from),
+                objective: best["objective"].as_str().map(String::from),
+                rationale: "no actionable ready task; lowest-drift planning task".to_string(),
+                ready_candidates: ready_count,
+                planning_candidates: planning_count,
+            });
+        }
+
+        Ok(NextTaskRecommendation {
+            action: "none",
+            task_id: None,
+            objective: None,
+            rationale: "no actionable tasks (all completed, archived, held, or \
+            blocked by unsatisfied dependencies)"
+                .to_string(),
+            ready_candidates: ready_count,
+            planning_candidates: planning_count,
+        })
+    }
+
+    // ── Spec fact store (knowledge-accumulation-v1) ──
+    //
+    // Atomic verified facts captured during conversations, persisted to
+    // `.ctl/facts.jsonl` (append-only evidence, NOT canonical events). Two
+    // tiers: raw facts (this store) + curated spec markdown (promote). The
+    // digest is injected into `ctl hook context` so every subsequent session
+    // sees accumulated knowledge. Record-and-disclose — never gates.
+
+    /// Append one verified fact to the knowledge base. ctl assigns the fact id,
+    /// stamps the timestamp, and records the actor.
+    pub fn spec_fact_add(
+        &self,
+        statement: &str,
+        source: &str,
+        category: Option<&str>,
+    ) -> Result<crate::application::spec::Fact> {
+        if statement.trim().is_empty() {
+            return Err(anyhow!("Fact statement must not be empty"));
+        }
+        if source.trim().is_empty() {
+            return Err(anyhow!(
+                "Fact source must not be empty — a fact without provenance is \
+                 an opinion, not knowledge"
+            ));
+        }
+        let facts = crate::application::spec::read_all_facts(&self.project_root)?;
+        let fact = crate::application::spec::Fact {
+            fact_id: crate::application::spec::next_fact_id(&facts),
+            statement: statement.trim().to_string(),
+            source: source.trim().to_string(),
+            category: category.map(|c| c.trim().to_string()),
+            recorded_at: now_iso8601(),
+            recorded_by: self.actor.clone(),
+        };
+        let path = crate::application::spec::facts_path(&self.project_root);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let line = serde_json::to_string(&fact)?;
+        // Open in append mode + fsync, mirroring the telemetry append contract.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        // Self-heal a missing trailing newline (mirrors append_jsonl_line).
+        if file.metadata()?.len() > 0 {
+            let mut existing = String::new();
+            use std::io::Read;
+            let mut reader = std::fs::File::open(&path)?;
+            reader.read_to_string(&mut existing)?;
+            if !existing.ends_with('\n') {
+                file.write_all(b"\n")?;
+            }
+        }
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        if !self.dry_run {
+            // No projection to rebuild — facts are evidence, not task state.
+        }
+        Ok(fact)
+    }
+
+    /// List facts, optionally filtered by category and/or a search term.
+    pub fn spec_fact_list(
+        &self,
+        category: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<Vec<crate::application::spec::Fact>> {
+        let facts = crate::application::spec::read_all_facts(&self.project_root)?;
+        let filtered = crate::application::spec::filter_facts(&facts, category, search);
+        Ok(filtered.into_iter().cloned().collect())
+    }
+
+    /// Promote a fact into a curated spec markdown file by appending a
+    /// formatted block. The target is relative to `.ctl/spec/` (e.g.
+    /// `backend/infrastructure-layer.md`).
+    pub fn spec_fact_promote(&self, fact_id: &str, target: &str) -> Result<std::path::PathBuf> {
+        let facts = crate::application::spec::read_all_facts(&self.project_root)?;
+        let fact = facts
+            .iter()
+            .find(|f| f.fact_id == fact_id)
+            .ok_or_else(|| anyhow!("Fact '{}' not found in the knowledge base", fact_id))?;
+
+        let spec_root = self.project_root.join(".ctl").join("spec");
+        let target_path = spec_root.join(target);
+
+        // Resolve and boundary-check: the target must stay inside .ctl/spec/.
+        let resolved = target_path.canonicalize().map_err(|_| {
+            anyhow!(
+                "Cannot resolve target spec file '{}.md' — does the file exist \
+                 under .ctl/spec/?",
+                target.trim_end_matches(".md")
+            )
+        })?;
+        if !resolved.starts_with(spec_root.canonicalize().unwrap_or(spec_root.clone())) {
+            return Err(anyhow!(
+                "Promote target must be inside .ctl/spec/ — got '{}'",
+                target
+            ));
+        }
+
+        let block = crate::application::spec::format_fact_for_promote(fact);
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target_path)?;
+        file.write_all(block.as_bytes())?;
+        Ok(target_path)
+    }
+
+    /// Build a compact digest of the fact store for context injection.
+    pub fn spec_facts_digest(&self) -> Result<crate::application::spec::FactsDigest> {
+        let facts = crate::application::spec::read_all_facts(&self.project_root)?;
+        Ok(crate::application::spec::facts_digest(&facts, 5))
     }
 
     /// Write the control view to `.ctl/control.json` (reconcile projection,
@@ -8518,6 +9011,509 @@ mod tests {
         app.start_task("t").unwrap();
         let run_id = app.create_run("t", "omp").unwrap();
         assert_eq!(app.replay_run(&run_id).unwrap().last_seq, 1);
+    }
+
+    // ── PRD plan / validate / status (workflow-prd-to-tasks-v1) ──
+
+    const CONFIRMED_PRD: &str = "# PRD: Demo\n\n> Status: confirmed\n\n## Objective\n\nShip it.\n\n## Tasks\n\n\
+        - id: auth-task\n  objective: add auth boundary\n  write-allow: src/auth\n  gates: cargo_check, cargo_test\n\n\
+        - id: config-task\n  objective: parse config\n  write-allow: src/config.rs\n  gates: cargo_check\n";
+
+    #[test]
+    fn prd_validate_clean_prd_has_no_errors() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+        let v = app.prd_validate(&doc).unwrap();
+        assert!(v.ok(), "unexpected errors: {:?}", v.errors());
+    }
+
+    #[test]
+    fn prd_validate_catches_write_overlap() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // config-task writes into src/auth — overlaps auth-task's scope.
+        let prd = CONFIRMED_PRD.replace("src/config.rs", "src/auth/sub.rs");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        let v = app.prd_validate(&doc).unwrap();
+        assert!(!v.ok(), "overlap must be an error");
+        assert!(
+            v.errors()
+                .iter()
+                .any(|p| p.message.contains("overlapping write-allow")),
+            "{:?}",
+            v.errors()
+        );
+    }
+
+    #[test]
+    fn prd_validate_catches_unknown_gate() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = CONFIRMED_PRD.replace("cargo_test", "bogus_gate");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        let v = app.prd_validate(&doc).unwrap();
+        assert!(!v.ok());
+        assert!(
+            v.errors()
+                .iter()
+                .any(|p| p.message.contains("Unknown gate")),
+            "{:?}",
+            v.errors()
+        );
+    }
+
+    #[test]
+    fn prd_plan_draft_refused_without_dry_run() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = CONFIRMED_PRD.replace("confirmed", "draft");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        let err = app
+            .prd_plan(&doc, None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("confirmed"), "{}", err);
+    }
+
+    #[test]
+    fn prd_plan_superseded_always_refused() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = CONFIRMED_PRD.replace("confirmed", "superseded");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        // Even dry-run refuses a superseded PRD.
+        let err = app
+            .prd_plan(&doc, None, None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("superseded"), "{}", err);
+    }
+
+    #[test]
+    fn prd_plan_dry_run_creates_nothing() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+        let outcomes = app.prd_plan(&doc, None, None, true).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|o| !o.created));
+        // Nothing persisted.
+        assert!(app.get_status("auth-task").is_err());
+    }
+
+    #[test]
+    fn prd_plan_confirmed_creates_tasks_with_correct_boundaries() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+        let outcomes = app.prd_plan(&doc, None, None, false).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|o| o.created));
+
+        let auth = app.get_status("auth-task").unwrap();
+        assert_eq!(auth.objective.as_deref(), Some("add auth boundary"));
+        assert!(auth.write_allow.contains("src/auth"));
+        assert!(auth.gates.contains("cargo_check"));
+        assert!(auth.gates.contains("cargo_test"));
+        // read-scope defaulted to write-allow (absent in the PRD).
+        assert_eq!(auth.read_scope, auth.write_allow);
+    }
+
+    #[test]
+    fn prd_plan_validation_failure_creates_nothing() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = CONFIRMED_PRD.replace("cargo_test", "bogus_gate");
+        let doc = crate::application::prd::parse_prd(&prd).unwrap();
+        let err = app
+            .prd_plan(&doc, None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("validation failed"), "{}", err);
+        // Validate runs before any create → no task exists.
+        assert!(app.get_status("auth-task").is_err());
+        assert!(app.get_status("config-task").is_err());
+    }
+
+    #[test]
+    fn prd_plan_wires_depends_on() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let prd = "# PRD: Deps\n\n> Status: confirmed\n\n## Tasks\n\n\
+            - id: child\n  objective: depends on parent\n  write-allow: src/child\n  gates: cargo_check\n  depends-on: parent\n\n\
+            - id: parent\n  objective: the base\n  write-allow: src/parent\n  gates: cargo_check\n";
+        let doc = crate::application::prd::parse_prd(prd).unwrap();
+        app.prd_plan(&doc, None, None, false).unwrap();
+        let child = app.get_status("child").unwrap();
+        assert!(child.depends_on.contains("parent"));
+    }
+
+    #[test]
+    fn prd_status_view_shows_not_created_then_planning() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+
+        // Before planning: all tasks not-yet-created.
+        let view = app.prd_status_view(&doc).unwrap();
+        assert_eq!(view.total, 2);
+        assert_eq!(view.completed, 0);
+        assert!(view.rows.iter().all(|r| !r.exists));
+
+        // After planning: tasks exist in Planning.
+        app.prd_plan(&doc, None, None, false).unwrap();
+        let view = app.prd_status_view(&doc).unwrap();
+        assert!(view.rows.iter().all(|r| r.exists));
+        assert!(
+            view.rows
+                .iter()
+                .all(|r| r.phase.as_deref() == Some("planning")),
+            "{:?}",
+            view.rows
+        );
+    }
+
+    #[test]
+    fn prd_plan_records_provenance_when_alignment_given() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // Write the alignment note + PRD file so provenance hashing succeeds.
+        std::fs::write(dir.path().join("align.md"), "# alignment\n").unwrap();
+        std::fs::write(dir.path().join("demo.md"), CONFIRMED_PRD).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+        let outcomes = app
+            .prd_plan(&doc, Some("align.md"), Some("demo.md"), false)
+            .unwrap();
+        assert!(outcomes.iter().all(|o| o.provenance_recorded));
+
+        // Provenance visible via the brainstorm view — convergence = the PRD.
+        let state = app.get_status("auth-task").unwrap();
+        let prov = app
+            .brainstorm_provenance_view(&state)
+            .expect("provenance was recorded");
+        assert!(prov.convergence.is_some());
+    }
+
+    #[test]
+    fn prd_plan_without_alignment_skips_provenance() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let doc = crate::application::prd::parse_prd(CONFIRMED_PRD).unwrap();
+        let outcomes = app.prd_plan(&doc, None, None, false).unwrap();
+        assert!(outcomes.iter().all(|o| !o.provenance_recorded));
+        let state = app.get_status("auth-task").unwrap();
+        assert!(app.brainstorm_provenance_view(&state).is_none());
+    }
+
+    // ── Rich context injection (the data pipeline cmd_hook_context assembles) ──
+
+    #[test]
+    fn hook_context_enrichment_pipeline_surfaces_blockers_and_uncertainties() {
+        // The hook enriches each in_progress task with drift/next-action,
+        // blockers, open uncertainties, and provenance. This test exercises
+        // the exact data pipeline — if any signal silently stops flowing, the
+        // platform hooks render a context-blind model.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+
+        // Create a prerequisite (left incomplete) + a dependent task.
+        let scope = vec!["src".to_string()];
+        app.create_task(
+            "prereq",
+            CreateTaskInput {
+                objective: "prerequisite",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+
+        app.create_task(
+            "dependent",
+            CreateTaskInput {
+                objective: "depends on prereq",
+                read_scope: &scope,
+                write_allow: &scope,
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &["prereq".to_string()],
+            },
+        )
+        .unwrap();
+
+        // Record an open uncertainty on the dependent task.
+        app.record_uncertainty("dependent", "U-1", "is the API stable?", None)
+            .unwrap();
+
+        let state = app.get_status("dependent").unwrap();
+
+        // Blocker: prereq is not Completed → unmet.
+        let unmet = app.unmet_dependencies("dependent").unwrap();
+        assert_eq!(unmet, vec!["prereq"]);
+
+        // Open uncertainty is visible in the ledger.
+        let ledger = app
+            .uncertainty_ledger_view(&state)
+            .expect("uncertainty ledger present");
+        assert_eq!(ledger.open, 1);
+        assert_eq!(ledger.items[0].id, "U-1");
+        assert_eq!(ledger.items[0].status, "open");
+
+        // next_action computes (held by unmet-dep gate or drift — either way
+        // it returns a valid proposal without error).
+        let na = app.next_action("dependent").unwrap();
+        assert!(!na.rationale.is_empty());
+
+        // No provenance recorded → None (the hook skips this field gracefully).
+        assert!(app.brainstorm_provenance_view(&state).is_none());
+    }
+
+    // ── next-task: deterministic scheduling recommendation ──
+
+    fn mk_ready_task(app: &ControlApp, id: &str, scope: &[&str]) {
+        app.create_task(
+            id,
+            CreateTaskInput {
+                objective: id,
+                read_scope: &scope.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                write_allow: &scope.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.mark_ready(id).unwrap();
+    }
+
+    #[test]
+    fn next_task_recommends_start_for_ready_unblocked_task() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_ready_task(&app, "alpha", &["src/alpha"]);
+        let rec = app.next_task().unwrap();
+        assert_eq!(rec.action, "start");
+        assert_eq!(rec.task_id.as_deref(), Some("alpha"));
+        assert_eq!(rec.ready_candidates, 1);
+    }
+
+    #[test]
+    fn next_task_picks_lowest_id_on_tie() {
+        // Two ready tasks, both drift 0 (no telemetry) → deterministic tie-break
+        // by task id ascending.
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_ready_task(&app, "zeta", &["src/zeta"]);
+        mk_ready_task(&app, "alpha", &["src/alpha"]);
+        let rec = app.next_task().unwrap();
+        assert_eq!(rec.task_id.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn next_task_skips_ready_task_with_unsatisfied_dep() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // prereq stays in planning (never completed) → dep unsatisfied.
+        app.create_task(
+            "prereq",
+            CreateTaskInput {
+                objective: "prereq",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        app.create_task(
+            "blocked",
+            CreateTaskInput {
+                objective: "blocked",
+                read_scope: &["src/b".to_string()],
+                write_allow: &["src/b".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &["prereq".to_string()],
+            },
+        )
+        .unwrap();
+        app.mark_ready("blocked").unwrap();
+
+        let rec = app.next_task().unwrap();
+        // blocked is ready but deps unsatisfied → not a start candidate.
+        // No actionable ready task → falls back to planning (prereq).
+        assert_eq!(rec.action, "ready");
+        assert_eq!(rec.task_id.as_deref(), Some("prereq"));
+    }
+
+    #[test]
+    fn next_task_falls_back_to_planning_when_no_ready() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        // Only a planning task exists.
+        app.create_task(
+            "seed",
+            CreateTaskInput {
+                objective: "planning seed",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+        let rec = app.next_task().unwrap();
+        assert_eq!(rec.action, "ready");
+        assert_eq!(rec.task_id.as_deref(), Some("seed"));
+    }
+
+    #[test]
+    fn next_task_none_when_everything_terminal() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let rec = app.next_task().unwrap();
+        assert_eq!(rec.action, "none");
+        assert!(rec.task_id.is_none());
+    }
+
+    #[test]
+    fn next_task_skips_ready_task_conflicting_with_active_scope() {
+        // An in_progress task on src/shared blocks a ready task on src/shared
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.path().join("src/shared/sub")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/other")).unwrap();
+        let app = ControlApp::init(dir.path()).unwrap();
+        mk_ready_task(&app, "active-one", &["src/shared"]);
+        app.start_task("active-one").unwrap();
+        // This ready task overlaps src/shared → skipped.
+        mk_ready_task(&app, "conflicting", &["src/shared/sub"]);
+        // This ready task is disjoint → recommended.
+        mk_ready_task(&app, "safe", &["src/other"]);
+        let rec = app.next_task().unwrap();
+        assert_eq!(rec.action, "start");
+        assert_eq!(rec.task_id.as_deref(), Some("safe"));
+    }
+
+    // ── Spec fact store (knowledge-accumulation-v1) ──
+
+    #[test]
+    fn spec_fact_add_assigns_sequential_ids_and_persists() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let f1 = app
+            .spec_fact_add(
+                "normalizer canonicalizes parent",
+                "src/norm.rs:77",
+                Some("boundary"),
+            )
+            .unwrap();
+        assert_eq!(f1.fact_id, "F-001");
+        let f2 = app
+            .spec_fact_add("reducer is pure", "src/domain/task.rs:871", Some("domain"))
+            .unwrap();
+        assert_eq!(f2.fact_id, "F-002");
+        // File persists.
+        assert!(dir.path().join(".ctl/facts.jsonl").exists());
+    }
+
+    #[test]
+    fn spec_fact_add_rejects_empty_statement_or_source() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        assert!(app.spec_fact_add("", "src/x", None).is_err());
+        assert!(app.spec_fact_add("a fact", "", None).is_err());
+    }
+
+    #[test]
+    fn spec_fact_list_filters_by_category_and_search() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        app.spec_fact_add(
+            "normalizer canonicalizes parent",
+            "src/norm.rs",
+            Some("boundary"),
+        )
+        .unwrap();
+        app.spec_fact_add("reducer is pure", "src/task.rs", Some("domain"))
+            .unwrap();
+        app.spec_fact_add("cli uses anyhow full path", "src/cli/mod.rs", Some("cli"))
+            .unwrap();
+
+        // By category.
+        let boundary = app.spec_fact_list(Some("boundary"), None).unwrap();
+        assert_eq!(boundary.len(), 1);
+        assert_eq!(boundary[0].fact_id, "F-001");
+
+        // By search.
+        let hits = app.spec_fact_list(None, Some("canonicalizes")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].fact_id, "F-001");
+
+        // No filter → all.
+        assert_eq!(app.spec_fact_list(None, None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn spec_facts_digest_summarizes_for_context_injection() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        app.spec_fact_add("fact a", "s", Some("boundary")).unwrap();
+        app.spec_fact_add("fact b", "s", Some("domain")).unwrap();
+        app.spec_fact_add("fact c", "s", Some("boundary")).unwrap();
+
+        let digest = app.spec_facts_digest().unwrap();
+        assert_eq!(digest.total, 3);
+        assert_eq!(digest.categories.get("boundary"), Some(&2));
+        assert_eq!(digest.categories.get("domain"), Some(&1));
+        // Most recent first.
+        assert_eq!(digest.recent[0].fact_id, "F-003");
+    }
+
+    #[test]
+    fn spec_fact_promote_appends_to_spec_markdown() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let fact = app
+            .spec_fact_add("a gotcha about paths", "src/norm.rs:77", Some("gotcha"))
+            .unwrap();
+
+        // Create the target spec file so canonicalize succeeds.
+        let spec_dir = dir.path().join(".ctl/spec/backend");
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        let target = spec_dir.join("error-handling.md");
+        std::fs::write(&target, "# Error Handling\n").unwrap();
+
+        let path = app
+            .spec_fact_promote(&fact.fact_id, "backend/error-handling.md")
+            .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Fact F-001"));
+        assert!(content.contains("category: gotcha"));
+        assert!(content.contains("a gotcha about paths"));
+        assert!(content.contains("src/norm.rs:77"));
+    }
+
+    #[test]
+    fn spec_fact_promote_rejects_unknown_id() {
+        let dir = TempDir::new();
+        let app = ControlApp::init(dir.path()).unwrap();
+        let err = app
+            .spec_fact_promote("F-999", "backend/x.md")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "{}", err);
     }
 }
 

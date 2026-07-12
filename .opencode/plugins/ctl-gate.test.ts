@@ -155,6 +155,44 @@ test("buildContextMessage includes scope, phase, and task id; null when no activ
   expect(msg).toContain("src/foo"); // scope
 });
 
+test("buildContextMessage renders drift, blockers, unknowns, and provenance when present", () => {
+  const msg = buildContextMessage([
+    {
+      id: "t-enriched",
+      objective: "smart task",
+      phase: "in_progress",
+      boundary: { write_allow: ["src/x"] },
+      next_action: { action: "ask", rationale: "medium drift" },
+      drift_level: "medium",
+      drift_score: 15,
+      blocked_by: ["dep-a"],
+      open_uncertainties: [{ id: "U-1", statement: "does it work?" }],
+      provenance: { brainstorm_id: "BS-1", convergence_path: ".ctl/spec/prd/x.md" },
+    },
+  ]);
+  expect(msg).toContain("Drift: medium");
+  expect(msg).toContain("→ ask");
+  expect(msg).toContain("Blocked by: dep-a");
+  expect(msg).toContain("Open unknowns (1): U-1 (does it work?)");
+  expect(msg).toContain("Derived from: .ctl/spec/prd/x.md");
+});
+
+test("buildContextMessage omits enrichment lines when next_action is pass", () => {
+  const msg = buildContextMessage([
+    {
+      id: "t-clean",
+      objective: "healthy task",
+      boundary: { write_allow: ["src/y"] },
+      next_action: { action: "pass", rationale: "all good" },
+      drift_level: "none",
+      drift_score: 0,
+    },
+  ]);
+  expect(msg).not.toContain("Drift:");
+  expect(msg).not.toContain("Blocked by");
+  expect(msg).not.toContain("Open unknowns");
+});
+
 test("context hook injects nothing when the ledger has no active task", async () => {
   const h = createHooks({ gate: async () => null, context: async () => ({ active_tasks: [] }) });
   const out = { system: [] as string[] };

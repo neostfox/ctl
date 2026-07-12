@@ -95,6 +95,21 @@ def main() -> None:
             lines.append(f"    Deny: {', '.join(b['write_deny'])}")
         if b.get("gates"):
             lines.append(f"    Gates: {', '.join(b['gates'])}")
+        na = t.get("next_action")
+        if na and na.get("action") != "pass":
+            lines.append(
+                f"    Drift: {t.get('drift_level', '?')} (score {t.get('drift_score', '?')})"
+                f" -> {na['action']} - {na.get('rationale', '')}"
+            )
+        if t.get("blocked_by"):
+            lines.append(f"    Blocked by: {', '.join(t['blocked_by'])}")
+        ucs = t.get("open_uncertainties")
+        if ucs:
+            summary = "; ".join(f"{u['id']} ({u['statement']})" for u in ucs)
+            lines.append(f"    Open unknowns ({len(ucs)}): {summary}")
+        prov = t.get("provenance")
+        if prov and prov.get("convergence_path"):
+            lines.append(f"    Derived from: {prov['convergence_path']}")
     lines.append(
         "The PreToolUse gate runs in OBSERVE MODE: out-of-scope or task-less "
         "writes, and commits outside the Review window, are allowed but recorded "
@@ -108,6 +123,22 @@ def main() -> None:
         "(a Claude platform boundary, not a TODO — see .claude/subagent-dispatch.md): "
         "dispatch only read-only subagents and keep writes inline in the main agent."
     )
+
+    facts = ctx.get("facts")
+    if facts and facts.get("total", 0) > 0:
+        cats = ", ".join(
+            f"{k}: {v}" for k, v in sorted(facts.get("categories", {}).items())
+        )
+        recent = facts.get("recent", [])
+        recent_str = "; ".join(
+            f"{r['fact_id']} ({r['statement'][:60]})" for r in recent[:3]
+        )
+        lines.append(
+            f"Knowledge base: {facts['total']} fact(s) [{cats}] | Recent: {recent_str}"
+        )
+        lines.append(
+            "  Search facts: ctl spec fact list --search <query>"
+        )
 
     mem = global_memory_lines()
     if mem:

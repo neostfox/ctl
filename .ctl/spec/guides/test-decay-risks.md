@@ -123,6 +123,7 @@ EVERY finding MUST follow: Symptom → Source → Consequence → Remedy.
 - Legacy code actively modified with no tests
 - Coverage % as sign-off while critical paths untested
 - Assertions on return values but not side effects (DB writes, events, state transitions)
+- Tautological Test: expected values recomputed via the same logic as the implementation — passes by construction, certifies nothing
 
 ### Severity
 

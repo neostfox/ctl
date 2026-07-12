@@ -237,6 +237,12 @@ export default function (pi: HookAPI): void {
           write_deny?: string[];
           gates?: string[];
         };
+        next_action?: { action: string; rationale: string };
+        drift_level?: string;
+        drift_score?: number;
+        blocked_by?: string[];
+        open_uncertainties?: Array<{ id: string; statement: string }>;
+        provenance?: { brainstorm_id: string; convergence_path?: string };
       }>;
       if (!active || active.length === 0) return undefined;
 
@@ -251,13 +257,35 @@ export default function (pi: HookAPI): void {
         const gates = b?.gates?.length
           ? `\n  🔍 Gates: ${b.gates.join(", ")}`
           : "";
-        return `  📦 ${t.id}: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}`;
+        const drift =
+          t.next_action && t.next_action.action !== "pass"
+            ? `\n  ⚠️ Drift: ${t.drift_level ?? "?"} (score ${t.drift_score ?? "?"}) → ${t.next_action.action} — ${t.next_action.rationale ?? ""}`
+            : "";
+        const blocked = t.blocked_by?.length
+          ? `\n  🚧 Blocked by: ${t.blocked_by.join(", ")}`
+          : "";
+        const unknowns = t.open_uncertainties?.length
+          ? `\n  ❓ Open unknowns (${t.open_uncertainties.length}): ${t.open_uncertainties.map((u) => `${u.id} (${u.statement})`).join("; ")}`
+          : "";
+        const prov =
+          t.provenance?.convergence_path
+            ? `\n  📎 Derived from: ${t.provenance.convergence_path}`
+            : "";
+        return `  📦 ${t.id}: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}${drift}${blocked}${unknowns}${prov}`;
       });
+
+      const facts = ctx.facts as
+        | { total: number; categories: Record<string, number>; recent: Array<{ fact_id: string; statement: string }> }
+        | undefined;
+      const factsLine =
+        facts && facts.total > 0
+          ? `\n📚 Knowledge base: ${facts.total} fact(s) [${Object.entries(facts.categories).map(([k, v]) => `${k}: ${v}`).join(", ")}] | Recent: ${facts.recent.slice(0, 3).map((r) => `${r.fact_id} (${r.statement.slice(0, 60)})`).join("; ")}\n  Search: ctl spec fact list --search <query>`
+          : "";
 
       const boundary = [
         `📋 Active ctl task boundaries — stay within write scope:`,
         ...lines,
-        `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
+        `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.${factsLine}`,
       ].join("\n");
 
       return {

@@ -60,6 +60,11 @@ phase is a separate skill that carries this same core plus its own body.
    changes. The user chooses which candidate becomes a new governed task.
 7. **handoff** — when the session is long, context is high, when switching
    agents or platforms, or before AFK / starting a separate governed run.
+8. **decision map** — situational, triggered from grill when an effort has
+   **fog**: decisions that cannot resolve until frontier work advances. Maintains
+   a project-level index (Destination · Frontier · Fog · Out of scope); fog
+   graduates into tasks incrementally via `ctl-to-tasks` rather than one upfront
+   slice pass. If grill surfaces no fog, skip it — the effort fits one session.
 
 ## Thinking frameworks, placed
 

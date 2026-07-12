@@ -49,10 +49,23 @@ export interface ActiveTask {
   objective: string;
   phase?: string;
   boundary?: { write_allow?: string[]; write_deny?: string[]; gates?: string[] };
+  next_action?: { action: string; rationale: string };
+  drift_level?: string;
+  drift_score?: number;
+  blocked_by?: string[];
+  open_uncertainties?: Array<{ id: string; statement: string }>;
+  provenance?: { brainstorm_id: string; convergence_path?: string };
+}
+
+export interface FactsDigest {
+  total: number;
+  categories: Record<string, number>;
+  recent: Array<{ fact_id: string; statement: string; category?: string }>;
 }
 
 export interface ContextResult {
   active_tasks?: ActiveTask[];
+  facts?: FactsDigest;
 }
 
 // opencode tool names whose denial/unavailability must fail CLOSED. `bash` is
@@ -172,24 +185,53 @@ export function buildDispatchArgs(input: { taskId: string; role: string }): stri
 }
 
 /**
- * Render the active-task system context — scope, phase, and task id per active
- * task. Returns null when there is no active task, so the plugin never
- * fabricates task context out of an empty ledger.
+ * Render the active-task system context — scope, phase, enrichment signals
+ * (drift, blockers, open unknowns, provenance) per active task. Returns null
+ * when there is no active task, so the plugin never fabricates context out of
+ * an empty ledger.
  */
-export function buildContextMessage(active: ActiveTask[] | undefined): string | null {
-  if (!active || active.length === 0) return null;
-  const lines = active.map((t) => {
+export function buildContextMessage(
+  active: ActiveTask[] | undefined,
+  facts?: FactsDigest,
+): string | null {
+  const hasActive = !!active && active.length > 0;
+  const hasFacts = !!facts && facts.total > 0;
+  if (!hasActive && !hasFacts) return null;
+
+  const lines = (active ?? []).map((t) => {
     const b = t.boundary;
     const scope = b?.write_allow?.length ? b.write_allow.join(", ") : "(no write scope)";
     const deny = b?.write_deny?.length ? `\n  🚫 Deny: ${b.write_deny.join(", ")}` : "";
     const gates = b?.gates?.length ? `\n  🔍 Gates: ${b.gates.join(", ")}` : "";
+    const drift =
+      t.next_action && t.next_action.action !== "pass"
+        ? `\n  ⚠️ Drift: ${t.drift_level ?? "?"} (score ${t.drift_score ?? "?"}) → ${t.next_action.action} — ${t.next_action.rationale ?? ""}`
+        : "";
+    const blocked = t.blocked_by?.length
+      ? `\n  🚧 Blocked by: ${t.blocked_by.join(", ")}`
+      : "";
+    const unknowns = t.open_uncertainties?.length
+      ? `\n  ❓ Open unknowns (${t.open_uncertainties.length}): ${t.open_uncertainties.map((u) => `${u.id} (${u.statement})`).join("; ")}`
+      : "";
+    const prov = t.provenance?.convergence_path
+      ? `\n  📎 Derived from: ${t.provenance.convergence_path}`
+      : "";
     const phase = t.phase ?? "in_progress";
-    return `  📦 ${t.id} [${phase}]: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}`;
+    return `  📦 ${t.id} [${phase}]: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}${drift}${blocked}${unknowns}${prov}`;
   });
+
+  const factsLine = hasFacts
+    ? `\n📚 Knowledge base: ${facts!.total} fact(s) [${Object.entries(facts!.categories).map(([k, v]) => `${k}: ${v}`).join(", ")}] | Recent: ${facts!.recent.slice(0, 3).map((r) => `${r.fact_id} (${r.statement.slice(0, 60)})`).join("; ")}\n  Search: ctl spec fact list --search <query>`
+    : "";
+
+  const header = hasActive
+    ? `📋 Active ctl task boundaries — stay within write scope:`
+    : `📋 ctl knowledge base:`;
+
   return [
-    `📋 Active ctl task boundaries — stay within write scope:`,
+    header,
     ...lines,
-    `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
+    `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.${factsLine}`,
   ].join("\n");
 }
 
@@ -350,7 +392,7 @@ export function createHooks(runner: CtlRunner) {
       // task-less write, out-of-window commit). Surface it without blocking —
       // the opencode plugin has no additionalContext channel, so stderr is
       // the honest best-effort forward (also lands in the decision record).
-      if (gate.warning && typeof process.stderr?.write === "function") {
+      if (gate.warning) {
         process.stderr.write(`\n⚠️ ctl observe [${gate.state}]: ${gate.warning}\n`);
       }
 
@@ -372,7 +414,7 @@ export function createHooks(runner: CtlRunner) {
       output: { system: string[] },
     ): Promise<void> => {
       const ctx = await runner.context();
-      const msg = buildContextMessage(ctx?.active_tasks);
+      const msg = buildContextMessage(ctx?.active_tasks, ctx?.facts);
       if (msg) output.system.push(msg);
     },
   };

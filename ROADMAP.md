@@ -857,9 +857,25 @@ run 路径），M6 `start_run` 仅 `generate_uuid()` 盖一个不透明 `lease_i
 - **`ctl research`（研究 / spike）✅** — `record / status`：研究型任务以「证据 + 未知项处置」而非代码完成。
 - **`ctl handoff export`（只读交接）✅** — 导出可移交的任务快照，供另一会话或人接手；不发事件。
 - **`ctl prd init`（PRD 脚手架）✅** — 生成带结构化 `## Tasks` 段的 PRD 模板。
-  （注：解析该模板生成任务的 `prd plan` 步骤为后续工作，当前未实现——见 `## 已知缺口`。）
+- **`ctl prd plan / validate / status`（认知闭环）✅** — `plan` 把已确认 PRD 的
+  `## Tasks` 段机械变成受治理任务（逐条 `create_task` + brainstorm provenance，仍走
+  PreToolUse gate）；`validate` 预校验格式/边界/重叠/门模板；`status` 披露
+  alignment→PRD→任务→进度血缘。无新事件、无模型判断在 plan 时介入——分解在 PRD
+  编写阶段已完成、人已确认。
 - **`ctl ralph`（无人值守安全监督）✅** — `ralph-safe-run-v1`：环绕外部 run 的只读 dead-man switch。
   **从不** spawn 执行器、从不写代码——一旦该交还人类注意力即停。
+- **`ctl next-task`（确定性调度建议）✅** — 在所有 Ready 任务里挑出依赖满足 + drift 最低 +
+  写范围与活动 in_progress 任务无冲突的那个，建议 `ctl task start --id <X>`；无 Ready 则回退到
+  Planning 任务建议 `ready`。完全确定性（drift 分数升序，平手按 id 升序），只读，不发事件。
+- **富上下文注入（`ctl hook context` 扩展）✅** — session 开始时模型不仅看到 active task 的边界，
+  还看到 drift level + next-action 建议、open uncertainties（带着哪些未决问题）、blockers（被哪些
+  未完成依赖卡住）、provenance（来自哪个 PRD/alignment）。三平台 hook（Claude / OMP / opencode）
+  同步渲染。纯上下文丰富——零决策变化、零边界放松，把已有确定性信号喂给模型。
+- **`ctl spec fact`（知识积累）✅** — 原子事实捕获 + 检索闭环。`add` 把对话中发现的客观事实（带
+  来源 provenance）追加到 `.ctl/facts.jsonl`（append-only evidence，非 canonical event）；
+  `list --search` 按类别/关键词检索；`promote --id F-003 --to <file>` 把事实提升为 curated spec
+  markdown。`ctl hook context` 注入事实摘要（总数 + 分类 + 最近 N 条）——**每个后续对话都看到积累的
+  知识**。两层：raw 事实流 + curated spec。record-and-disclose，不门控，L0 content。
 
 ## 已知缺口（reducer 就绪 / 生产未接线）
 
@@ -871,7 +887,7 @@ run 路径），M6 `start_run` 仅 `generate_uuid()` 盖一个不透明 `lease_i
   保留为前瞻脚手架，待真实需求再决定接线或移除。
 - **run 级 gate/evidence 重复事件**：`run_failed` / `gate_checked` / `evidence_accepted` /
   `evidence_rejected` 在 run reducer 中存在，但生产以任务级同名事件为准，run 级副本仅供回放/测试。
-- **`prd plan`**：`ctl prd init` 的结构化输出目前没有消费者；解析器为后续工作。
+- **`prd plan`** ✅ 已实现 — 见上「V1 认知层」段的 `ctl prd plan / validate / status`。
 
 ### 分发缺口：评审规则文件 ✅ 已修复
 

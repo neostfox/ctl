@@ -264,6 +264,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Recommend the next task to ready/start, ranked by satisfied deps +
+    /// lowest drift + no active scope conflict. Read-only and advisory.
+    NextTask {
+        /// Output as JSON (default is human-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Read-only handoff artifacts (ctl-handoff-v1): export a portable snapshot
     /// of a task for another session or human to pick up. Emits no events.
     Handoff {
@@ -275,6 +282,13 @@ enum Commands {
     Prd {
         #[command(subcommand)]
         command: PrdCommands,
+    },
+    /// Spec fact store (knowledge-accumulation-v1): capture and retrieve atomic
+    /// verified facts. `.ctl/facts.jsonl` is an append-only evidence index;
+    /// promote copies a fact into a curated spec markdown file.
+    Spec {
+        #[command(subcommand)]
+        command: SpecCommands,
     },
     /// Bounded safety supervisor for unattended runs (ralph-safe-run-v1). A
     /// read-only dead-man's-switch around an external run — it NEVER spawns an
@@ -976,6 +990,92 @@ enum PrdCommands {
         #[arg(long, default_value = "<title>")]
         title: String,
     },
+    /// Validate a filled PRD's `## Tasks` section: format, boundaries,
+    /// protected paths, gate templates, and cross-task write overlap. Read-only.
+    Validate {
+        /// Path to the PRD markdown file
+        #[arg(long)]
+        file: String,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn a confirmed PRD's `## Tasks` section into governed ctl tasks. Each
+    /// task still goes through the normal PreToolUse gate. A `draft` PRD is
+    /// refused unless `--dry-run`; `superseded` is always refused.
+    Plan {
+        /// Path to the PRD markdown file
+        #[arg(long)]
+        file: String,
+        /// Preview what would be created without persisting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to the alignment note (divergence provenance); the PRD file is
+        /// recorded as convergence. Optional — omit to skip provenance recording.
+        #[arg(long)]
+        alignment: Option<String>,
+    },
+    /// Show a PRD's observable-loop status: each task's existence, phase, and
+    /// brainstorm provenance, plus a completion summary. Read-only.
+    Status {
+        /// Path to the PRD markdown file
+        #[arg(long)]
+        file: String,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecCommands {
+    /// Atomic verified facts — the project knowledge base.
+    Fact {
+        #[command(subcommand)]
+        command: FactCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactCommands {
+    /// Record a verified fact. The statement + source persist to
+    /// `.ctl/facts.jsonl` and surface in every subsequent session's context.
+    Add {
+        /// The fact statement (what was verified)
+        #[arg(long)]
+        statement: String,
+        /// Where it was verified (file:line, command, URL) — required provenance
+        #[arg(long)]
+        source: String,
+        /// Free-text category for filtering (e.g. "boundary", "gotcha")
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List or search facts. Read-only.
+    List {
+        /// Filter by category (case-insensitive)
+        #[arg(long)]
+        category: Option<String>,
+        /// Search statement + source (case-insensitive substring)
+        #[arg(long)]
+        search: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append a fact as a formatted block into a curated spec markdown file
+    /// under `.ctl/spec/`. The fact stays in the raw store; this copies it
+    /// into processed knowledge.
+    Promote {
+        /// Fact id (e.g. F-003)
+        #[arg(long)]
+        id: String,
+        /// Target spec file, relative to `.ctl/spec/` (e.g. backend/error-handling.md)
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1440,13 +1540,15 @@ pub fn run() -> Result<()> {
         Commands::Telemetry { command } => cmd_telemetry(command, dry_run),
         Commands::Drift { command } => cmd_drift(command),
         Commands::NextAction { id, json } => cmd_next_action(id, *json),
+        Commands::NextTask { json } => cmd_next_task(*json),
         Commands::Handoff { command } => cmd_handoff(command),
-        Commands::Prd { command } => cmd_prd(command),
+        Commands::Prd { command } => cmd_prd(command, dry_run),
         Commands::Ralph { command } => cmd_ralph(command),
         Commands::Brainstorm { command } => cmd_brainstorm(command),
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
+        Commands::Spec { command } => cmd_spec(command, dry_run),
     }
 }
 
@@ -3011,13 +3113,12 @@ fn cmd_drift(command: &DriftCommands) -> Result<()> {
 /// PRD template (workflow-prd-to-tasks-v1). `{title}` is substituted at runtime.
 /// The `## Tasks` section is a deliberate, parseable convention — `id` /
 /// `objective` / `write-allow` / `gates` per vertical task — so a later
-/// `prd plan` step can map each item to a `ctl task create`. Keep this in sync
-/// with that parser when it lands.
 const PRD_TEMPLATE: &str = r#"# PRD: {title}
 
-> Fill this out (the "grill" step), then a later `ctl prd plan --file <this>.md`
-> can turn the `## Tasks` section into ctl tasks. Until then this is a shape to
-> fill, not an executable spec.
+> Status: draft
+> Fill this out (the grill step), then `ctl prd plan --file <this>.md` can turn
+> the `## Tasks` section into ctl tasks. Change `Status` to `confirmed` once the
+> plan is accepted; until then this is a shape to fill, not an executable spec.
 
 ## Objective
 
@@ -3029,25 +3130,258 @@ const PRD_TEMPLATE: &str = r#"# PRD: {title}
 
 ## Tasks
 
-<!-- One list item per vertical (independently shippable) task. Conventions a
-     future `prd plan` parser will rely on:
+<!-- One list item per vertical (independently shippable) task. Conventions the
+     `ctl prd plan` parser relies on:
        - id:          kebab-case, unique
        - objective:   non-empty, one line
        - write-allow: comma-separated paths (the task's write boundary)
        - gates:       comma-separated gate template ids
-     read-scope defaults to write-allow. Keep each task small enough that one
-     agent can finish it within its boundary. -->
+       - read-scope:  optional, comma-separated paths (defaults to write-allow)
+       - depends-on:  optional, comma-separated task ids (M-d dependency edges)
+     Keep each task small enough that one agent can finish it within its
+     boundary. -->
 
 - id: <kebab-id>
   objective: <non-empty objective>
   write-allow: <path>[, <path> ...]
   gates: cargo_fmt_check, cargo_check, cargo_clippy, cargo_test
+  read-scope: <path>[, <path> ...]
+  depends-on: <kebab-id>[, <kebab-id> ...]
 "#;
 
-fn cmd_prd(command: &PrdCommands) -> Result<()> {
+fn cmd_prd(command: &PrdCommands, global_dry_run: bool) -> Result<()> {
+    use crate::application::prd::{parse_prd, PrdDocument};
+
+    let read_prd = |file: &str| -> Result<PrdDocument> {
+        let content = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("Failed to read PRD file '{}': {}", file, e))?;
+        parse_prd(&content).map_err(|e| anyhow::anyhow!("Failed to parse PRD '{}': {}", file, e))
+    };
+
     match command {
         PrdCommands::Init { title } => {
             print!("{}", PRD_TEMPLATE.replace("{title}", title));
+            Ok(())
+        }
+
+        PrdCommands::Validate { file, json } => {
+            let app = app_open(false)?;
+            let doc = read_prd(file)?;
+            let validation = app.prd_validate(&doc)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&validation)?);
+            } else {
+                render_prd_validation(&validation, &doc);
+            }
+            Ok(())
+        }
+
+        PrdCommands::Plan {
+            file,
+            dry_run,
+            alignment,
+        } => {
+            // The PRD file is the convergence artifact; alignment is divergence.
+            let doc = read_prd(file)?;
+            let dry = *dry_run || global_dry_run;
+            let app = app_open(dry)?;
+            let outcomes = app.prd_plan(&doc, alignment.as_deref(), Some(file.as_str()), dry)?;
+            render_prd_plan(&outcomes, dry);
+            Ok(())
+        }
+
+        PrdCommands::Status { file, json } => {
+            let app = app_open(false)?;
+            let doc = read_prd(file)?;
+            let view = app.prd_status_view(&doc)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                render_prd_status(&view);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Render a validation result as human-readable text. Never a verdict — just
+/// the problems found, grouped by severity.
+fn render_prd_validation(
+    validation: &crate::application::prd::PrdValidation,
+    doc: &crate::application::prd::PrdDocument,
+) {
+    let errors = validation.errors();
+    let warnings = validation.warnings();
+    println!(
+        "PRD '{}' (status: {}): {} task(s)",
+        doc.title,
+        doc.status.as_str(),
+        doc.tasks.len()
+    );
+    if errors.is_empty() && warnings.is_empty() {
+        println!("OK — no format, boundary, gate, or overlap problems found.");
+        return;
+    }
+    if !errors.is_empty() {
+        println!("ERRORS (block `ctl prd plan`):");
+        for p in &errors {
+            match &p.task_id {
+                Some(tid) => println!("  [{}] {}", tid, p.message),
+                None => println!("  {}", p.message),
+            }
+        }
+    }
+    if !warnings.is_empty() {
+        println!("WARNINGS:");
+        for p in &warnings {
+            match &p.task_id {
+                Some(tid) => println!("  [{}] {}", tid, p.message),
+                None => println!("  {}", p.message),
+            }
+        }
+    }
+}
+
+/// Render a plan outcome (dry-run preview or real creation summary).
+fn render_prd_plan(outcomes: &[crate::application::prd::PrdPlanOutcome], dry: bool) {
+    if dry {
+        println!("[dry-run] Would plan {} task(s):", outcomes.len());
+    } else {
+        println!("Planned {} task(s):", outcomes.len());
+    }
+    for o in outcomes {
+        let deps = if o.depends_on.is_empty() {
+            String::from("(none)")
+        } else {
+            o.depends_on.join(", ")
+        };
+        let prov = if o.provenance_recorded {
+            " + provenance"
+        } else {
+            ""
+        };
+        match o.seq {
+            Some(seq) => println!(
+                "  {} [seq {}] — {} | write: {} | gates: {} | deps: {}{}",
+                o.task_id,
+                seq,
+                o.objective,
+                o.write_allow.join(", "),
+                o.gates.join(", "),
+                deps,
+                prov
+            ),
+            None => println!(
+                "  {} — {} | write: {} | gates: {} | deps: {}",
+                o.task_id,
+                o.objective,
+                o.write_allow.join(", "),
+                o.gates.join(", "),
+                deps
+            ),
+        }
+    }
+    if dry {
+        println!("Next: edit the PRD, validate, then `ctl prd plan --file <this>.md`");
+    } else if let Some(first) = outcomes.first() {
+        println!(
+            "Next: ctl task ready --id {}  (then ctl board to see all planned tasks)",
+            first.task_id
+        );
+    }
+}
+
+/// Render the observable-loop status view.
+fn render_prd_status(view: &crate::application::prd::PrdStatusView) {
+    println!(
+        "PRD '{}' — status: {} — {}/{} completed",
+        view.title,
+        view.status.as_str(),
+        view.completed,
+        view.total
+    );
+    for row in &view.rows {
+        match (&row.phase, &row.provenance) {
+            (None, _) => println!("  {} — not created yet", row.id),
+            (Some(phase), Some(prov)) => {
+                let conv = prov
+                    .convergence
+                    .as_ref()
+                    .map(|a| a.path.as_str())
+                    .unwrap_or("(none)");
+                println!("  {} — {} — provenance: {}", row.id, phase, conv);
+            }
+            (Some(phase), None) => println!("  {} — {} — no provenance recorded", row.id, phase),
+        }
+    }
+}
+
+fn cmd_spec(command: &SpecCommands, global_dry_run: bool) -> Result<()> {
+    match command {
+        SpecCommands::Fact { command } => cmd_spec_fact(command, global_dry_run),
+    }
+}
+
+fn cmd_spec_fact(command: &FactCommands, global_dry_run: bool) -> Result<()> {
+    match command {
+        FactCommands::Add {
+            statement,
+            source,
+            category,
+            dry_run,
+        } => {
+            let dry = *dry_run || global_dry_run;
+            let app = app_open(dry)?;
+            if dry {
+                println!(
+                    "[dry-run] Would record fact: \"{}\" (source: {}, category: {})",
+                    statement,
+                    source,
+                    category.as_deref().unwrap_or("(none)")
+                );
+                return Ok(());
+            }
+            let fact = app.spec_fact_add(statement, source, category.as_deref())?;
+            println!(
+                "Recorded fact '{}' (category: {}) at {} — source: {}",
+                fact.fact_id,
+                category.as_deref().unwrap_or("uncategorized"),
+                fact.recorded_at,
+                fact.source
+            );
+            println!("  {}", fact.statement);
+            println!("Next: ctl spec fact list");
+            Ok(())
+        }
+
+        FactCommands::List {
+            category,
+            search,
+            json,
+        } => {
+            let app = app_open(false)?;
+            let facts = app.spec_fact_list(category.as_deref(), search.as_deref())?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&facts)?);
+                return Ok(());
+            }
+            if facts.is_empty() {
+                println!("No facts found.");
+                return Ok(());
+            }
+            println!("Knowledge base: {} fact(s)", facts.len());
+            for f in &facts {
+                let cat = f.category.as_deref().unwrap_or("uncategorized");
+                println!("  {} [{}] — {}", f.fact_id, cat, f.statement);
+                println!("    source: {}", f.source);
+            }
+            Ok(())
+        }
+
+        FactCommands::Promote { id, to } => {
+            let app = app_open(false)?;
+            let path = app.spec_fact_promote(id, to)?;
+            println!("Promoted fact '{}' into {}", id, path.display());
             Ok(())
         }
     }
@@ -3273,6 +3607,33 @@ fn cmd_next_action(id: &str, json: bool) -> Result<()> {
         println!("  (advisory only — generates no events, changes no scope, starts no task)");
     }
     println!("  suggested: {}", proposal.suggested_command);
+    Ok(())
+}
+
+fn cmd_next_task(json: bool) -> Result<()> {
+    let app = app_open(false)?;
+    let rec = app.next_task()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rec)?);
+        return Ok(());
+    }
+    match rec.action {
+        "start" | "ready" => {
+            let id = rec.task_id.as_deref().unwrap_or("?");
+            let obj = rec.objective.as_deref().unwrap_or("");
+            println!("Next: ctl task {} --id {}", rec.action, id);
+            println!("  task: {} — {}", id, obj);
+            println!("  rationale: {}", rec.rationale);
+            println!(
+                "  candidates: {} ready, {} planning",
+                rec.ready_candidates, rec.planning_candidates
+            );
+        }
+        _ => {
+            println!("No actionable task found.");
+            println!("  {}", rec.rationale);
+        }
+    }
     Ok(())
 }
 
@@ -5042,6 +5403,7 @@ fn check_milestone_scope() -> Result<()> {
             "hook",
             "init",
             "next-action",
+            "next-task",
             "prd",
             "ralph",
             "reconcile",
@@ -5055,6 +5417,7 @@ fn check_milestone_scope() -> Result<()> {
             "schema",
             "self-update",
             "skills",
+            "spec",
             "task",
             "telemetry",
             "uncertainty",
@@ -5754,10 +6117,10 @@ fn cmd_hook_context() -> Result<()> {
         *by_phase.entry(phase.to_string()).or_default() += 1;
         if phase == "in_progress" {
             let task_id = report.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-            // Replay to get full boundary for context injection
-            let boundary = app
-                .replay_task(task_id)
-                .ok()
+            let state = app.replay_task(task_id).ok();
+
+            let boundary = state
+                .as_ref()
                 .map(|s| {
                     serde_json::json!({
                         "write_allow": s.write_allow,
@@ -5767,12 +6130,67 @@ fn cmd_hook_context() -> Result<()> {
                     })
                 })
                 .unwrap_or(serde_json::json!({}));
-            active.push(serde_json::json!({
+
+            let mut task_obj = serde_json::json!({
                 "id": task_id,
                 "phase": phase,
                 "objective": report.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
                 "boundary": boundary,
-            }));
+            });
+
+            // Enrichment — each block is independently fault-tolerant so one
+            // failure never kills the whole context injection. These surface
+            // deterministic governance signals the model would otherwise have
+            // to query manually (drift, blockers, unknowns, provenance).
+            if let Some(s) = &state {
+                // Drift + recommended next action (M5).
+                if let Ok(na) = app.next_action(task_id) {
+                    task_obj["next_action"] = serde_json::json!({
+                        "action": na.action.as_str(),
+                        "rationale": na.rationale,
+                    });
+                    task_obj["drift_level"] = serde_json::json!(na.level.as_str());
+                    task_obj["drift_score"] = serde_json::json!(na.score);
+                }
+
+                // Unmet dependencies (M-d) — tasks blocking this one.
+                if let Ok(unmet) = app.unmet_dependencies(task_id) {
+                    if !unmet.is_empty() {
+                        task_obj["blocked_by"] = serde_json::json!(unmet);
+                    }
+                }
+
+                // Open uncertainties — unknowns this task is carrying.
+                if let Some(ledger) = app.uncertainty_ledger_view(s) {
+                    let open: Vec<_> = ledger
+                        .items
+                        .iter()
+                        .filter(|u| u.status == "open")
+                        .map(|u| {
+                            serde_json::json!({
+                                "id": u.id,
+                                "statement": u.statement,
+                            })
+                        })
+                        .collect();
+                    if !open.is_empty() {
+                        task_obj["open_uncertainties"] = serde_json::json!(open);
+                    }
+                }
+
+                // Brainstorm provenance — where this task came from.
+                if let Some(prov) = app.brainstorm_provenance_view(s) {
+                    task_obj["provenance"] = serde_json::json!({
+                        "brainstorm_id": prov.id,
+                        "convergence_path": prov
+                            .convergence
+                            .as_ref()
+                            .map(|a| a.path.clone()),
+                    });
+                }
+            }
+
+            active.push(task_obj);
         }
     }
 
@@ -5790,7 +6208,12 @@ fn cmd_hook_context() -> Result<()> {
         }
     }
 
-    let output = serde_json::json!({
+    // Knowledge base digest (facts.jsonl) — inject a compact summary so every
+    // subsequent session sees accumulated knowledge. Fault-tolerant: missing
+    // file → no facts field, never crashes context injection.
+    let facts = app.spec_facts_digest().ok();
+
+    let mut output = serde_json::json!({
         "binary": "ctl",
         // Version visibility (B-lite): the governance rules live in this
         // binary, so every session should see WHICH binary answered.
@@ -5799,6 +6222,9 @@ fn cmd_hook_context() -> Result<()> {
         "active_tasks": active,
         "spec_layers": spec_layers,
     });
+    if let Some(digest) = facts {
+        output["facts"] = serde_json::json!(digest);
+    }
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
@@ -7832,6 +8258,9 @@ mod tests {
             "objective:",
             "write-allow:",
             "gates:",
+            "read-scope:",
+            "depends-on:",
+            "Status: draft",
         ] {
             assert!(t.contains(needle), "template must contain {needle:?}");
         }
