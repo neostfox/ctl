@@ -7,8 +7,17 @@ description: "Align before building — the single entry to the alignment statio
 ## Station contract
 
 - **Upstream**: control-guard triage — any non-trivial request enters here first.
-- **Produces**: alignment note at `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md` (`draft` → `confirmed`); registered as brainstorm provenance (record-only).
-- **Downstream**: `ctl-to-prd` consumes the **confirmed** note; for a single obvious task, control-guard may go straight to `ctl task create`.
+- **Depth by fit**: classify on entry — `trivial` (control-guard edits directly,
+  grill skipped); `single-task converged` (clear objective, ≤2 write_allow, no
+  design divergence → grill degrades to a 5-line intent confirm, then straight
+  to `ctl task create`); `multi-option / ambiguous / high-risk` (full interview
+  below). The user can always request the full interview.
+- **Produces**: alignment note at `.ctl/spec/alignment/` (`draft` → `confirmed`);
+  on the single-task path the note lives in-conversation — provenance is
+  optional, recorded post-create if desired (record-only).
+- **Downstream**: `ctl-to-prd` consumes a **confirmed** note ONLY when multiple
+  durable tasks are needed; a single converged task skips PRD and goes to
+  `ctl task create` directly.
 
 ## The grill (alignment phase body)
 
@@ -20,15 +29,18 @@ confident**, by proposing an answer, not by staying silent.
 
 ### The interview loop (micro-decisions)
 
-Interview relentlessly but narrowly, one micro-decision at a time:
+Interview relentlessly but narrowly:
 
-- Ask the **single highest-value open question**, then wait.
+- Ask the **single highest-value open question**, then wait — OR batch
+  **independent** micro-decisions into one multi-select ask (recommended answer
+  preserved per item) to cut round-trips.
 - Every question carries: the decision needed · why it matters · **your
   recommended answer** · the trade-off if the user chooses otherwise.
 - Prefer concrete options over open-ended prompts; never ask process questions
   ("should I search the code?") — just do the work.
-- Stop when both sides confirm shared understanding of goals, constraints, and
-  approach.
+- **Converge-and-exit**: once goals, constraints, and approach are shared, stop.
+  On the single-task path, take the converged proposal straight to
+  `ctl task create` — do not force a PRD or a full alignment-note write-up.
 - **Do not build until the user confirms the shared understanding.**
 
 ### Diverge first when the request is broad
@@ -60,19 +72,23 @@ read scope · minimal write_allow · gates · risks) for control-guard.
 
 ### Where artifacts go
 
-- The alignment note: `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md` (spec tier —
-  writable under the gate; mark `status: draft` until the user confirms).
-- Working notes once a task exists: `.ctl/tasks/<task-id>/grill.md` (inside the
-  active task's `write_allow`).
+- **Single-task path**: the alignment note lives in-conversation during grill
+  (no file write up front). Provenance is optional: if you want it recorded,
+  write the note to `.ctl/spec/alignment/` and run
+  `ctl brainstorm record --id <task-id> --brainstorm <bs-id> --divergence <note-path>`
+  after `ctl task create`.
+- **Multi-task path**: write `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md`
+  (spec tier — writable; `status: draft` until confirmed) — `ctl-to-prd` reads it.
+- Working notes once a task exists: `.ctl/tasks/<task-id>/grill.md` (inside
+  `write_allow`).
 - A crystallized domain term or decision **only when the user confirms it**:
-  `.ctl/spec/domain.md` or `.ctl/spec/adr/ADR-xxxx.md`. Do **not** write a
-  domain/ADR doc on your own judgement — an ADR records a *confirmed* decision,
-  not a draft thought.
+  `.ctl/spec/domain.md` or `.ctl/spec/adr/ADR-xxxx.md`.
 
 ### Anti-patterns
 
 - ❌ Asking the user something the repository already answers.
-- ❌ Multiple questions in one message, or a question without a recommended answer.
+- ❌ Multiple DEPENDENT questions in one message (independent decisions may
+  batch as one multi-select), or a question without a recommended answer.
 - ❌ Building, or creating the implementation task, before the user confirms.
 - ❌ Writing a domain/ADR doc without user confirmation or outside write scope.
 
@@ -102,7 +118,8 @@ inside an active task's scope. `explore` is the only read-only role.
 <!-- integration:claude -->
 
 The alignment station's single entry. Run the interview loop with
-`AskUserQuestion` — one micro-decision per call, the recommended answer listed
+`AskUserQuestion` — one micro-decision per call, or independent decisions
+batched as one multi-select call (recommended answer listed
 first and marked "(Recommended)". Record which cognitive artifacts the eventual
 task derived from with `ctl brainstorm` provenance (record-only — never gates
 create/finish). The alignment note targets `.ctl/spec/alignment/` (spec tier —
