@@ -307,7 +307,7 @@ impl PrdValidation {
 
 /// Pure format validation (no IO): id shape, uniqueness, non-empty required
 /// fields, and within-PRD dependency references. Boundary normalization,
-/// protected-path rejection, gate-template validity, and cross-task overlap
+/// protected-path warning, gate-template validity, and cross-task overlap
 /// need the application layer (project root + normalizer) and are run there.
 pub fn validate_format(doc: &PrdDocument) -> PrdValidation {
     let mut v = PrdValidation::default();
