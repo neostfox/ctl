@@ -1,10 +1,9 @@
 use super::{
     classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
-    format_brainstorm_provenance, format_decision_line, format_decisions,
-    format_research_output, format_uncertainty_ledger, is_cargo_target_build,
-    iso8601_utc_to_epoch, omp_agent_env_file, parse_project_default_gates,
-    resolve_active_governance, resolve_ctl_for_hook, upsert_env_line, wrapup_pending,
-    ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
+    format_brainstorm_provenance, format_decision_line, format_decisions, format_research_output,
+    format_uncertainty_ledger, is_cargo_target_build, iso8601_utc_to_epoch, omp_agent_env_file,
+    parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
+    wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -612,8 +611,7 @@ fn research_output_discloses_facts_no_verdict_no_discovered_scalar() {
 
 #[test]
 fn project_gates_single_line() {
-    let cfg =
-        "[project]\ndefault_gates = [\"cargo_check\", \"cargo_test\", \"cargo_clippy\"]\n";
+    let cfg = "[project]\ndefault_gates = [\"cargo_check\", \"cargo_test\", \"cargo_clippy\"]\n";
     assert_eq!(
         parse_project_default_gates(cfg),
         vec!["cargo_check", "cargo_test", "cargo_clippy"]
@@ -622,7 +620,8 @@ fn project_gates_single_line() {
 
 #[test]
 fn project_gates_multi_line() {
-    let cfg = "[project]\ntype = \"rust\"\ndefault_gates = [\n  \"cargo_check\",\n  \"cargo_test\",\n]\n";
+    let cfg =
+        "[project]\ntype = \"rust\"\ndefault_gates = [\n  \"cargo_check\",\n  \"cargo_test\",\n]\n";
     assert_eq!(
         parse_project_default_gates(cfg),
         vec!["cargo_check", "cargo_test"]

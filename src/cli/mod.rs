@@ -7867,6 +7867,5 @@ fn cmd_hook_spec_status() -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests;

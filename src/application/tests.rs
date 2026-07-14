@@ -2817,15 +2817,8 @@ fn uncertainty_invalidated_requires_reason_rejects_evidence() {
         .unwrap_err()
         .to_string();
     assert!(no_reason.contains("requires a reason"), "got: {no_reason}");
-    app.record_uncertainty_disposition(
-        "t",
-        "U-1",
-        "invalidated",
-        None,
-        None,
-        Some("premise gone"),
-    )
-    .unwrap();
+    app.record_uncertainty_disposition("t", "U-1", "invalidated", None, None, Some("premise gone"))
+        .unwrap();
     let state = app.get_status("t").unwrap();
     assert_eq!(state.uncertainties[0].status.as_str(), "invalidated");
     assert_eq!(
@@ -3103,15 +3096,8 @@ fn legacy_inline_resolve_still_replays_after_oracle_v1() {
     app.record_uncertainty("t", "U-1", "legacy?", None).unwrap();
     let ev = app.project_root.join("src").join("legacy.txt");
     std::fs::write(&ev, b"legacy evidence").unwrap();
-    app.record_uncertainty_disposition(
-        "t",
-        "U-1",
-        "resolved",
-        Some("src/legacy.txt"),
-        None,
-        None,
-    )
-    .unwrap();
+    app.record_uncertainty_disposition("t", "U-1", "resolved", Some("src/legacy.txt"), None, None)
+        .unwrap();
     // Replay from canonical events rebuilds the same state.
     let state = app.replay_task("t").unwrap();
     let u = &state.uncertainties[0];

@@ -15,7 +15,7 @@
 - **`prd plan` is a designed-but-unimplemented gap, not a new idea.** The PRD
   template (`src/cli/mod.rs` `PRD_TEMPLATE`, L3016) carries an HTML comment:
   "Conventions a future `prd plan` parser will rely on." A test
-  (`prd_template_holds_the_parseable_convention`, L7822) pins the format.
+  (`prd_template_holds_the_parseable_convention`, now in `src/cli/tests.rs`) pins the format.
   ROADMAP L860/L874 list `prd plan` under "已知缺口."
 - **The decomposition intelligence already happened upstream.** The PRD
   `## Tasks` section is authored during the ctl-to-prd/ctl-to-tasks step and

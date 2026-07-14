@@ -5766,7 +5766,6 @@ fn event_occurred_at_by_seq(events: &[Event], seq: i64) -> Option<String> {
         .map(|e| e.occurred_at.clone())
 }
 
-
 #[cfg(test)]
 mod tests;
 
