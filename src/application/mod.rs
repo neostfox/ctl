@@ -533,6 +533,21 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// A release task took a granted apply-approval on a release manifest
+    /// (Cargo.toml / Cargo.lock) — i.e., a version bump. [`finish_task`]
+    /// requires the FULL CI verify set (fmt+clippy+test+arch) for these, not
+    /// just declared gates, closing the "declared < CI verify" gap.
+    fn is_release_task(state: &TaskState) -> bool {
+        state.pending_approvals.values().any(|a| {
+            a.is_granted()
+                && a.scope.get("action").and_then(|v| v.as_str()) == Some("apply")
+                && matches!(
+                    a.scope.get("path").and_then(|v| v.as_str()),
+                    Some("Cargo.toml") | Some("Cargo.lock")
+                )
+        })
+    }
+
     /// Completion interlock: phase must be Review, not held, all gates passing,
     /// and no rejected evidence.
     pub fn finish_task(&self, task_id: &str) -> Result<Event> {
@@ -581,6 +596,38 @@ impl ControlApp {
                 }
                 _ => {
                     failing_gates.push(gate_id.as_str());
+                }
+            }
+        }
+        // ── Release-task verify floor (mirrors CI verify): a task that took a
+        // granted apply-approval on a release manifest (Cargo.toml / Cargo.lock)
+        // is a version-bump release. Its finish must pass the FULL CI verify set
+        // — fmt + clippy + test + architecture — not just the gates it happened
+        // to declare via --gates. Closes the "declared gates < CI verify" gap
+        // that once let a rustfmt-drift pass finish and fail only on push.
+        let is_release = Self::is_release_task(&state);
+        if is_release {
+            for baseline in [
+                "cargo_fmt_check",
+                "cargo_clippy",
+                "cargo_test",
+                "architecture_check",
+            ] {
+                if state.gates.contains(baseline) {
+                    continue; // already enforced by the declared-gate loop above
+                }
+                match state.gate_results.get(baseline) {
+                    Some(result) if result.passed => {
+                        if let Some(current) = &current_tree {
+                            if result.tree_hash.as_deref() != Some(current.as_str()) {
+                                tree_stale.push(baseline);
+                            }
+                        }
+                        if result.policy_hash.as_deref() != Some(current_policy.as_str()) {
+                            policy_stale.push(baseline);
+                        }
+                    }
+                    _ => failing_gates.push(baseline),
                 }
             }
         }

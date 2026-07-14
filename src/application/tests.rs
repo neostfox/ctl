@@ -4052,3 +4052,61 @@ fn spec_fact_promote_rejects_unknown_id() {
         .to_string();
     assert!(err.contains("not found"), "{}", err);
 }
+
+#[test]
+fn is_release_task_detects_granted_manifest_apply_approval() {
+    // The finish interlock forces the full CI verify set ONLY for release
+    // tasks. A release task = a granted apply-approval on Cargo.toml/Cargo.lock.
+    // This pins the predicate so the "declared < CI" gate cannot silently
+    // regress to over- or under-triggering.
+    let dir = TempDir::new();
+    let app = ControlApp::init(dir.path()).unwrap();
+
+    // Granted Cargo.toml apply → release task.
+    inprogress_task(&app, "rel", &["src"]);
+    let req = app
+        .approval_request(
+            "rel",
+            "version bump",
+            serde_json::json!({ "action": "apply", "path": "Cargo.toml" }),
+            3600,
+        )
+        .unwrap();
+    let rid = req.payload["request_id"].as_str().unwrap().to_string();
+    app.approval_grant("rel", &rid).unwrap();
+    assert!(
+        ControlApp::is_release_task(&app.replay_task("rel").unwrap()),
+        "granted Cargo.toml apply marks a release task"
+    );
+
+    // Granted src/ apply → NOT a release task (ordinary out-of-scope edit).
+    inprogress_task(&app, "src", &["src"]);
+    let req2 = app
+        .approval_request(
+            "src",
+            "out-of-scope edit",
+            serde_json::json!({ "action": "apply", "path": "src/foo.rs" }),
+            3600,
+        )
+        .unwrap();
+    let rid2 = req2.payload["request_id"].as_str().unwrap().to_string();
+    app.approval_grant("src", &rid2).unwrap();
+    assert!(
+        !ControlApp::is_release_task(&app.replay_task("src").unwrap()),
+        "a src/ apply is not a release task"
+    );
+
+    // PENDING (un-granted) Cargo.lock apply → NOT yet a release task.
+    inprogress_task(&app, "pend", &["src"]);
+    app.approval_request(
+        "pend",
+        "pending bump",
+        serde_json::json!({ "action": "apply", "path": "Cargo.lock" }),
+        3600,
+    )
+    .unwrap();
+    assert!(
+        !ControlApp::is_release_task(&app.replay_task("pend").unwrap()),
+        "a pending (un-granted) Cargo.lock apply is not yet a release task"
+    );
+}

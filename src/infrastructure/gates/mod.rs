@@ -49,6 +49,13 @@ pub static GATE_TEMPLATES: &[GateTemplate] = &[
         command: "cargo",
         args: &["clippy", "--", "-D", "warnings"],
     },
+    GateTemplate {
+        id: "architecture_check",
+        description:
+            "Run ctl architecture layer-dependency check (cargo run -- architecture check)",
+        command: "cargo",
+        args: &["run", "--quiet", "--", "architecture", "check"],
+    },
     // ── TypeScript / Node gates (non-Rust projects) ─────────────────────────
     // Invoked via `npx`, which resolves to the project's local
     // node_modules/.bin when the tool is a devDependency. EXEC-003's network
@@ -411,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_list_templates_count() {
-        assert_eq!(list_templates().len(), 7); // 4 cargo + 3 typescript; update when adding more
+        assert_eq!(list_templates().len(), 8); // 5 cargo + 3 typescript; update when adding more
     }
 
     #[test]
