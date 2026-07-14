@@ -12,14 +12,10 @@ pub struct EmbeddedFile {
 
 pub fn all_embedded_files() -> Vec<EmbeddedFile> {
     vec![
-        // Skills (6: entry/router + planning + review + diagnosis + spec bootstrap/update)
+        // Skills (5: entry/router + review + diagnosis + spec bootstrap/update)
         EmbeddedFile {
             relative_path: "skills/control-guard/SKILL.md",
             content: include_str!("../../.omp/skills/control-guard/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-brainstorm/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-brainstorm/SKILL.md"),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-review/SKILL.md",
@@ -30,12 +26,8 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.omp/skills/ctl-diagnose/SKILL.md"),
         },
         EmbeddedFile {
-            relative_path: "skills/ctl-spec-update/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-spec-update/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-spec-bootstrap/SKILL.md"),
+            relative_path: "skills/ctl-spec/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-spec/SKILL.md"),
         },
         // Workflow skills foundation (workflow-skills-foundation-v1): ctl-native
         // rewrites of the grill → PRD → tasks → TDD → handoff disciplines. Each
@@ -62,21 +54,9 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-handoff/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-handoff/SKILL.md"),
         },
-        EmbeddedFile {
-            relative_path: "skills/ctl-architecture-review/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-architecture-review/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-decision-map/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-decision-map/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-cli-reference/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-cli-reference/SKILL.md"),
-        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
-        // than being regenerated per project by ctl-spec-bootstrap. Closes the
+        // than being regenerated per project by ctl-spec. Closes the
         // distribution gap: ctl-review/ctl-diagnose pointed at these but they
         // lived only in the gitignored, per-project `.ctl/spec/`.
         EmbeddedFile {
@@ -160,10 +140,6 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.claude/hooks/ctl-gate.py"),
         },
         EmbeddedFile {
-            relative_path: "hooks/ctl-wrapup.py",
-            content: include_str!("../../.claude/hooks/ctl-wrapup.py"),
-        },
-        EmbeddedFile {
             relative_path: "settings.json",
             content: include_str!("../../.claude/settings.json"),
         },
@@ -195,30 +171,13 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-handoff/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-handoff/SKILL.md"),
         },
-        EmbeddedFile {
-            relative_path: "skills/ctl-architecture-review/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-architecture-review/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-decision-map/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-decision-map/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-cli-reference/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-cli-reference/SKILL.md"),
-        },
         // OMP-native skills with no workflow-core: ported to Claude because they
         // have no other Claude path (unlike ctl-diagnose → ctl-oracle agent and
-        // ctl-brainstorm/ctl-review folded into control-guard). spec-bootstrap
-        // migrates an existing workflow + generates `.ctl/spec/`; spec-update
-        // captures knowledge after a task finishes (control-guard routes to it).
+        // ctl-brainstorm/ctl-review folded into control-guard). ctl-spec bootstraps
+        // .ctl/spec/ from source and captures knowledge (control-guard routes to it).
         EmbeddedFile {
-            relative_path: "skills/ctl-spec-bootstrap/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-spec-bootstrap/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-spec-update/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-spec-update/SKILL.md"),
+            relative_path: "skills/ctl-spec/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-spec/SKILL.md"),
         },
         // Read-only subagent role(s). Writable roles are deferred until it is
         // verified (in a sandbox) whether subagent tool calls reach the gate;
@@ -275,14 +234,6 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-handoff/SKILL.md",
             content: include_str!("../../.opencode/skills/ctl-handoff/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-architecture-review/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-architecture-review/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-decision-map/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-decision-map/SKILL.md"),
         },
     ]
 }
@@ -469,13 +420,12 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 16,
-            "claude injects 4 integration files + control-guard + 7 workflow skills + cli-reference + spec-bootstrap + spec-update + 1 agent"
+            n, 11,
+            "claude injects 3 integration files + control-guard + 5 workflow skills + ctl-spec + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
             "hooks/ctl-gate.py",
-            "hooks/ctl-wrapup.py",
             "settings.json",
             "skills/control-guard/SKILL.md",
             "skills/ctl-grill-with-spec/SKILL.md",
@@ -483,11 +433,7 @@ mod tests {
             "skills/ctl-to-tasks/SKILL.md",
             "skills/ctl-tdd-loop/SKILL.md",
             "skills/ctl-handoff/SKILL.md",
-            "skills/ctl-architecture-review/SKILL.md",
-            "skills/ctl-decision-map/SKILL.md",
-            "skills/ctl-cli-reference/SKILL.md",
-            "skills/ctl-spec-bootstrap/SKILL.md",
-            "skills/ctl-spec-update/SKILL.md",
+            "skills/ctl-spec/SKILL.md",
             "agents/ctl-oracle.md",
         ] {
             assert!(
@@ -679,30 +625,6 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             path: ".opencode/skills/ctl-handoff/SKILL.md",
             platform_marker: "opencode Integration",
         },
-        WorkflowSkill {
-            skill: "ctl-architecture-review",
-            platform: "omp",
-            path: ".omp/skills/ctl-architecture-review/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-architecture-review",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-architecture-review/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-decision-map",
-            platform: "omp",
-            path: ".omp/skills/ctl-decision-map/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-decision-map",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-decision-map/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
         // Claude Code mirror: same managed core + phase body, only the
         // `## Claude Code Integration` section differs (drift-checked below).
         WorkflowSkill {
@@ -733,18 +655,6 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             skill: "ctl-handoff",
             platform: "claude",
             path: ".claude/skills/ctl-handoff/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-architecture-review",
-            platform: "claude",
-            path: ".claude/skills/ctl-architecture-review/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-decision-map",
-            platform: "claude",
-            path: ".claude/skills/ctl-decision-map/SKILL.md",
             platform_marker: "Claude Code Integration",
         },
     ]

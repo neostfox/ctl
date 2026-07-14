@@ -20,16 +20,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/ctl-wrapup.py\""
-          }
-        ]
-      }
     ]
   }
 }

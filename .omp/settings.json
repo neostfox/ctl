@@ -17,7 +17,7 @@
     }
   },
   "fetch": {
-    "enabled": false
+    "enabled": true
   },
   "web_search": {
     "enabled": false

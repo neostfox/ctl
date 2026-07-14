@@ -1,4 +1,4 @@
-# Release Notes — ctl v0.0.11
+# Release Notes — ctl v0.0.12
 
 Follows **v0.0.10**. `ctl --version` reports `CARGO_PKG_VERSION`; the release
 tag must equal `Cargo.toml` (enforced by `release.yml`). Binaries ship via the
@@ -6,6 +6,34 @@ GitHub Release and `cargo install`; the only npm package is `@velo-ai/omp`
 (pure hooks + skills), generated at the matching version by `ctl skills sync`.
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included in 0.0.12 — Slim-down: skill consolidation, scaffolding removal, hook hardening
+
+- **Skill set consolidated 14 → 9.** Removed `ctl-brainstorm` (RETIRED alias of grill),
+  `ctl-architecture-review`, `ctl-decision-map`, `ctl-cli-reference`; merged
+  `ctl-spec-bootstrap` + `ctl-spec-update` into one `ctl-spec` (851 + 142 lines → ~90).
+  The live workflow chain is now `control-guard → grill → prd → tasks → tdd → handoff`,
+  plus `review`, `diagnose`, `ctl-spec`.
+- **Unwired reducer scaffolding removed.** `run_scheduled` / `run_launched` / `run_merged`
+  event branches and their task-level mirror state (`active_runs`, `RunRef`,
+  `schedule_plan_id`) were reducer-ready but never emitted in production (`ctl schedule
+  run` drives the AgentRun aggregate). Deleted to remove the second-source-of-truth risk.
+- **OMP hook binary resolution hardened.** `resolveCtlBin` (`.omp` + `npm-omp`
+  `ctl-context.ts`) upgraded from `CTL_BIN → ~/.cargo/bin → bare "ctl"` to a robust chain:
+  `CTL_BIN env → project .env → CARGO_HOME/bin → ~/.cargo/bin → where/which → bare ctl`.
+  Closes the Windows ENOENT (Node `execFile` does no PATHEXT resolution) that caused
+  fail-closed blocks under service accounts; the `.env` `CTL_BIN` contract is now honored.
+- **Claude Stop wrap-up hook retired.** The optional knowledge-capture reminder
+  (`.claude/hooks/ctl-wrapup.py`) is removed; 3 integration files → 2. Core governance
+  (gate + context) unaffected.
+- **Process notes archived.** `REPORT.md` (M3 dogfood) + `OMP_GUARDRAIL_WORKFLOW.svg` →
+  `docs/archive/`; scratch temp files removed.
+
+### Deferred to 0.0.13
+
+- **Split the two large files** (`application/mod.rs` ~8200 lines, `cli/mod.rs` ~7400 lines
+  — 54% of src) into per-domain modules. A behavior-preserving refactor of the gate /
+  security core; warrants its own focused release rather than rushing it into 0.0.12.
 
 ## Included in 0.0.11 — Backlog sweep: classifier prose fix, windowed summaries, adapter wrap-up parity
 

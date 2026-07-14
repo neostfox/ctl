@@ -68,7 +68,7 @@ Goal: prove the work is done, then close the task.
    whole `git diff`. It runs the closure checklist (build/test/lint **evidence**, not
    assertions) and emits a Health Score + verdict. A `fail` sends you back to fix-up.
 2. **Capture lessons** — if the task revealed a pattern, gotcha, or decision, run
-   **ctl-spec-update** to write it into `.ctl/spec/`.
+   **ctl-spec** to write it into `.ctl/spec/`.
 3. **Close**:
 
 ```bash
@@ -148,6 +148,5 @@ On overlap, sequence the tasks — concurrent writes to a shared path corrupt ea
 | Abort | `ctl task cancel --id <id>` |
 | Update templates | `ctl update --merge` |
 | Upgrade binary | `ctl self-update` |
-| Generate specs | `/ctl-spec-bootstrap` |
-| Update specs | `/ctl-spec-update` |
+| Specs (bootstrap + capture) | `/ctl-spec` |
 | Health | `ctl doctor` |

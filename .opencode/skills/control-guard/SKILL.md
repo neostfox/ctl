@@ -206,7 +206,7 @@ subagent by its `description`, so route by phase:
 | Phase / skill | Role (opencode-native) | Governance |
 |---|---|---|
 | read-only investigation; review gates (reviewer ≠ implementer) | `explore` | **read-only — always spawnable** |
-| architecture & design, ADR / spec authoring (design, `ctl-architecture-review` follow-up) | `designer` | writable — needs an active in_progress task |
+| architecture & design, ADR / spec authoring (design) | `designer` | writable — needs an active in_progress task |
 | diagnosis & hard reasoning, falsifiable root-cause (`ctl-diagnose`) | `oracle` | writable — needs an active in_progress task |
 | red→green implementation (`ctl-tdd-loop`) | `build` | writable — needs an active in_progress task |
 

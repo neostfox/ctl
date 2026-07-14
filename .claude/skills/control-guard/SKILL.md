@@ -230,8 +230,7 @@ to break it into vertical task proposals, `ctl-tdd-loop` for red→green
 implementation, and `ctl-handoff` to compact context for the next agent. Diagnose
 a blocked write with `ctl boundary explain --path <path>`.
 
-Spec lifecycle: run `ctl-spec-bootstrap` to introduce ctl to a project (migrate an
-existing workflow, then generate `.ctl/spec/`) or to refresh specs after a large
-refactor. After `ctl task finish` succeeds and the task revealed a non-obvious
-pattern, route to `ctl-spec-update` to capture it into `.ctl/spec/` (writing there
-requires the path in the active task's `write_allow`).
+Spec lifecycle: run `ctl-spec` to introduce ctl to a project (bootstrap `.ctl/spec/`
+from source) or to refresh specs after a large refactor. After `ctl task finish`
+succeeds and the task revealed a non-obvious pattern, route to `ctl-spec` to capture
+it into `.ctl/spec/` (writing there requires the path in the active task's `write_allow`).

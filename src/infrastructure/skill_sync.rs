@@ -63,8 +63,6 @@ pub fn generated_skills() -> &'static [&'static str] {
         "ctl-to-tasks",
         "ctl-tdd-loop",
         "ctl-handoff",
-        "ctl-architecture-review",
-        "ctl-decision-map",
     ]
 }
 

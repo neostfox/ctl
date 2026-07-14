@@ -9,10 +9,10 @@
 //   4. spec drift + unfinished reminders on lifecycle events
 
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
-import { execFile } from "child_process";
-import { existsSync } from "fs";
+import { execFile, spawnSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
 interface GateResult {
   allowed: boolean;
@@ -65,36 +65,87 @@ function logCtlError(
 }
 
 /**
- * Locate the `ctl` binary via the one blessed chain shared by every adapter:
- * CTL_BIN override → ~/.cargo/bin → bare "ctl" (PATH fallback). npm probing
- * was retired with the npm binary distribution (B-lite; see
- * .ctl/spec/alignment/2026-07-04-binary-distribution-shrink.md) so one install
- * location can no longer be shadowed by another. Probed once and memoized.
- */
-let resolvedCtlBin: string | undefined;
-
-function platformBinaryName(): string {
-  return process.platform === "win32" ? "ctl.exe" : "ctl";
+ * Best-effort: read `CTL_BIN=...` from the nearest `.env` walking up from cwd.
+ * `.env` is NOT auto-loaded into a hook subprocess's env; this makes the
+ * contract documented in the repo's `.env` comment actually hold. */
+function readDotEnvCtlBin(): string | undefined {
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    const p = join(dir, ".env");
+    if (existsSync(p)) {
+      try {
+        for (const line of readFileSync(p, "utf-8").split("\n")) {
+          const m = line.match(/^\s*CTL_BIN\s*=\s*(.+?)\s*$/);
+          if (m) return m[1].replace(/^["']|["']$/g, "");
+        }
+      } catch {
+        /* unreadable .env — ignore */
+      }
+      return undefined; // found .env, no CTL_BIN
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
 }
 
+/**
+ * Resolve `ctl` on PATH via the OS lookup tool (`where` on Windows, `which`
+ * elsewhere). Node's `execFile` does NOT do PATHEXT resolution on Windows, so
+ * a bare "ctl" ENOENTs whenever PATH lacks an exact match — this closes that
+ * hole. Sync and cheap. */
+function resolveViaPathLookup(): string | undefined {
+  try {
+    const r = spawnSync(
+      process.platform === "win32" ? "where" : "which",
+      ["ctl"],
+      { encoding: "utf-8", timeout: 3000, windowsHide: true },
+    );
+    if (r.status === 0) {
+      const first = (r.stdout || "").split(/\r?\n/)[0]?.trim();
+      if (first && existsSync(first)) return first;
+    }
+  } catch {
+    /* lookup tool unavailable — fall through */
+  }
+  return undefined;
+}
+
+let resolvedCtlBin: string | undefined;
+
+/**
+ * Locate the `ctl` binary via a robust candidate chain (most-certain first):
+ *   CTL_BIN env → project .env → CARGO_HOME/bin → ~/.cargo/bin → where/which → bare "ctl".
+ * Probed once and memoized. The bare-"ctl" tail ENOENTs on Windows without
+ * PATHEXT, so `where`/`which` is preferred; if even that fails the error is
+ * logged so the failure is observable instead of a silent ENOENT. */
 function resolveCtlBin(): string {
   if (resolvedCtlBin !== undefined) return resolvedCtlBin;
+  const bin = process.platform === "win32" ? "ctl.exe" : "ctl";
 
   const fromEnv = process.env.CTL_BIN?.trim();
-  if (fromEnv) {
-    resolvedCtlBin = fromEnv;
-    return resolvedCtlBin;
+  if (fromEnv) return (resolvedCtlBin = fromEnv);
+
+  const candidates: string[] = [];
+  const fromDotEnv = readDotEnvCtlBin();
+  if (fromDotEnv) candidates.push(fromDotEnv);
+  const cargoHome = process.env.CARGO_HOME?.trim();
+  if (cargoHome) candidates.push(join(cargoHome, "bin", bin));
+  candidates.push(join(homedir(), ".cargo", "bin", bin));
+
+  for (const c of candidates) {
+    if (existsSync(c)) return (resolvedCtlBin = c);
   }
 
-  const cargoBin = join(homedir(), ".cargo", "bin", platformBinaryName());
-  if (existsSync(cargoBin)) {
-    resolvedCtlBin = cargoBin;
-    return resolvedCtlBin;
-  }
+  const viaPath = resolveViaPathLookup();
+  if (viaPath) return (resolvedCtlBin = viaPath);
 
-  // Last resort: rely on PATH. Logs ENOENT if still missing.
-  resolvedCtlBin = "ctl";
-  return resolvedCtlBin;
+  logCtlError("resolveCtlBin", [], {
+    code: "ENOENT",
+    message: `no ctl binary found; tried [${candidates.join(", ")}]. Set CTL_BIN env, or ensure ctl is on PATH.`,
+  });
+  return (resolvedCtlBin = "ctl"); // last resort — may ENOENT, fail-closed downstream
 }
 
 /**
