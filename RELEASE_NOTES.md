@@ -1,4 +1,4 @@
-# Release Notes — ctl v0.0.12
+# Release Notes — ctl v0.0.13
 
 Follows **v0.0.10**. `ctl --version` reports `CARGO_PKG_VERSION`; the release
 tag must equal `Cargo.toml` (enforced by `release.yml`). Binaries ship via the
@@ -6,6 +6,18 @@ GitHub Release and `cargo install`; the only npm package is `@velo-ai/omp`
 (pure hooks + skills), generated at the matching version by `ctl skills sync`.
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included in 0.0.13 — Giant-file split phase 1: tests extracted
+
+- **`application/mod.rs` and `cli/mod.rs` test suites extracted** into
+  `application/tests.rs` (+ `adapter_doctor_tests.rs`) and `cli/tests.rs`.
+  The two largest files drop from ~10040 → ~5776 and ~8834 → ~7869 lines
+  (~5230 lines of tests moved out of the giant files). Behavior unchanged;
+  546 tests green.
+- **Follow-up (0.0.14+)**: per-domain split of the production bodies
+  (`application/mod.rs` → task / run / drift / ... ; `cli/mod.rs` → command
+  groups). Requires per-symbol `pub(super)` visibility adjustments; tracked
+  as a separate focused effort, not rushed into a point release.
 
 ## Included in 0.0.12 — Slim-down: skill consolidation, scaffolding removal, hook hardening
 
