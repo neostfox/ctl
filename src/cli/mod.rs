@@ -2096,13 +2096,13 @@ fn upsert_env_line(content: &str, key: &str, value: &str) -> (String, Option<Str
 /// True for a binary living in a cargo `target/{debug,release}` tree — a
 /// transient dev build that must not be pinned as the durable CTL_BIN.
 fn is_cargo_target_build(bin: &Path) -> bool {
-    let comps: Vec<String> = bin
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    comps
-        .windows(2)
-        .any(|w| w[0] == "target" && (w[1] == "debug" || w[1] == "release"))
+    // Recognize a `target/{debug,release}/<bin>` artifact regardless of host
+    // path separator: normalize backslashes so a Windows-style path is
+    // identified on any platform (a unit test asserts the `C:\\...` form;
+    // production sees the host-native form). Match the segment pair
+    // `/target/debug/` or `/target/release/` so "targeted" does not match.
+    let s = bin.to_string_lossy().replace('\\', "/");
+    s.contains("/target/debug/") || s.contains("/target/release/")
 }
 
 /// Pin `CTL_BIN` in the OMP agent `.env` (runs on `ctl init --platform
