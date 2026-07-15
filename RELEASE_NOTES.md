@@ -1,4 +1,4 @@
-# Release Notes — ctl v0.0.13
+# Release Notes — ctl v0.0.14
 
 Follows **v0.0.10**. `ctl --version` reports `CARGO_PKG_VERSION`; the release
 tag must equal `Cargo.toml` (enforced by `release.yml`). Binaries ship via the
@@ -6,6 +6,33 @@ GitHub Release and `cargo install`; the only npm package is `@velo-ai/omp`
 (pure hooks + skills), generated at the matching version by `ctl skills sync`.
 
 This is a factual changelog. It contains no scores or quality grades.
+
+## Included in 0.0.14 — Slim-down release (merges 0.0.12 + 0.0.13 + release-path hardening)
+
+Consolidates the unreleased 0.0.12 (skill / scaffolding / hook slim-down) and
+0.0.13 (test-suite extraction) lines, plus release-path hardening. npm jumps
+0.0.11 → 0.0.14 — 0.0.12/0.0.13 were tagged locally but never published: their
+trees predate the cross-platform `is_cargo_target_build` fix and would fail
+release verify.
+
+### Release-path hardening (new in 0.0.14)
+
+- **gate == CI**: `finish` now requires the FULL CI verify set (fmt + clippy +
+  test + architecture) for release tasks (a granted apply-approval on
+  Cargo.toml/Cargo.lock), closing the "declared gates < CI verify" gap that
+  once let a rustfmt-drift pass finish and fail only at push. Added the
+  `architecture_check` gate template.
+- **OMP subagent routing fixed**: `control-guard` and `ctl-review` used
+  opencode-native agent names (`explore`/`oracle`/`designer`) inside the OMP
+  skill, but OMP has no explore/oracle role and its `designer` is UI/UX.
+  Aligned to OMP's real agent set — read-only → `scout`/`reviewer`, writable →
+  `task`.
+- **Cross-platform `is_cargo_target_build`**: normalize path separators so a
+  Windows `target/debug` path is recognized on linux (the CI failure that had
+  blocked 0.0.12/0.0.13's release verify).
+
+See the 0.0.13 and 0.0.12 sections below for the skill consolidation,
+scaffolding removal, hook hardening, and test-extraction details.
 
 ## Included in 0.0.13 — Giant-file split phase 1: tests extracted
 
