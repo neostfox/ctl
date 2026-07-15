@@ -200,8 +200,12 @@ do not replicate it:
   re-spawn a smaller assignment (configurable via `CTL_SUBAGENT_TIMEOUT_MS`).
 - **agent_end / session_shutdown**: spec-drift and unfinished-task reminders.
 
-Subtasks: use OMP **todo** within the parent's `write_allow`. Reviewers run as the
-read-only **`explore`** subagent type (always spawnable). Writable subagents
-(`task`/`oracle`/`designer`) require an active in_progress task and inherit its
-boundaries. Skill routing follows each skill's trigger contract; the pipeline
-map lives in the core above (Pipeline Routing).
+Subtasks: use OMP **todo** within the parent's `write_allow`. Read-only work —
+investigation, codebase research, the review gates, and diagnosis — runs as the
+**`scout`** (research) or **`reviewer`** (review gates) subagent; both are always
+spawnable with no write risk. The only writable subagent is **`task`**, which
+requires an active in_progress task and inherits its boundaries. (OMP has no
+`oracle`/`explore` role, and its `designer` is a UI/UX specialist — do not route
+architecture or diagnosis there; keep diagnosis read-only via `scout` and act on
+its findings inline as the main agent.) Skill routing follows each skill's
+trigger contract; the pipeline map lives in the core above (Pipeline Routing).
