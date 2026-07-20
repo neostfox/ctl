@@ -57,13 +57,7 @@ const REFERENCE_MARKER: &str = "<!-- ctl:workflow-core-reference:start -->";
 /// (its frontmatter is per-platform and it has no phase body — it stays
 /// hand-authored under `control_guard_protocol_sync`).
 pub fn generated_skills() -> &'static [&'static str] {
-    &[
-        "ctl-grill-with-spec",
-        "ctl-to-prd",
-        "ctl-to-tasks",
-        "ctl-tdd-loop",
-        "ctl-handoff",
-    ]
+    &["ctl-grill-with-spec", "ctl-to-prd", "ctl-to-tasks"]
 }
 
 /// A parsed `source.md`: shared frontmatter + body, and per-platform integration.

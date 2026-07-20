@@ -226,8 +226,8 @@ active task's `write_allow`, until the binding question is settled.
 
 Workflow phases (see `.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec`
 to align from first principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks`
-to break it into vertical task proposals, `ctl-tdd-loop` for red→green
-implementation, and `ctl-handoff` to compact context for the next agent. Diagnose
+to break it into vertical task proposals. Opt into red→green with
+`ctl task create --tdd`; context compaction is automatic (boundaries inject every call). Diagnose
 a blocked write with `ctl boundary explain --path <path>`.
 
 Spec lifecycle: run `ctl-spec` to introduce ctl to a project (bootstrap `.ctl/spec/`

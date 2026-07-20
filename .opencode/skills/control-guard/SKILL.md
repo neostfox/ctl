@@ -208,7 +208,7 @@ subagent by its `description`, so route by phase:
 | read-only investigation; review gates (reviewer ≠ implementer) | `explore` | **read-only — always spawnable** |
 | architecture & design, ADR / spec authoring (design) | `designer` | writable — needs an active in_progress task |
 | diagnosis & hard reasoning, falsifiable root-cause (`ctl-diagnose`) | `oracle` | writable — needs an active in_progress task |
-| red→green implementation (`ctl-tdd-loop`) | `build` | writable — needs an active in_progress task |
+| red→green implementation (`--tdd` interlock) | `build` | writable — needs an active in_progress task |
 
 `explore` is the **only** read-only role and is always safe to dispatch. Writable
 roles (`build` / `designer` / `oracle`) are **blocked without an active task**;
@@ -223,7 +223,7 @@ Subtasks: use opencode's native task/todo tracking within the parent's
 `write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
 var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The
 plugin contract is covered by `bun test --cwd .opencode`. Workflow phases (see
-`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align from first
+`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align
 principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
-vertical task proposals, `ctl-tdd-loop` for red→green implementation, and
-`ctl-handoff` to compact context for the next agent.
+vertical task proposals. Opt into red→green with `ctl task create --tdd`;
+context compaction is automatic (boundaries inject every call).

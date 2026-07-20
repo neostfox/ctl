@@ -30,7 +30,7 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             content: include_str!("../../.omp/skills/ctl-spec/SKILL.md"),
         },
         // Workflow skills foundation (workflow-skills-foundation-v1): ctl-native
-        // rewrites of the grill → PRD → tasks → TDD → handoff disciplines. Each
+        // rewrites of the grill → PRD → tasks disciplines. Each
         // embeds the managed workflow-core verbatim (drift-checked against
         // `.agent/protocols/workflow-skills.md`); they ship with `ctl init` like
         // the other OMP skills and are routed (not auto-loaded).
@@ -45,14 +45,6 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-to-tasks/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-to-tasks/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-tdd-loop/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-tdd-loop/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-handoff/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-handoff/SKILL.md"),
         },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
@@ -163,14 +155,6 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-to-tasks/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-to-tasks/SKILL.md"),
         },
-        EmbeddedFile {
-            relative_path: "skills/ctl-tdd-loop/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-tdd-loop/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-handoff/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-handoff/SKILL.md"),
-        },
         // OMP-native skills with no workflow-core: ported to Claude because they
         // have no other Claude path (unlike ctl-diagnose → ctl-oracle agent and
         // ctl-brainstorm/ctl-review folded into control-guard). ctl-spec bootstraps
@@ -226,14 +210,6 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-to-tasks/SKILL.md",
             content: include_str!("../../.opencode/skills/ctl-to-tasks/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-tdd-loop/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-tdd-loop/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-handoff/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-handoff/SKILL.md"),
         },
     ]
 }
@@ -420,8 +396,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 11,
-            "claude injects 3 integration files + control-guard + 5 workflow skills + ctl-spec + 1 agent"
+            n, 9,
+            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -431,8 +407,6 @@ mod tests {
             "skills/ctl-grill-with-spec/SKILL.md",
             "skills/ctl-to-prd/SKILL.md",
             "skills/ctl-to-tasks/SKILL.md",
-            "skills/ctl-tdd-loop/SKILL.md",
-            "skills/ctl-handoff/SKILL.md",
             "skills/ctl-spec/SKILL.md",
             "agents/ctl-oracle.md",
         ] {
@@ -561,8 +535,8 @@ pub struct WorkflowSkill {
 
 /// Every workflow skill, both platforms. Adding a workflow skill means adding its
 /// two rows here (and embedding the OMP copy in `all_embedded_files`); the drift
-/// test iterates this list. The five logical skills are the foundation set:
-/// grill-with-spec, to-prd, to-tasks, tdd-loop, handoff.
+/// test iterates this list. The three logical skills are the foundation set:
+/// grill-with-spec, to-prd, to-tasks.
 pub fn workflow_skills() -> &'static [WorkflowSkill] {
     &[
         WorkflowSkill {
@@ -601,30 +575,6 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             path: ".opencode/skills/ctl-to-tasks/SKILL.md",
             platform_marker: "opencode Integration",
         },
-        WorkflowSkill {
-            skill: "ctl-tdd-loop",
-            platform: "omp",
-            path: ".omp/skills/ctl-tdd-loop/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-tdd-loop",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-tdd-loop/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-handoff",
-            platform: "omp",
-            path: ".omp/skills/ctl-handoff/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-handoff",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-handoff/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
         // Claude Code mirror: same managed core + phase body, only the
         // `## Claude Code Integration` section differs (drift-checked below).
         WorkflowSkill {
@@ -643,18 +593,6 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             skill: "ctl-to-tasks",
             platform: "claude",
             path: ".claude/skills/ctl-to-tasks/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-tdd-loop",
-            platform: "claude",
-            path: ".claude/skills/ctl-tdd-loop/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-handoff",
-            platform: "claude",
-            path: ".claude/skills/ctl-handoff/SKILL.md",
             platform_marker: "Claude Code Integration",
         },
     ]
