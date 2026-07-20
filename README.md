@@ -152,8 +152,8 @@ ctl self-update --check              # 检查是否有新版本
 > 定义了一套 ctl-native 的工作流核心（`WORKFLOW_PROTOCOL_VERSION = 1`），并按平台逐字嵌入
 > OMP / OpenCode 各技能；CI 漂移检查（`workflow_protocol_sync`）确保两端不静默分叉。阶段为
 > `ctl-grill-with-spec`（第一性原理对齐）→ `ctl-to-prd`（PRD 合成，区分 Observed/Confirmed/Open 三类依据）
-> → `ctl-to-tasks`（垂直切片任务提案）→ `ctl-tdd-loop`（红→绿，由 `--tdd` 互锁在账本上证明）
-> → `ctl-handoff`（基于 `ctl handoff export` 的上下文交接）。**这些只是 agent 的工作流纪律**——
+> → `ctl-to-tasks`（垂直切片任务提案）。红→绿由 `--tdd` 互锁在账本上证明、上下文交接由
+> `ctl handoff export` / `ctl handoff capture` 提供（两者是特性，不再单独成技能）。**这些只是 agent 的工作流纪律**——
 > 不证明正确性，不替代 gate / audit / evidence，不创造已证明的独立审阅者，也不构成 L3 防篡改证据。
 > 外部灵感（Matt Pocock 的 skills、Trellis PR #335）属 L0 参考材料，只借鉴不 vendor（见 `.omp/skills/NOTICE.md`）。
 

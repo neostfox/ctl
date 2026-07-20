@@ -107,11 +107,9 @@ PRD    → ctl-to-prd            synthesize a PRD; separate ObservedBasis /
                                ConfirmedBasis / OpenUncertainty (draft|confirmed|superseded)
 tasks  → ctl-to-tasks          vertical, independently verifiable slices; each
                                declares scope, gates, AFK/HITL, blocking uncertainties
-TDD    → ctl-tdd-loop          one behavior, red→green (the `--tdd` / `tdd-red-green`
-                               interlock proves it on the ledger)
-handoff→ ctl-handoff           compact context (builds on `ctl handoff export` +
-                               `ctl handoff capture`)
 ```
+
+Red→green TDD and context handoff are **features, not skills**: opt a task into red→green with `--tdd` (the `tdd-red-green` interlock proves it on the ledger); compact context with `ctl handoff export` / `ctl handoff capture`.
 
 These are **agent workflow disciplines**, not new governance. They do not prove
 correctness, do not replace gates / audits / evidence, do not create authenticated
