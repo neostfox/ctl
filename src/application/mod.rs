@@ -336,7 +336,7 @@ impl ControlApp {
         let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope)?;
         let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow)?;
         let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny)?;
-        let gates = validate_gate_templates(input.gates)?;
+        let gates = validate_gate_templates(input.gates, &self.project_root)?;
         validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
 
         let mut payload = serde_json::json!({
@@ -397,7 +397,7 @@ impl ControlApp {
             .map(|triggers| triggers.to_vec())
             .unwrap_or_else(|| state.risk_triggers.iter().cloned().collect());
         let gates = match input.gates {
-            Some(gates) => validate_gate_templates(gates)?,
+            Some(gates) => validate_gate_templates(gates, &self.project_root)?,
             None => state.gates.iter().cloned().collect(),
         };
         let depends_on: Vec<String> = match input.depends_on {
@@ -1018,18 +1018,20 @@ impl ControlApp {
         let gates: Vec<CanonicalGateDefinition> = state
             .gates
             .iter()
-            .map(|g| match crate::infrastructure::gates::find_template(g) {
-                Some(t) => CanonicalGateDefinition {
-                    gate_id: g.clone(),
-                    command: t.command.to_string(),
-                    args: t.args.iter().map(|s| s.to_string()).collect(),
+            .map(
+                |g| match crate::infrastructure::gates::resolve_gate(g, &self.project_root) {
+                    Some(t) => CanonicalGateDefinition {
+                        gate_id: g.clone(),
+                        command: t.command().to_string(),
+                        args: t.args(),
+                    },
+                    None => CanonicalGateDefinition {
+                        gate_id: g.clone(),
+                        command: String::new(),
+                        args: Vec::new(),
+                    },
                 },
-                None => CanonicalGateDefinition {
-                    gate_id: g.clone(),
-                    command: String::new(),
-                    args: Vec::new(),
-                },
-            })
+            )
             .collect();
         compute_policy_hash(
             &read_scope,
@@ -1283,7 +1285,7 @@ impl ControlApp {
             }
 
             // Gate templates must be known.
-            if let Err(e) = validate_gate_templates(&task.gates) {
+            if let Err(e) = validate_gate_templates(&task.gates, &self.project_root) {
                 v.error(Some(&task.id), format!("{}", e));
             }
         }
@@ -5146,12 +5148,15 @@ fn validate_task_definition(
     Ok(())
 }
 
-fn validate_gate_templates(gates: &[String]) -> Result<Vec<String>> {
+fn validate_gate_templates(
+    gates: &[String],
+    project_root: &std::path::Path,
+) -> Result<Vec<String>> {
     let mut validated = Vec::with_capacity(gates.len());
     for gate_id in gates {
-        if crate::infrastructure::gates::find_template(gate_id).is_none() {
+        if crate::infrastructure::gates::resolve_gate(gate_id, project_root).is_none() {
             return Err(anyhow!(
-                "Unknown gate '{}' — only known gate templates are allowed",
+                "Unknown gate '{}' — must be a built-in template or a [[gate]] entry in .ctl/config.toml",
                 gate_id
             ));
         }

@@ -14,7 +14,10 @@ const GRACE_MS: u64 = 1000;
 const OUTPUT_CAP: usize = 64 * 1024;
 
 /// A gate template defines a fixed command to run.
-/// No arbitrary shell — only predefined templates are allowed (EXEC-001).
+/// No arbitrary shell (EXEC-001): the runner uses `Command::new(command).args(args)`,
+/// never a shell — true for both the built-in static templates below and the
+/// project-defined templates loaded from `.ctl/config.toml` `[[gate]]` (same
+/// fixed {command, args} shape, resolved via `resolve_gate`).
 #[derive(Debug, Clone)]
 pub struct GateTemplate {
     pub id: &'static str,
@@ -119,11 +122,11 @@ pub fn find_template(id: &str) -> Option<&'static GateTemplate> {
 ///   managed root cannot be confirmed reaped, returns `Err` (execution
 ///   containment failure) rather than an ordinary failed gate.
 pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
-    let template =
-        find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
-    let args: Vec<String> = template.args.iter().map(|s| s.to_string()).collect();
+    let resolved = resolve_gate(gate_id, working_dir)
+        .ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
+    let args: Vec<String> = resolved.args();
     let sup = supervise(
-        template.command,
+        resolved.command(),
         &args,
         working_dir,
         Duration::from_secs(GATE_TIMEOUT_SECS),
@@ -396,6 +399,244 @@ pub fn list_templates() -> Vec<&'static GateTemplate> {
     GATE_TEMPLATES.iter().collect()
 }
 
+// ── Project-defined gate templates (.ctl/config.toml `[[gate]]`) ─────────────
+//
+// Extends the gate layer with project-defined templates so non-Rust ecosystems
+// get deterministic gates without forking. Project gates declare the SAME fixed
+// {command, args} shape as the built-ins; the runner uses `Command::new` +
+// `.args` (never a shell), so EXEC-001 "no arbitrary shell" holds identically.
+// Built-in ids are reserved — a project gate cannot shadow them (rejected at
+// load). See gh issue #5.
+
+/// A project-defined gate template, loaded from `.ctl/config.toml` `[[gate]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGateTemplate {
+    pub id: String,
+    pub description: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// A gate resolved from either the built-in static registry or the project's
+/// `.ctl/config.toml`. The runner consumes `command()` / `args()` uniformly.
+#[derive(Debug, Clone)]
+pub enum ResolvedGate {
+    BuiltIn(&'static GateTemplate),
+    Project(ProjectGateTemplate),
+}
+
+impl ResolvedGate {
+    pub fn command(&self) -> &str {
+        match self {
+            Self::BuiltIn(t) => t.command,
+            Self::Project(t) => &t.command,
+        }
+    }
+    pub fn args(&self) -> Vec<String> {
+        match self {
+            Self::BuiltIn(t) => t.args.iter().map(|s| s.to_string()).collect(),
+            Self::Project(t) => t.args.clone(),
+        }
+    }
+}
+
+/// Resolve a gate id against built-ins first, then project gates from
+/// `.ctl/config.toml`. Built-ins take precedence by construction (a project
+/// gate colliding with a built-in id is rejected at load). Returns `None` when
+/// the id matches neither.
+pub fn resolve_gate(id: &str, project_root: &Path) -> Option<ResolvedGate> {
+    if let Some(t) = find_template(id) {
+        return Some(ResolvedGate::BuiltIn(t));
+    }
+    let project = load_project_gates(project_root).ok()?;
+    project
+        .into_iter()
+        .find(|g| g.id == id)
+        .map(ResolvedGate::Project)
+}
+
+/// Load `[[gate]]` templates from `.ctl/config.toml`. Empty vec when the file
+/// or section is absent. Errors on a collision with a built-in id or a
+/// malformed entry — fail-closed so a broken config never silently relaxes the
+/// gate set.
+pub fn load_project_gates(project_root: &Path) -> Result<Vec<ProjectGateTemplate>> {
+    let path = project_root.join(".ctl").join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let gates = parse_project_gates(&content)?;
+    for g in &gates {
+        if find_template(&g.id).is_some() {
+            return Err(anyhow!(
+                "project gate '{}' in .ctl/config.toml collides with a built-in \
+                 gate id — built-in ids are reserved; rename the project gate",
+                g.id
+            ));
+        }
+    }
+    Ok(gates)
+}
+
+/// Parse `[[gate]]` tables from `.ctl/config.toml`. Hand-written (ctl has no
+/// TOML dependency) — same targeted-extraction style as the cli's
+/// `parse_project_default_gates`. Each gate:
+///
+///   [[gate]]
+///   id = "py_test"
+///   command = "python"
+///   args = ["-m", "pytest"]
+///   description = "Run pytest"   # optional
+///
+/// Supports inline and multi-line `args` arrays. Rejects a gate missing `id`
+/// or `command` (fail-closed).
+pub fn parse_project_gates(content: &str) -> Result<Vec<ProjectGateTemplate>> {
+    let mut gates: Vec<ProjectGateTemplate> = Vec::new();
+    let mut id = String::new();
+    let mut command = String::new();
+    let mut description = String::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut in_gate = false;
+    let mut collecting_args = false;
+    let mut args_buf = String::new();
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        // A TOML table header (`[...]`) starts a new section, flushing the
+        // current gate (if any).
+        if line.starts_with('[') {
+            if in_gate {
+                if collecting_args {
+                    args = parse_toml_string_array(&args_buf)?;
+                    args_buf.clear();
+                    collecting_args = false;
+                }
+                flush_gate(&mut gates, &id, &command, &mut description, &mut args)?;
+                id.clear();
+                command.clear();
+            }
+            in_gate = line == "[[gate]]";
+            continue;
+        }
+        if !in_gate {
+            continue;
+        }
+        // Continuing a multi-line args array.
+        if collecting_args {
+            args_buf.push_str(line);
+            args_buf.push(' ');
+            if line.contains(']') {
+                args = parse_toml_string_array(&args_buf)?;
+                args_buf.clear();
+                collecting_args = false;
+            }
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        // A multi-line args array opens with '[' and closes on a later line.
+        if key == "args" && value.starts_with('[') && !value.contains(']') {
+            collecting_args = true;
+            args_buf.clear();
+            args_buf.push_str(value);
+            args_buf.push(' ');
+            continue;
+        }
+        match key {
+            "id" => id = parse_toml_string(value)?,
+            "command" => command = parse_toml_string(value)?,
+            "description" => description = parse_toml_string(value)?,
+            "args" => args = parse_toml_string_array(value)?,
+            _ => {}
+        }
+    }
+    if in_gate {
+        if collecting_args {
+            args = parse_toml_string_array(&args_buf)?;
+        }
+        flush_gate(&mut gates, &id, &command, &mut description, &mut args)?;
+    }
+    Ok(gates)
+}
+
+/// Push a fully-collected gate into the list, fail-closed on missing id/command.
+fn flush_gate(
+    gates: &mut Vec<ProjectGateTemplate>,
+    id: &str,
+    command: &str,
+    description: &mut String,
+    args: &mut Vec<String>,
+) -> Result<()> {
+    let id_t = id.trim();
+    let cmd_t = command.trim();
+    if id_t.is_empty() {
+        return Err(anyhow!("project gate in .ctl/config.toml missing 'id'"));
+    }
+    if cmd_t.is_empty() {
+        return Err(anyhow!("project gate '{}' missing 'command'", id_t));
+    }
+    gates.push(ProjectGateTemplate {
+        id: id_t.to_string(),
+        command: cmd_t.to_string(),
+        description: std::mem::take(description),
+        args: std::mem::take(args),
+    });
+    Ok(())
+}
+
+/// Parse a double-quoted TOML basic string (the form `id`/`command`/
+/// `description` take). Handles `\"` escapes; ignores anything after the
+/// closing quote (trailing comments).
+fn parse_toml_string(value: &str) -> Result<String> {
+    let rest = value
+        .trim_start()
+        .strip_prefix('"')
+        .ok_or_else(|| anyhow!("expected a double-quoted string, got: {}", value))?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    let mut closed = false;
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+                continue;
+            }
+        }
+        if c == '"' {
+            closed = true;
+            break;
+        }
+        out.push(c);
+    }
+    if !closed {
+        return Err(anyhow!("unterminated string: {}", value));
+    }
+    Ok(out)
+}
+
+/// Parse a TOML `["a", "b"]` string array (inline form). Empty arrays allowed.
+fn parse_toml_string_array(value: &str) -> Result<Vec<String>> {
+    let inner = value
+        .trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .ok_or_else(|| anyhow!("expected a [...] array, got: {}", value))?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for piece in inner.split(',') {
+        let p = piece.trim();
+        if p.is_empty() {
+            continue;
+        }
+        out.push(parse_toml_string(p)?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +660,113 @@ mod tests {
     #[test]
     fn test_list_templates_count() {
         assert_eq!(list_templates().len(), 8); // 5 cargo + 3 typescript; update when adding more
+    }
+
+    #[test]
+    fn parse_project_gates_inline() {
+        let cfg = "[[gate]]\nid = \"py_test\"\ncommand = \"python\"\nargs = [\"-m\", \"pytest\"]\ndescription = \"Run pytest\"\n";
+        let gates = parse_project_gates(cfg).unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].id, "py_test");
+        assert_eq!(gates[0].command, "python");
+        assert_eq!(gates[0].args, vec!["-m", "pytest"]);
+        assert_eq!(gates[0].description, "Run pytest");
+    }
+
+    #[test]
+    fn parse_project_gates_multiline_args() {
+        let cfg = "[[gate]]\nid = \"go_test\"\ncommand = \"go\"\nargs = [\n  \"test\",\n  \"./...\",\n]\n";
+        let gates = parse_project_gates(cfg).unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].id, "go_test");
+        assert_eq!(gates[0].args, vec!["test", "./..."]);
+    }
+
+    #[test]
+    fn parse_project_gates_multiple_and_no_section() {
+        // No [[gate]] section -> empty.
+        assert!(parse_project_gates("[project]\ntype = \"rust\"\n")
+            .unwrap()
+            .is_empty());
+        // Two gates; description defaults to empty when omitted.
+        let cfg = "[[gate]]\nid = \"a\"\ncommand = \"a\"\nargs = []\n[[gate]]\nid = \"b\"\ncommand = \"b\"\nargs = [\"-x\"]\n";
+        let gates = parse_project_gates(cfg).unwrap();
+        assert_eq!(gates.len(), 2);
+        assert_eq!(gates[0].id, "a");
+        assert!(gates[0].description.is_empty());
+        assert_eq!(gates[1].args, vec!["-x"]);
+    }
+
+    #[test]
+    fn parse_project_gates_missing_fields_fail_closed() {
+        // Missing id.
+        assert!(parse_project_gates("[[gate]]\ncommand = \"x\"\nargs = []\n").is_err());
+        // Missing command.
+        assert!(parse_project_gates("[[gate]]\nid = \"x\"\nargs = []\n").is_err());
+        // Unterminated string.
+        assert!(parse_project_gates("[[gate]]\nid = \"unterminated\ncommand = \"c\"\n").is_err());
+    }
+
+    #[test]
+    fn load_project_gates_rejects_builtin_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "ctl-gate-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ctl = dir.join(".ctl");
+        std::fs::create_dir_all(&ctl).unwrap();
+        std::fs::write(
+            ctl.join("config.toml"),
+            "[[gate]]\nid = \"cargo_test\"\ncommand = \"true\"\nargs = []\n",
+        )
+        .unwrap();
+        let err = load_project_gates(&dir).unwrap_err();
+        assert!(
+            format!("{}", err).contains("collides with a built-in"),
+            "got: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_gate_builtin_project_none() {
+        let nowhere = std::path::Path::new("/nonexistent-ctl-no-such-dir");
+        // Built-in resolves via the BuiltIn variant.
+        assert!(matches!(
+            resolve_gate("cargo_test", nowhere),
+            Some(ResolvedGate::BuiltIn(_))
+        ));
+        // Unknown id with no project config -> None.
+        assert!(resolve_gate("no_such_gate", nowhere).is_none());
+
+        // Project gate resolves via the Project variant.
+        let dir = std::env::temp_dir().join(format!(
+            "ctl-gate-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ctl = dir.join(".ctl");
+        std::fs::create_dir_all(&ctl).unwrap();
+        std::fs::write(
+            ctl.join("config.toml"),
+            "[[gate]]\nid = \"my_check\"\ncommand = \"./check.sh\"\nargs = [\"--strict\"]\n",
+        )
+        .unwrap();
+        match resolve_gate("my_check", &dir).unwrap() {
+            ResolvedGate::Project(t) => {
+                assert_eq!(t.command, "./check.sh");
+                assert_eq!(t.args, vec!["--strict"]);
+            }
+            ResolvedGate::BuiltIn(_) => panic!("expected Project variant for project gate"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
