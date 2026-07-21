@@ -227,3 +227,20 @@ plugin contract is covered by `bun test --cwd .opencode`. Workflow phases (see
 principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
 vertical task proposals. Opt into red→green with `ctl task create --tdd`;
 context compaction is automatic (boundaries inject every call).
+
+### Compile gate — LSP + record
+
+The compile gate (`cargo_check`, the floor's only gate) is satisfied via the
+HOST's LSP, not by ctl spawning `cargo check`:
+
+1. Run the host LSP (rust-analyzer) diagnostics on the changed Rust files.
+2. 0 errors → `ctl gate record --id <task> --gate cargo_check --passed
+   --evidence "LSP: 0 errors across <N> files"`.
+3. Errors → fix, then re-check; never record a pass while diagnostics fail.
+
+Rationale: ctl stays a control plane (declare + record + enforce); execution
+stays in the host. The evidence is host-reported — accepted as the dev-time
+compile signal. `ctl gate run --gate cargo_check` remains as a hermetic
+fallback. `cargo_test` / `cargo_clippy` / `cargo_fmt_check` are NOT in the
+floor — run them via the host when the project needs, and `ctl gate record`
+the result if you want it on the ledger.

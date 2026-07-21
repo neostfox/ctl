@@ -234,3 +234,20 @@ Spec lifecycle: run `ctl-spec` to introduce ctl to a project (bootstrap `.ctl/sp
 from source) or to refresh specs after a large refactor. After `ctl task finish`
 succeeds and the task revealed a non-obvious pattern, route to `ctl-spec` to capture
 it into `.ctl/spec/` (writing there requires the path in the active task's `write_allow`).
+
+### Compile gate — LSP + record
+
+The compile gate (`cargo_check`, the floor's only gate) is satisfied via the
+HOST's LSP, not by ctl spawning `cargo check`:
+
+1. Run the host LSP (rust-analyzer) diagnostics on the changed Rust files.
+2. 0 errors → `ctl gate record --id <task> --gate cargo_check --passed
+   --evidence "LSP: 0 errors across <N> files"`.
+3. Errors → fix, then re-check; never record a pass while diagnostics fail.
+
+Rationale: ctl stays a control plane (declare + record + enforce); execution
+stays in the host. The evidence is host-reported — accepted as the dev-time
+compile signal. `ctl gate run --gate cargo_check` remains as a hermetic
+fallback. `cargo_test` / `cargo_clippy` / `cargo_fmt_check` are NOT in the
+floor — run them via the host when the project needs, and `ctl gate record`
+the result if you want it on the ledger.
