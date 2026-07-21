@@ -852,6 +852,17 @@ enum TaskCommands {
         #[arg(long)]
         id: String,
     },
+    /// Approve a proposed task (proposal-mode, gh6 / issue #6): a human-only
+    /// verb for `ready`. Errors when the acting identity (CTL_ACTOR) is not
+    /// "human" — the model proposes (create); only a human approves. `ready`
+    /// applies the same check; `approve` is the proposal-mode verb. The model
+    /// proposes via `ctl task create` (propose is a synonym, not a separate
+    /// command — identical args and behavior).
+    Approve {
+        /// Stable task identifier
+        #[arg(long)]
+        id: String,
+    },
     /// Print the current task projection
     Status {
         /// Stable task identifier
@@ -2513,6 +2524,10 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
         TaskCommands::Ready { id } => {
             let event = app.mark_ready(id)?;
             println!("Marked task '{}' ready at seq {}.", id, event.seq);
+        }
+        TaskCommands::Approve { id } => {
+            let event = app.mark_ready(id)?;
+            println!("Approved task '{}' (readied) at seq {}.", id, event.seq);
         }
         TaskCommands::Status { id, json } => {
             let state = app.get_status(id)?;

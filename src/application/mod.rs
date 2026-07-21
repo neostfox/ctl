@@ -426,6 +426,23 @@ impl ControlApp {
     }
 
     pub fn mark_ready(&self, task_id: &str) -> Result<Event> {
+        // gh6 / issue #6 proposal-mode: only a human actor can ready (approve)
+        // a task. The model proposes via `ctl task create`; a human approves via
+        // `ctl task approve` (or `ctl task ready`). ctl's actor is a label, not
+        // a crypto identity (honest disclosure): in a real OMP session the hook
+        // sets CTL_ACTOR to the model label (real enforcement); in a raw shell
+        // the model could unset CTL_ACTOR to pass (honor-system, same posture as
+        // the reviewer-≠-implementer interlock). `ctl task quick` fuses
+        // create+ready+start, so under proposal-mode it is effectively
+        // human-only too (the embedded ready hits this check).
+        if self.actor != "human" {
+            return Err(anyhow!(
+                "Task '{}' can only be approved (readied) by a human actor; current actor is \
+                 '{}'. The model proposes (ctl task create); a human approves (ctl task approve).",
+                task_id,
+                self.actor,
+            ));
+        }
         let event = self.build_event(task_id, "task_marked_ready", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {

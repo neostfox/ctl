@@ -454,6 +454,43 @@ fn event_actor_comes_from_with_actor_override() {
 }
 
 #[test]
+fn proposal_mode_model_proposes_human_approves() {
+    // gh6 / issue #6 proposal-mode (Design A): the model proposes (create,
+    // any actor) but cannot self-approve (ready) — only a human actor can.
+    // The human's ready then succeeds, proving the model's rejected ready
+    // appended nothing (the task was still in Planning).
+    let dir = TempDir::new();
+    let model = ControlApp::init(dir.path())
+        .unwrap()
+        .with_actor("model-glm");
+    model
+        .create_task(
+            "p",
+            CreateTaskInput {
+                objective: "model-proposed boundary",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    // Model self-approve is blocked by the human-actor check.
+    let err = model.mark_ready("p").unwrap_err().to_string();
+    assert!(
+        err.contains("human actor"),
+        "non-human ready (self-approve) must be blocked: {err}"
+    );
+    // Human (default actor, CTL_ACTOR unset) approves — ready succeeds.
+    let human = ControlApp::open(dir.path(), false).unwrap();
+    let ev = human.mark_ready("p").unwrap();
+    assert_eq!(ev.event_type, "task_marked_ready");
+    assert_eq!(ev.actor, "human");
+}
+
+#[test]
 fn finish_blocked_by_uncommitted_work_in_scope() {
     let dir = TempDir::new();
     git(dir.path(), &["init", "-q"]);
