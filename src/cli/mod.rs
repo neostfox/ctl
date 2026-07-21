@@ -6740,6 +6740,18 @@ fn is_bash_write_segment(cmd: &str) -> bool {
     {
         return true;
     }
+    // gh7 / issue #7: git checkout/restore with a path marker (--, --ours,
+    // --theirs) is the merge-resolution file write — the exact dogfood bypass
+    // (`git checkout --ours pnpm-workspace.yaml`). git restore always targets
+    // files (no branch-switch semantics), so any positional flags it as a write.
+    if (cmd.starts_with("git checkout") || cmd.starts_with("git restore"))
+        && (cmd.contains(" --ours") || cmd.contains(" --theirs") || cmd.contains(" -- "))
+    {
+        return true;
+    }
+    if cmd.starts_with("git restore") && cmd.split_whitespace().count() > 2 {
+        return true;
+    }
     segment_has_file_redirect(cmd)
 }
 
@@ -6763,6 +6775,106 @@ fn segment_has_file_redirect(cmd: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Best-effort extraction of the file paths a bash command writes to. Returns
+/// every target that could be statically identified from the common file-
+/// mutating patterns (redirection, cp/mv/install/rm/tee/mkdir/truncate/sed -i,
+/// git checkout/restore, npm pkg set). An EMPTY result means the classifier
+/// could not extract a target (undecidable) — the gate then falls back to
+/// observe-mode allow-and-record. NOT a security boundary: obfuscation (eval,
+/// env vars, brace expansion, command substitution, here-docs) can hide the
+/// real target. Mirrors the caveat on [`classify_bash`] (gh7 / issue #7 F1).
+fn extract_bash_write_targets(command: &str) -> Vec<String> {
+    let stripped = strip_quoted(command);
+    let mut targets: Vec<String> = Vec::new();
+    for segment in stripped.split([';', '\n', '&', '|', '(', ')', '`']) {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // Output redirection `> file` / `>> file` (fd-duplication `>&` excluded).
+        if let Some(t) = extract_redirect_target(seg) {
+            targets.push(t);
+        }
+        let tokens: Vec<&str> = seg.split_whitespace().collect();
+        let first = tokens.first().copied().unwrap_or("");
+        let positional: Vec<&str> = tokens.iter().skip(1).copied().collect();
+        match first {
+            "cp" | "mv" | "install" => {
+                // Last positional (non-flag) arg is the destination.
+                if let Some(dst) = positional.iter().rev().find(|t| !t.starts_with('-')) {
+                    targets.push(dst.to_string());
+                }
+            }
+            "rm" | "tee" | "mkdir" | "truncate" => {
+                // Every positional (non-flag) arg is a write/remove target.
+                for t in positional.iter().filter(|t| !t.starts_with('-')) {
+                    targets.push(t.to_string());
+                }
+            }
+            "sed" => {
+                // `sed -i EXPR FILE` — last positional is the file.
+                if let Some(f) = positional.iter().rev().find(|t| !t.starts_with('-')) {
+                    targets.push(f.to_string());
+                }
+            }
+            "git" => {
+                let sub = positional.first().copied().unwrap_or("");
+                if sub == "checkout" || sub == "restore" {
+                    // Paths after `--`, or bare positionals; --ours/--theirs are flags.
+                    let mut after_dd = false;
+                    for t in positional.iter().skip(1) {
+                        if *t == "--" {
+                            after_dd = true;
+                        } else if after_dd {
+                            targets.push(t.to_string());
+                        } else if matches!(*t, "--ours" | "--theirs") {
+                            // flag — the path(s) follow it
+                        } else if !t.starts_with('-') {
+                            targets.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            "npm"
+                if positional.first().map(|s| *s == "pkg").unwrap_or(false)
+                    && positional.get(1).map(|s| *s == "set").unwrap_or(false) =>
+            {
+                // `npm pkg set ...` mutates package.json.
+                targets.push("package.json".to_string());
+            }
+            _ => {}
+        }
+    }
+    targets
+}
+
+/// Extract the file path after the first `>` / `>>` file redirection in a
+/// segment. fd-duplication (`>&`, `2>&1`) targets no file and is skipped.
+fn extract_redirect_target(seg: &str) -> Option<String> {
+    let bytes = seg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'>' {
+            let after = if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                i + 2
+            } else {
+                i + 1
+            };
+            if after < bytes.len() && bytes[after] == b'&' {
+                i = after;
+                continue;
+            }
+            let rest = seg[after..].trim_start();
+            let file: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+            if !file.is_empty() {
+                return Some(file);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Classify a bash command for gating. Compound commands (`a && b`, `a; b`,
@@ -7349,32 +7461,95 @@ fn cmd_hook_gate(
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 "bash_write" => {
-                    // Best-effort: this command appears to write files (a redirection
-                    // or a file-mutating verb). ctl cannot path-scope a shell write,
-                    // so this is NOT a write_allow check. Under observe mode both
-                    // cases are allowed; every attempt is flagged for the decision
-                    // log (a bash write is never path-scoped, so an unrecorded
-                    // ALLOW would be invisible), and the task-less case carries a
-                    // model-visible warning instead of a deny.
-                    let has_task = matches!(&state, GovState::InProgress { .. });
-                    let output = if has_task {
-                        serde_json::json!({
-                            "allowed": true,
-                            "state": gov_state_str(&state),
-                            "record": true,
-                            "reason": "bash write allowed under active task — NOT path-scope-checked against write_allow"
-                        })
-                    } else {
-                        serde_json::json!({
-                            "allowed": true,
-                            "state": gov_state_str(&state),
-                            "record": true,
-                            "reason": "bash write with no active in_progress task (observe mode)",
-                            "warning": "this shell command appears to write files with no active task — recorded in .ctl/decisions.jsonl; create a ctl task for durable work, or use the path-scoped Write/Edit tools",
-                            "remedy": "ctl task quick --write-allow <path> --objective <text>"
-                        })
-                    };
-                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    // gh7 / issue #7 Finding 1: best-effort extract the file
+                    // target(s) the shell writes to, and DENY any that are out
+                    // of the active task's write_allow or protected — closing
+                    // the dogfooded `git checkout --ours <file>` bypass. ctl
+                    // cannot parse arbitrary shell: when no target can be
+                    // extracted, fall back to observe-mode allow-and-record
+                    // (honest: best-effort, not a hard boundary; obfuscation
+                    // via eval/env/brace-expansion/$() can still hide a write).
+                    // Asymmetric with the write tool, which stays observe-mode
+                    // — bash gets the extra deny layer because that is the
+                    // channel the agent actually exploited.
+                    let targets = extract_bash_write_targets(cmd_str);
+                    match &state {
+                        GovState::InProgress {
+                            task_id,
+                            write_allow,
+                            approved_apply_paths,
+                            ..
+                        } => {
+                            let mut denied: Vec<String> = Vec::new();
+                            for t in &targets {
+                                let class = classify_write_target(&project_root, t);
+                                let reason = match &class {
+                                    WriteTarget::Suspicious(why) => {
+                                        Some(format!("refused classification: {}", why))
+                                    }
+                                    WriteTarget::Protected(p)
+                                        if !path_in_scope(
+                                            &project_root,
+                                            t,
+                                            approved_apply_paths,
+                                        ) =>
+                                    {
+                                        Some(format!("protected path: {}", p))
+                                    }
+                                    WriteTarget::OutOfRepo => None,
+                                    _ if path_in_scope(&project_root, t, write_allow) => None,
+                                    _ if path_in_scope(&project_root, t, approved_apply_paths) => {
+                                        None
+                                    }
+                                    _ => Some("outside write_allow".to_string()),
+                                };
+                                if let Some(r) = reason {
+                                    denied.push(format!("{} ({})", t, r));
+                                }
+                            }
+                            let output = if !denied.is_empty() {
+                                serde_json::json!({
+                                    "allowed": false,
+                                    "state": "in_progress",
+                                    "task_id": task_id,
+                                    "record": true,
+                                    "reason": format!("bash write target(s) denied: {}", denied.join("; ")),
+                                    "remedy": "widen scope via ctl task revise, use the path-scoped Write/Edit tools, or request a reviewed exception: ctl apply --path <p> --reason <why>"
+                                })
+                            } else if targets.is_empty() {
+                                serde_json::json!({
+                                    "allowed": true,
+                                    "state": "in_progress",
+                                    "task_id": task_id,
+                                    "record": true,
+                                    "reason": "bash write detected but no file target could be extracted (best-effort classifier) — allowed + recorded, NOT path-scope-checked",
+                                    "warning": "ctl's bash classifier is best-effort; obfuscated commands (eval/env/brace-expansion/$()) can hide writes. Prefer the path-scoped Write/Edit tools for governed writes."
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "allowed": true,
+                                    "state": "in_progress",
+                                    "task_id": task_id,
+                                    "record": true,
+                                    "reason": format!("bash write target(s) in scope: {}", targets.join(", "))
+                                })
+                            };
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        }
+                        _ => {
+                            // No active in_progress task — observe-mode warn +
+                            // record (scope is undefined without a write_allow).
+                            let output = serde_json::json!({
+                                "allowed": true,
+                                "state": gov_state_str(&state),
+                                "record": true,
+                                "reason": "bash write with no active in_progress task (observe mode)",
+                                "warning": "this shell command appears to write files with no active task — recorded in .ctl/decisions.jsonl; create a ctl task for durable work, or use the path-scoped Write/Edit tools",
+                                "remedy": "ctl task quick --write-allow <path> --objective <text>"
+                            });
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        }
+                    }
                 }
                 _ => {
                     // bash_other — allow in InProgress/Completed, warn in Idle

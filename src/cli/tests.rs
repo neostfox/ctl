@@ -1,9 +1,10 @@
 use super::{
     classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
-    format_brainstorm_provenance, format_decision_line, format_decisions, format_research_output,
-    format_uncertainty_ledger, is_cargo_target_build, iso8601_utc_to_epoch, omp_agent_env_file,
-    parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
-    wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
+    extract_bash_write_targets, format_brainstorm_provenance, format_decision_line,
+    format_decisions, format_research_output, format_uncertainty_ledger, is_cargo_target_build,
+    iso8601_utc_to_epoch, omp_agent_env_file, parse_project_default_gates,
+    resolve_active_governance, resolve_ctl_for_hook, upsert_env_line, wrapup_pending, ActiveTask,
+    CtlProbe, CtlReach, GovState, WriteTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -305,6 +306,96 @@ fn write_commands_classify_as_bash_write() {
     assert_eq!(classify_bash("sed -i s/a/b/ f"), "bash_write");
     assert_eq!(classify_bash("dd if=a of=b"), "bash_write");
     assert_eq!(classify_bash("ln -s a b"), "bash_write");
+}
+
+#[test]
+fn extract_bash_write_targets_redirect() {
+    assert_eq!(
+        extract_bash_write_targets("echo hi > src/x.rs"),
+        vec!["src/x.rs"]
+    );
+    assert_eq!(
+        extract_bash_write_targets("cat a >> log.txt"),
+        vec!["log.txt"]
+    );
+    // fd-duplication targets no file.
+    assert!(extract_bash_write_targets("ls -la 2>&1").is_empty());
+}
+
+#[test]
+fn extract_bash_write_targets_cp_mv_rm() {
+    // cp/mv/install: last positional is the destination.
+    assert_eq!(extract_bash_write_targets("cp a b"), vec!["b"]);
+    assert_eq!(extract_bash_write_targets("cp -r src dst"), vec!["dst"]);
+    assert_eq!(extract_bash_write_targets("mv old new"), vec!["new"]);
+    // rm: every positional is a removal target.
+    assert_eq!(extract_bash_write_targets("rm a b c"), vec!["a", "b", "c"]);
+    assert_eq!(extract_bash_write_targets("rm -rf build"), vec!["build"]);
+}
+
+#[test]
+fn extract_bash_write_targets_sed_tee_mkdir() {
+    assert_eq!(
+        extract_bash_write_targets("sed -i s/a/b/ f.rs"),
+        vec!["f.rs"]
+    );
+    assert_eq!(
+        extract_bash_write_targets("tee out1 out2"),
+        vec!["out1", "out2"]
+    );
+    assert_eq!(extract_bash_write_targets("mkdir -p a/b"), vec!["a/b"]);
+}
+
+#[test]
+fn extract_bash_write_targets_git_checkout_and_restore() {
+    // The exact dogfood bypass from issue #7: git checkout --ours <file>.
+    assert_eq!(
+        extract_bash_write_targets("git checkout --ours pnpm-workspace.yaml"),
+        vec!["pnpm-workspace.yaml"]
+    );
+    assert_eq!(
+        extract_bash_write_targets("git checkout -- a.rs b.rs"),
+        vec!["a.rs", "b.rs"]
+    );
+    assert_eq!(extract_bash_write_targets("git restore c.rs"), vec!["c.rs"]);
+}
+
+#[test]
+fn extract_bash_write_targets_compound() {
+    let mut t = extract_bash_write_targets("echo hi > a.rs && cp x b.rs");
+    t.sort();
+    assert_eq!(t, vec!["a.rs", "b.rs"]);
+}
+
+#[test]
+fn extract_bash_write_targets_npm_pkg() {
+    assert_eq!(
+        extract_bash_write_targets("npm pkg set version=1.2.3"),
+        vec!["package.json"]
+    );
+}
+
+#[test]
+fn extract_bash_write_targets_empty_when_undecidable() {
+    // No recognized pattern -> empty (gate falls back to observe-mode).
+    assert!(extract_bash_write_targets("grep foo bar").is_empty());
+    assert!(extract_bash_write_targets("ls -la").is_empty());
+    assert!(extract_bash_write_targets("echo hello").is_empty());
+}
+
+#[test]
+fn git_checkout_restore_classify_as_bash_write() {
+    // The exact dogfood bypass from issue #7 must reach the bash_write branch
+    // (so the extractor + scope check run), not fall through to bash_other.
+    assert_eq!(
+        classify_bash("git checkout --ours pnpm-workspace.yaml"),
+        "bash_write"
+    );
+    assert_eq!(classify_bash("git checkout --theirs a.rs"), "bash_write");
+    assert_eq!(classify_bash("git checkout -- a.rs b.rs"), "bash_write");
+    assert_eq!(classify_bash("git restore c.rs"), "bash_write");
+    // A bare branch switch (no path marker) is NOT a file write.
+    assert_eq!(classify_bash("git checkout main"), "bash_other");
 }
 
 #[test]
