@@ -78,10 +78,10 @@ code — it plans, governs, and ingests results; an external executor (OMP/openc
 1. **Events**: Strict ascending `seq`, idempotent `command_id`, schema `control.event-envelope.v1`.
 2. **Reducer**: Pure function `apply(&mut TaskState, &Event)`. No side effects. State machine: `Planning → Ready → InProgress → Review → Completed` (plus `Cancelled`).
 3. **Hold**: Orthogonal to phase. Violation, gate failure, or human pause triggers hold. No `start`/`submit`/`finish` while held.
-4. **Gates**: Only predefined templates (Rust: `cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`; TypeScript/Node: `tsc_check`, `eslint_check`, `vitest_run`). The gate runner executes them and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
+4. **Gates**: Built-in templates (Rust: `cargo_check`, `cargo_test`, `cargo_fmt_check`, `cargo_clippy`, `architecture_check`; TypeScript/Node: `tsc_check`, `eslint_check`, `vitest_run`) are EXTENDED by project-defined `[[gate]]` templates in `.ctl/config.toml` (gh5 / issue #5 — same fixed `{command, args}` shape, EXEC-001 preserved; built-in ids reserved, collisions rejected at load). The gate runner executes either source and records evidence; a timed-out gate's process tree is terminated without hanging the supervisor.
 5. **Paths**: Normalized before boundary checks. Reject absolute, `..`, UNC, symlinks, junctions, root-escape, protected paths (`.git`, `.ctl/tasks`, `.control`, `schemas`, `Cargo.toml`, `Cargo.lock`) — with carve-outs for `.ctl/workflow.md`, `.ctl/scripts`, `.ctl/spec`, and `.ctl/handoffs`.
 6. **Legacy `scope` field**: Must be rejected everywhere. Use `read_scope` + `write_allow` + `write_deny`.
-7. **Gate observe mode**: the host write gate (`ctl hook gate`) allows-and-records out-of-scope / task-less mutations and out-of-window commits/pushes to the non-canonical `.ctl/decisions.jsonl`, returning a model-visible `warning`; protected paths, deps step-up, held tasks, cross-task overlap, and multi-active ambiguity remain hard denies. See `.ctl/spec/prd/gate-observe-mode.md`.
+7. **Gate observe mode**: the host write gate (`ctl hook gate`) allows-and-records out-of-scope / task-less mutations and out-of-window commits/pushes to the non-canonical `.ctl/decisions.jsonl`, returning a model-visible `warning`; protected paths, deps step-up, held tasks, cross-task overlap, and multi-active ambiguity remain hard denies. Out-of-scope **bash** file-mutating commands with statically-identifiable targets are DENIED, not observed (best-effort classifier, gh7 / issue #7 — obfuscated commands still fall through to observe-mode). See `.ctl/spec/prd/gate-observe-mode.md`.
 
 ## Spec & Documentation
 
@@ -124,7 +124,7 @@ reference material — adapted, never vendored (see `.omp/skills/NOTICE.md`).
 ctl init [--claude] [--opencode] [--omp] [--all] [--yes]  # multi-platform onboarding
 ctl task create --id <id> --objective <text> --read-scope <path> --write-allow <path> --gates <gate>
 ctl task quick --write-allow <path>          # fuse create+ready+start
-ctl task ready|start|submit|finish|archive --id <id>
+ctl task ready|approve|start|submit|finish|archive --id <id>   # approve = human-only ready (gh6 proposal-mode)
 ctl gate run --id <id> --gate <template>
 ctl board [--kanban|--table] [--active] [--include-archived] [--json]
 ctl update --merge [--force|--skip]           # sync project templates

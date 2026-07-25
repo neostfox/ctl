@@ -207,7 +207,7 @@ proposal → approval → scoped lease → implement → audit_hold
 
 ```text
 ctl init [--claude] [--opencode] [--omp] [--all] [--yes]   多平台初始化
-ctl task create|ready|start|submit|finish|archive|status   任务生命周期
+ctl task create|ready|approve|start|submit|finish|archive|status   任务生命周期（approve = human-only ready, gh6）
 ctl task quick --write-allow <p>      create+ready+start 一步到位
 ctl board [--kanban|--table] [--active] [--json]   Kanban 看板 / 表格 / JSON
 ctl update --merge [--force|--skip]   同步项目模板（安全合并）
