@@ -111,7 +111,7 @@ impl PathNormalizer {
         // config, treated like `.ctl/spec` (which the gate already exempts). These let
         // the workflow doc be revised, the legacy scripts dir be retired, and the
         // project config (incl. the [project].default_gates floor that
-        // /ctl-spec-bootstrap records) be written under governance instead of
+        // /ctl-spec records) be written under governance instead of
         // requiring a human to bypass the boundary. The canonical ledger
         // (`.ctl/tasks`) is NOT carved out and stays protected.
         let s_fwd = s.replace('\\', "/");

@@ -781,7 +781,7 @@ enum TaskCommands {
         tdd: bool,
         /// Gate template IDs. If omitted, the gates are derived from the project
         /// default floor recorded in `.ctl/config.toml` (`[project].default_gates`,
-        /// set by /ctl-spec-bootstrap). Repeat for multiple entries.
+        /// set by /ctl-spec). Repeat for multiple entries.
         #[arg(long = "gates")]
         gates: Vec<String>,
         /// Task IDs that must complete before this one (M-d); repeat for multiple
@@ -2280,7 +2280,7 @@ fn prompt_platform(project_root: &Path) -> Result<PlatformSelection> {
 }
 
 /// Resolve a task's gates: explicit `--gates` win; otherwise derive the project
-/// default floor recorded in `.ctl/config.toml` by /ctl-spec-bootstrap. Errors
+/// default floor recorded in `.ctl/config.toml` by /ctl-spec. Errors
 /// when neither is available — a task must declare at least one gate (the app
 /// layer enforces the same non-empty invariant), and ctl hardcodes no floor.
 fn resolve_task_gates(project_root: &Path, explicit: &[String]) -> Result<Vec<String>> {
@@ -2292,7 +2292,7 @@ fn resolve_task_gates(project_root: &Path, explicit: &[String]) -> Result<Vec<St
         return Err(anyhow::anyhow!(
             "No --gates given and no project default gate floor found \
              (.ctl/config.toml [project].default_gates). Pass --gates, or run \
-             /ctl-spec-bootstrap to record the project gate floor."
+             /ctl-spec to record the project gate floor."
         ));
     }
     Ok(derived)
@@ -2300,7 +2300,7 @@ fn resolve_task_gates(project_root: &Path, explicit: &[String]) -> Result<Vec<St
 
 /// Read `[project].default_gates` from `.ctl/config.toml`, if present.
 ///
-/// ctl does not hardcode a project gate floor; the ctl-spec-bootstrap skill
+/// ctl does not hardcode a project gate floor; the ctl-spec skill
 /// derives one per project and records it here. Returns an empty vec when the
 /// file, the `[project]` table, or the key is absent. The config has no general
 /// TOML reader (it is otherwise written/consumed as raw text), so parsing is a
@@ -2407,7 +2407,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 triggers.push(crate::application::TDD_RED_GREEN_TRIGGER.to_string());
             }
             // Gates: explicit `--gates` win; otherwise derive the project default
-            // floor recorded by /ctl-spec-bootstrap. The app still requires a
+            // floor recorded by /ctl-spec. The app still requires a
             // non-empty gate set, so a project with no floor must pass `--gates`.
             let gates = resolve_task_gates(&app.project_root, gates)?;
             let event = app.create_task_with_kind(
@@ -2463,7 +2463,7 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 read_scope.clone()
             };
             // Same gate resolution as `create`: explicit `--gates` win, else the
-            // project default floor (no hardcoded list — set by /ctl-spec-bootstrap).
+            // project default floor (no hardcoded list — set by /ctl-spec).
             let gate_list = resolve_task_gates(&app.project_root, gates)?;
             let empty: Vec<String> = Vec::new();
             app.create_task(
@@ -7939,7 +7939,7 @@ fn cmd_hook_spec_status() -> Result<()> {
         let output = serde_json::json!({
             "has_specs": false,
             "status": "no_specs",
-            "message": "Run /ctl-spec-bootstrap to generate specs"
+            "message": "Run /ctl-spec to generate specs"
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -8049,7 +8049,7 @@ fn cmd_hook_spec_status() -> Result<()> {
         "message": if fresh {
             "Specs are up to date"
         } else {
-            "Source files changed since last spec refresh. Consider running /ctl-spec-bootstrap"
+            "Source files changed since last spec refresh. Consider running /ctl-spec"
         }
     });
 
