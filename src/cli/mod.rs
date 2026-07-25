@@ -6841,7 +6841,34 @@ fn is_bash_write_segment(cmd: &str) -> bool {
     if cmd.starts_with("git restore") && cmd.split_whitespace().count() > 2 {
         return true;
     }
+    if has_opaque_wrapper(cmd) {
+        return true;
+    }
     segment_has_file_redirect(cmd)
+}
+
+/// True if the segment invokes an opaque command wrapper — `eval`, `bash -c`,
+/// `sh -c` (and the -lc login-shell variants). These execute a STRING whose
+/// contents quote-stripping hides, so the classifier cannot see whether a
+/// write hides inside. Used to fail-closed (deny under an active task): an
+/// opaque command that might write anywhere cannot be confirmed in-scope.
+/// (gh7 hardening / issue #7.)
+fn has_opaque_wrapper(seg: &str) -> bool {
+    let first = seg.split_whitespace().next().unwrap_or("");
+    first == "eval"
+        || seg.starts_with("bash -c")
+        || seg.starts_with("sh -c")
+        || seg.starts_with("bash -lc")
+        || seg.starts_with("sh -lc")
+}
+
+/// True if any segment of `command` (split on shell operators) is an opaque
+/// wrapper. The wrapper verb sits OUTSIDE quotes, so this scans the original
+/// command text (not strip_quoted output).
+fn command_has_opaque_wrapper(command: &str) -> bool {
+    command
+        .split([';', '\n', '&', '|', '(', ')', '`'])
+        .any(|seg| has_opaque_wrapper(seg.trim()))
 }
 
 /// True if the segment contains an output redirection to a FILE (`>` / `>>`),
@@ -7606,14 +7633,32 @@ fn cmd_hook_gate(
                                     "remedy": "widen scope via ctl task revise, use the path-scoped Write/Edit tools, or request a reviewed exception: ctl apply --path <p> --reason <why>"
                                 })
                             } else if targets.is_empty() {
-                                serde_json::json!({
-                                    "allowed": true,
-                                    "state": "in_progress",
-                                    "task_id": task_id,
-                                    "record": true,
-                                    "reason": "bash write detected but no file target could be extracted (best-effort classifier) — allowed + recorded, NOT path-scope-checked",
-                                    "warning": "ctl's bash classifier is best-effort; obfuscated commands (eval/env/brace-expansion/$()) can hide writes. Prefer the path-scoped Write/Edit tools for governed writes."
-                                })
+                                if command_has_opaque_wrapper(cmd_str) {
+                                    // gh7 hardening: an opaque wrapper (eval /
+                                    // bash -c / sh -c) with no extractable
+                                    // target — the classifier CANNOT see
+                                    // inside, so it cannot confirm the write is
+                                    // in-scope. Fail-closed: deny under an
+                                    // active task. Use plain commands (or
+                                    // Write/Edit) for governed writes.
+                                    serde_json::json!({
+                                        "allowed": false,
+                                        "state": "in_progress",
+                                        "task_id": task_id,
+                                        "record": true,
+                                        "reason": "opaque bash command (eval/bash -c/sh -c) — write target hidden, cannot verify in-scope (fail-closed, gh7)",
+                                        "remedy": "rewrite as a plain command so the write target is visible, or use the path-scoped Write/Edit tools"
+                                    })
+                                } else {
+                                    serde_json::json!({
+                                        "allowed": true,
+                                        "state": "in_progress",
+                                        "task_id": task_id,
+                                        "record": true,
+                                        "reason": "bash write detected but no file target could be extracted (best-effort classifier) — allowed + recorded, NOT path-scope-checked",
+                                        "warning": "ctl's bash classifier is best-effort; obfuscated commands can hide writes. Prefer the path-scoped Write/Edit tools for governed writes."
+                                    })
+                                }
                             } else {
                                 serde_json::json!({
                                     "allowed": true,

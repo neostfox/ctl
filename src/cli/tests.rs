@@ -1,10 +1,10 @@
 use super::{
-    classify_bash, classify_write_target, decision_entry, detect_shared_git_op, ellipsize,
-    extract_bash_write_targets, format_brainstorm_provenance, format_decision_line,
-    format_decisions, format_research_output, format_uncertainty_ledger, is_cargo_target_build,
-    iso8601_utc_to_epoch, omp_agent_env_file, parse_project_default_gates,
-    resolve_active_governance, resolve_ctl_for_hook, upsert_env_line, wrapup_pending, ActiveTask,
-    CtlProbe, CtlReach, GovState, WriteTarget,
+    classify_bash, classify_write_target, command_has_opaque_wrapper, decision_entry,
+    detect_shared_git_op, ellipsize, extract_bash_write_targets, format_brainstorm_provenance,
+    format_decision_line, format_decisions, format_research_output, format_uncertainty_ledger,
+    has_opaque_wrapper, is_cargo_target_build, iso8601_utc_to_epoch, omp_agent_env_file,
+    parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
+    wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -396,6 +396,30 @@ fn git_checkout_restore_classify_as_bash_write() {
     assert_eq!(classify_bash("git restore c.rs"), "bash_write");
     // A bare branch switch (no path marker) is NOT a file write.
     assert_eq!(classify_bash("git checkout main"), "bash_other");
+}
+
+#[test]
+fn opaque_wrappers_classify_as_bash_write() {
+    // gh7 hardening: eval/bash -c/sh -c hide their payload inside a string
+    // (quote-stripping makes it invisible), so they MUST reach the bash_write
+    // branch (not fall through to bash_other) — where the fail-closed deny
+    // fires under an active task.
+    assert_eq!(classify_bash("eval 'echo x > secret.rs'"), "bash_write");
+    assert_eq!(classify_bash("bash -c 'echo x > secret.rs'"), "bash_write");
+    assert_eq!(classify_bash("sh -c 'rm -rf build'"), "bash_write");
+    assert_eq!(classify_bash("bash -lc 'echo hi'"), "bash_write");
+    // Compound: an opaque segment anywhere classifies the whole command.
+    assert_eq!(classify_bash("ls && eval 'echo > x'"), "bash_write");
+}
+
+#[test]
+fn command_has_opaque_wrapper_detects_and_excludes_benign() {
+    assert!(command_has_opaque_wrapper("eval 'echo > x'"));
+    assert!(command_has_opaque_wrapper("ls; bash -c 'evil'"));
+    assert!(!command_has_opaque_wrapper("echo hello"));
+    assert!(!command_has_opaque_wrapper("cp a b"));
+    // `echo` is NOT a wrapper — it doesn't execute its arg.
+    assert!(!command_has_opaque_wrapper("echo 'eval bla'"));
 }
 
 #[test]
