@@ -568,6 +568,49 @@ fn approve_requires_proposed_phase() {
 }
 
 #[test]
+fn reducer_rejects_forged_non_human_approval() {
+    // The headline gh6 invariant: even if a non-human actor FORGES a
+    // task_approved event (bypassing approve_task's app-layer check), the
+    // REDUCER rejects it on replay — the invariant holds against a forged
+    // event, not just an honest app path.
+    let dir = TempDir::new();
+    let human = ControlApp::init(dir.path()).unwrap();
+    human
+        .propose_task(
+            "p",
+            CreateTaskInput {
+                objective: "proposed",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    // Forge a task_approved event stamped with a MODEL actor (bypassing
+    // approve_task, which would have blocked at the app layer). dry_run so
+    // nothing appends; we only want the reducer's verdict.
+    let forger = ControlApp::open(dir.path(), true)
+        .unwrap()
+        .with_actor("model-forger");
+    let forged = forger
+        .build_event("p", "task_approved", serde_json::json!({}))
+        .unwrap();
+    let err = forger.validate_and_append(&forged).unwrap_err().to_string();
+    assert!(
+        err.contains("human"),
+        "reducer must reject forged non-human approval: {err}"
+    );
+    // Task stayed Proposed (the forged event appended nothing).
+    let probe = ControlApp::open(dir.path(), false).unwrap();
+    assert_eq!(
+        format!("{:?}", probe.get_status("p").unwrap().phase),
+        "Proposed"
+    );
+}
+#[test]
 fn finish_blocked_by_uncommitted_work_in_scope() {
     let dir = TempDir::new();
     git(dir.path(), &["init", "-q"]);

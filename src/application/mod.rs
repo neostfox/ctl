@@ -417,9 +417,9 @@ impl ControlApp {
 
     pub fn revise_task(&self, task_id: &str, input: ReviseTaskInput<'_>) -> Result<Event> {
         let state = self.replay_task(task_id)?;
-        if state.phase != Phase::Planning {
+        if state.phase != Phase::Planning && state.phase != Phase::Proposed {
             return Err(anyhow!(
-                "Can only revise in Planning phase, current: {:?}",
+                "Can only revise in Planning or Proposed phase, current: {:?}",
                 state.phase
             ));
         }
