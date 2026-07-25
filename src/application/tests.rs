@@ -491,6 +491,83 @@ fn proposal_mode_model_proposes_human_approves() {
 }
 
 #[test]
+fn full_proposal_mode_propose_then_human_approves() {
+    // gh6 full: model proposes (lands in Proposed, not Planning); model cannot
+    // self-approve; a Proposed task cannot be started; human approves -> Ready.
+    let dir = TempDir::new();
+    let model = ControlApp::init(dir.path())
+        .unwrap()
+        .with_actor("model-glm");
+    model
+        .propose_task(
+            "p",
+            CreateTaskInput {
+                objective: "full proposal",
+                read_scope: &["src".to_string()],
+                write_allow: &["src".to_string()],
+                write_deny: &[],
+                risk_triggers: &[],
+                gates: &["cargo_check".to_string()],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    // Model self-approve blocked.
+    let err = model.approve_task("p").unwrap_err().to_string();
+    assert!(
+        err.contains("human actor"),
+        "model self-approve blocked: {err}"
+    );
+    let probe = ControlApp::open(dir.path(), false).unwrap();
+    // Task is in Proposed (not Planning).
+    assert_eq!(
+        format!("{:?}", probe.get_status("p").unwrap().phase),
+        "Proposed"
+    );
+    // A Proposed task cannot be started (start requires Ready).
+    let err = probe.start_task("p").unwrap_err().to_string();
+    assert!(
+        err.contains("Ready"),
+        "Proposed task must not be startable: {err}"
+    );
+    // Human approves -> Ready.
+    let human = ControlApp::open(dir.path(), false).unwrap();
+    let ev = human.approve_task("p").unwrap();
+    assert_eq!(ev.event_type, "task_approved");
+    assert_eq!(ev.actor, "human");
+    assert_eq!(
+        format!("{:?}", human.get_status("p").unwrap().phase),
+        "Ready"
+    );
+}
+
+#[test]
+fn approve_requires_proposed_phase() {
+    // approve is the Proposed->Ready verb; a Planning task is not approvable
+    // (use `ready` for the legacy Planning->Ready path).
+    let dir = TempDir::new();
+    let app = ControlApp::init(dir.path()).unwrap();
+    app.create_task(
+        "pl",
+        CreateTaskInput {
+            objective: "legacy planning task",
+            read_scope: &["src".to_string()],
+            write_allow: &["src".to_string()],
+            write_deny: &[],
+            risk_triggers: &[],
+            gates: &["cargo_check".to_string()],
+            depends_on: &[],
+        },
+    )
+    .unwrap();
+    let err = app.approve_task("pl").unwrap_err().to_string();
+    assert!(
+        err.contains("Proposed"),
+        "approve on a Planning task must error: {err}"
+    );
+}
+
+#[test]
 fn finish_blocked_by_uncommitted_work_in_scope() {
     let dir = TempDir::new();
     git(dir.path(), &["init", "-q"]);

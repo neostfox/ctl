@@ -366,6 +366,55 @@ impl ControlApp {
         Ok(event)
     }
 
+    /// gh6 full proposal-mode: a model-proposed task lands in Proposed (not
+    /// Planning); it cannot be started until a human approves it via
+    /// [`approve_task`]. Mirrors [`create_task_with_kind`] but emits
+    /// `task_proposed` so the reducer sets phase = Proposed.
+    pub fn propose_task_with_kind(
+        &self,
+        id: &str,
+        input: CreateTaskInput<'_>,
+        kind: TaskKind,
+        audit_tier: AuditTier,
+    ) -> Result<Event> {
+        let existing = self.store.read_for_task(id)?;
+        if !existing.is_empty() {
+            return Err(anyhow!("Task '{}' already exists", id));
+        }
+        let read_scope = self.normalize_boundary_paths("read_scope", input.read_scope)?;
+        let write_allow = self.normalize_boundary_paths("write_allow", input.write_allow)?;
+        let write_deny = self.normalize_boundary_paths("write_deny", input.write_deny)?;
+        let gates = validate_gate_templates(input.gates, &self.project_root)?;
+        validate_task_definition(input.objective, &read_scope, &write_allow, &gates)?;
+        let mut payload = serde_json::json!({
+            "objective": input.objective,
+            "read_scope": read_scope,
+            "write_allow": write_allow,
+            "write_deny": write_deny,
+            "risk_triggers": input.risk_triggers,
+            "gates": gates,
+        });
+        if !input.depends_on.is_empty() {
+            payload["depends_on"] = serde_json::json!(input.depends_on);
+        }
+        if kind != TaskKind::Implementation {
+            payload["task_kind"] = serde_json::json!(kind.as_str());
+        }
+        if audit_tier != AuditTier::Full {
+            payload["audit_tier"] = serde_json::json!(audit_tier.as_str());
+        }
+        let event = self.build_event(id, "task_proposed", payload)?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(id)?;
+        }
+        Ok(event)
+    }
+
+    pub fn propose_task(&self, id: &str, input: CreateTaskInput<'_>) -> Result<Event> {
+        self.propose_task_with_kind(id, input, TaskKind::Implementation, AuditTier::Full)
+    }
+
     pub fn revise_task(&self, task_id: &str, input: ReviseTaskInput<'_>) -> Result<Event> {
         let state = self.replay_task(task_id)?;
         if state.phase != Phase::Planning {
@@ -444,6 +493,34 @@ impl ControlApp {
             ));
         }
         let event = self.build_event(task_id, "task_marked_ready", serde_json::json!({}))?;
+        self.validate_and_append(&event)?;
+        if !self.dry_run {
+            self.rebuild_task_view(task_id)?;
+        }
+        Ok(event)
+    }
+
+    /// gh6 full proposal-mode: human-only approval. Transitions a Proposed task
+    /// to Ready via a `task_approved` event. The actor must be "human" (enforced
+    /// here AND at the reducer — a non-human approval event fails replay, so
+    /// the invariant holds even against a forged event).
+    pub fn approve_task(&self, task_id: &str) -> Result<Event> {
+        let state = self.replay_task(task_id)?;
+        if state.phase != Phase::Proposed {
+            return Err(anyhow!(
+                "Can only approve a Proposed task, current phase: {:?}",
+                state.phase
+            ));
+        }
+        if self.actor != "human" {
+            return Err(anyhow!(
+                "Task '{}' can only be approved by a human actor; current actor is '{}'. \
+                 The model proposes (ctl task propose); a human approves (ctl task approve).",
+                task_id,
+                self.actor,
+            ));
+        }
+        let event = self.build_event(task_id, "task_approved", serde_json::json!({}))?;
         self.validate_and_append(&event)?;
         if !self.dry_run {
             self.rebuild_task_view(task_id)?;

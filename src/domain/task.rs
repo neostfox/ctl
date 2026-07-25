@@ -9,6 +9,7 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Planning,
+    Proposed,
     Ready,
     InProgress,
     Review,
@@ -25,6 +26,7 @@ impl Phase {
     pub fn as_str(&self) -> &'static str {
         match self {
             Phase::Planning => "planning",
+            Phase::Proposed => "proposed",
             Phase::Ready => "ready",
             Phase::InProgress => "in_progress",
             Phase::Review => "review",
@@ -38,6 +40,7 @@ impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Phase::Planning => write!(f, "Planning"),
+            Phase::Proposed => write!(f, "Proposed"),
             Phase::Ready => write!(f, "Ready"),
             Phase::InProgress => write!(f, "In Progress"),
             Phase::Review => write!(f, "Review"),
@@ -936,10 +939,28 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.task_kind = decode_task_kind(&event.payload)?;
             state.audit_tier = decode_audit_tier(&event.payload)?;
         }
+        "task_proposed" => {
+            // gh6 full proposal-mode: a model-proposed task lands in Proposed
+            // (not Planning); it cannot be started until a human approves it.
+            if state.last_seq > 0 {
+                return Err("Cannot propose task: already has events".into());
+            }
+            let boundary = decode_task_boundary(&event.payload)?;
+            state.phase = Phase::Proposed;
+            state.objective = Some(boundary.objective);
+            state.read_scope = boundary.read_scope;
+            state.write_allow = boundary.write_allow;
+            state.write_deny = boundary.write_deny;
+            state.risk_triggers = boundary.risk_triggers;
+            state.gates = boundary.gates;
+            state.depends_on = boundary.depends_on;
+            state.task_kind = decode_task_kind(&event.payload)?;
+            state.audit_tier = decode_audit_tier(&event.payload)?;
+        }
         "task_revised" => {
-            if state.phase != Phase::Planning {
+            if state.phase != Phase::Planning && state.phase != Phase::Proposed {
                 return Err(format!(
-                    "Can only revise in Planning, current phase: {:?}",
+                    "Can only revise in Planning or Proposed, current phase: {:?}",
                     state.phase
                 ));
             }
@@ -969,6 +990,24 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 return Err(
                     "Missing objective, read_scope, write_allow, or gates for Ready".into(),
                 );
+            }
+            state.phase = Phase::Ready;
+        }
+        "task_approved" => {
+            // gh6 full proposal-mode: human-only (actor=human enforced at the
+            // REDUCER — stronger than the application-layer check; a non-human
+            // approval event fails replay). Proposed -> Ready.
+            if state.phase != Phase::Proposed {
+                return Err(format!(
+                    "Can only approve from Proposed, current phase: {:?}",
+                    state.phase
+                ));
+            }
+            if event.actor != "human" {
+                return Err(format!(
+                    "task_approved requires actor=human; got '{}' — the model proposes, a human approves",
+                    event.actor
+                ));
             }
             state.phase = Phase::Ready;
         }

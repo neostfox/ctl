@@ -795,6 +795,48 @@ enum TaskCommands {
         #[arg(long = "audit-tier", value_enum, default_value_t = AuditTierArg::Full)]
         audit_tier: AuditTierArg,
     },
+    /// Propose a task (gh6 full proposal-mode): the model authors the boundary;
+    /// the task lands in `Proposed` and CANNOT be started until a human approves
+    /// it (`ctl task approve`). Same args as `create`.
+    Propose {
+        /// Stable task identifier; maps to .ctl/tasks/<id>/
+        #[arg(long)]
+        id: String,
+        /// Non-empty task objective
+        #[arg(long)]
+        objective: String,
+        /// Paths the agent may read; repeat for multiple entries
+        #[arg(long = "read-scope", required = true)]
+        read_scope: Vec<String>,
+        /// Paths the agent may write; repeat for multiple entries
+        #[arg(long = "write-allow", required = true)]
+        write_allow: Vec<String>,
+        /// Additional paths the agent must not write; repeat for multiple entries
+        #[arg(long = "write-deny")]
+        write_deny: Vec<String>,
+        /// Review/hold triggers; repeat for multiple entries
+        #[arg(long = "risk-triggers")]
+        risk_triggers: Vec<String>,
+        /// Enforce the TDD red→green interlock: finish is blocked unless the
+        /// cargo_test gate history shows a FAIL before a PASS. Adds the
+        /// `tdd-red-green` risk trigger; requires a cargo_test gate.
+        #[arg(long)]
+        tdd: bool,
+        /// Gate template IDs. If omitted, derived from the project default
+        /// floor (`.ctl/config.toml [project].default_gates`). Repeat for multiple
+        #[arg(long = "gates")]
+        gates: Vec<String>,
+        /// Task IDs that must complete before this one (M-d); repeat for multiple
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        /// Task kind: implementation (default) or research. Immutable after create.
+        #[arg(long, value_enum, default_value_t = TaskKindArg::Implementation)]
+        kind: TaskKindArg,
+        /// Completion-audit depth: `full` (default, full decay rubric) or `light`
+        /// (closure checklist only — reviewer-isolated, skips R1-R6/T1-T6).
+        #[arg(long = "audit-tier", value_enum, default_value_t = AuditTierArg::Full)]
+        audit_tier: AuditTierArg,
+    },
     /// Fuse create + ready + start into one command with sensible defaults.
     /// Keeps the write boundary explicit (`--write-allow` required) but removes
     /// the three-step ceremony for small changes.
@@ -2439,6 +2481,50 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
                 id
             );
         }
+        TaskCommands::Propose {
+            id,
+            objective,
+            read_scope,
+            write_allow,
+            write_deny,
+            risk_triggers,
+            tdd,
+            gates,
+            depends_on,
+            kind,
+            audit_tier,
+        } => {
+            let mut triggers = risk_triggers.clone();
+            if *tdd
+                && !triggers
+                    .iter()
+                    .any(|t| t == crate::application::TDD_RED_GREEN_TRIGGER)
+            {
+                triggers.push(crate::application::TDD_RED_GREEN_TRIGGER.to_string());
+            }
+            let gates = resolve_task_gates(&app.project_root, gates)?;
+            let event = app.propose_task_with_kind(
+                id,
+                CreateTaskInput {
+                    objective,
+                    read_scope,
+                    write_allow,
+                    write_deny,
+                    risk_triggers: &triggers,
+                    gates: &gates,
+                    depends_on,
+                },
+                kind.to_domain(),
+                audit_tier.to_domain(),
+            )?;
+            println!(
+                "Proposed {} task '{}' at seq {} — awaits human approval (ctl task approve --id {}).",
+                kind.to_domain().as_str(),
+                id,
+                event.seq,
+                id
+            );
+        }
         TaskCommands::Quick {
             write_allow,
             objective,
@@ -2526,8 +2612,11 @@ fn cmd_task(command: &TaskCommands, dry_run: bool) -> Result<()> {
             println!("Marked task '{}' ready at seq {}.", id, event.seq);
         }
         TaskCommands::Approve { id } => {
-            let event = app.mark_ready(id)?;
-            println!("Approved task '{}' (readied) at seq {}.", id, event.seq);
+            let event = app.approve_task(id)?;
+            println!(
+                "Approved task '{}' (Proposed → Ready) at seq {}.",
+                id, event.seq
+            );
         }
         TaskCommands::Status { id, json } => {
             let state = app.get_status(id)?;

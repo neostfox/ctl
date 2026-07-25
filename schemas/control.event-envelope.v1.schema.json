@@ -42,8 +42,10 @@
       "type": "string",
       "enum": [
         "task_created",
+        "task_proposed",
         "task_revised",
         "task_marked_ready",
+        "task_approved",
         "task_started",
         "task_submitted_for_review",
         "task_reopened",
@@ -293,7 +295,97 @@
     {
       "if": {
         "properties": {
+          "type": { "const": "task_proposed" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "objective",
+              "read_scope",
+              "write_allow",
+              "write_deny",
+              "risk_triggers",
+              "gates"
+            ],
+            "properties": {
+              "objective": {
+                "description": "Task objective.",
+                "type": "string",
+                "minLength": 1
+              },
+              "read_scope": {
+                "description": "Files/dirs allowed to read.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_allow": {
+                "description": "Files/dirs allowed to modify.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "write_deny": {
+                "description": "Explicitly denied files/dirs.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "risk_triggers": {
+                "description": "Conditions that trigger hold.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "gates": {
+                "description": "Required gate IDs.",
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "depends_on": {
+                "description": "Task IDs that must complete before this task can run (declared dependency edges, M-d). Optional; absent means no dependencies.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "task_kind": {
+                "description": "Research/Spike V1: task kind. Optional; absent means implementation (legacy default). Fixed at creation, never revised.",
+                "type": "string",
+                "enum": ["implementation", "research"]
+              },
+              "audit_tier": {
+                "description": "Completion-audit depth (ceremony scheme 6). Optional; absent means full (legacy default). Fixed at creation.",
+                "type": "string",
+                "enum": ["full", "light"]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "type": { "const": "task_marked_ready" }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "task_approved" }
         },
         "required": ["type"]
       },
