@@ -56,11 +56,11 @@ let payload = json!({ "scope": ["src/"] });
 ### F5: Arbitrary Shell Execution
 
 ```rust
-// FORBIDDEN — only predefined gate templates
+// FORBIDDEN — gates run only via a fixed {command, args} array
 std::process::Command::new(user_provided_command).output()?;
 ```
 
-**Why**: EXEC-001. M0–M3 only allows predefined `cargo_*` gate templates.
+**Why**: EXEC-001. Gates run only via the fixed `{command, args}` array form — from the built-in `GATE_TEMPLATES` or a project `[[gate]]` entry in `.ctl/config.toml` (gh5). Arbitrary shell execution is never permitted. (ctl is at V1.)
 
 ### F6: Async Runtime
 
@@ -134,17 +134,17 @@ let command_id = format!("cmd-{}-{}", task_id, seq);
 
 ### R5: Gate Template Registry
 
-All gate IDs must be registered in `infrastructure/gates/mod.rs`:
+Built-in gates live in `src/infrastructure/gates/mod.rs` (`GATE_TEMPLATES`). Project gates are declared in `.ctl/config.toml` `[[gate]]` tables — **no `src/` edit needed** (the point of gh5: non-Rust ecosystems get deterministic gates without forking). Both sets share the same fixed `{command, args}` shape; `resolve_gate` resolves an id against the merged set, built-in first.
 
 ```rust
 pub static GATE_TEMPLATES: &[GateTemplate] = &[
     GateTemplate { id: "cargo_check", ... },
     GateTemplate { id: "cargo_test", ... },
-    // ...
+    // built-in only — project gates live in .ctl/config.toml [[gate]]
 ];
 ```
 
-Unknown gate IDs are rejected at validation time.
+Unknown gate IDs are rejected at validation time (built-in ids are reserved; a project `[[gate]]` colliding with one is rejected at load, fail-closed).
 
 ---
 
@@ -178,7 +178,7 @@ Unknown gate IDs are rejected at validation time.
 
 ## Code Review Checklist
 
-- [ ] Change is scoped to current milestone (M0–M3)
+- [ ] Change is scoped to the current milestone (V1 cognitive layer)
 - [ ] No new runtime dependency without DEP-001 review
 - [ ] `domain/` remains pure (no I/O imports)
 - [ ] New event types have reducer branches + fixture coverage

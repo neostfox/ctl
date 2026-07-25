@@ -132,11 +132,17 @@ Each boundary has a specific contract. Breaking it causes:
 
 ### Adding a New Gate Template
 
-- [ ] Add to `GATE_TEMPLATES` in `infrastructure/gates/mod.rs`
+**Project gate** (non-Rust ecosystem; **no `src/` edit** — the point of gh5):
+- [ ] Add a `[[gate]]` table to `.ctl/config.toml` (`id`, `command`, `args`, optional `description`) — same fixed `{command, args}` shape as the built-ins
+- [ ] Do NOT reuse a built-in id (`cargo_*`); collisions are rejected at load (fail-closed)
+- [ ] Add a fixture using the new gate ID
+- [ ] Verify `resolve_gate()` returns the new template (built-in set checked first, then project set)
+
+**Built-in gate** (ships with ctl itself — reserve for gates every install should have):
+- [ ] Add to `GATE_TEMPLATES` in `src/infrastructure/gates/mod.rs`
 - [ ] Document in `ARCHITECTURE_GUARDRAILS.md` gate section
 - [ ] Add fixture using the new gate ID
-- [ ] Verify `find_template()` returns the new template
-- [ ] Verify unknown gate IDs are still rejected
+- [ ] Verify `resolve_gate()` returns the new template and unknown gate IDs are still rejected
 
 ---
 

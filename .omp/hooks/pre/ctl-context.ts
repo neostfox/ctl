@@ -20,8 +20,10 @@ interface GateResult {
   reason: string;
   task_id?: string;
   remedy?: string;
-  /** Gate hint: log this verdict even if allowed (e.g. a never-path-scoped
-   *  bash_write). Denies are logged regardless of this flag. */
+  /** Gate hint: log this verdict even if allowed (e.g. an in-scope or
+   *  undecidable bash_write that fell back to observe; out-of-scope
+   *  identifiable targets are denied, gh7). Denies are logged regardless
+   *  of this flag. */
   record?: boolean;
 }
 
@@ -221,8 +223,9 @@ async function checkGate(
 /**
  * Append a blocked/flagged tool call to the NON-CANONICAL .ctl/decisions.jsonl
  * via `ctl hook record-decision`. Records every DENY and any verdict the gate
- * flags with record=true (e.g. a bash_write ALLOW, never path-scoped). Turns
- * "what the gate blocked/flagged" into auditable evidence.
+ * flags with record=true (e.g. a bash_write ALLOW for an in-scope or
+ * undecidable target; out-of-scope identifiable targets are denied, gh7).
+ * Turns "what the gate blocked/flagged" into auditable evidence.
  *
  * Fire-and-forget and best-effort: this never blocks or delays the tool call,
  * and any failure is swallowed by `ctl()` — an advisory log must not break the
@@ -504,7 +507,7 @@ export default function (pi: HookAPI): void {
       typeof process.stderr?.write === "function"
     ) {
       process.stderr.write(
-        `\n📝 Specs stale (${spec.source_files} source > ${spec.spec_files} specs). Run /ctl-spec-bootstrap.\n`,
+        `\n📝 Specs stale (${spec.source_files} source > ${spec.spec_files} specs). Run /ctl-spec.\n`,
       );
     }
     // Wrap-up reminder (mirrors the .claude Stop hook): a finished task with
@@ -517,7 +520,7 @@ export default function (pi: HookAPI): void {
     ) {
       process.stderr.write(
         `\n🧠 ctl wrap-up: task '${wrap.task_id}' finished without a knowledge capture — ` +
-          `run /ctl-spec-update (repo lessons → .ctl/spec/, cross-project preferences → ~/.ctl/memory/). ` +
+          `run /ctl-spec (repo lessons → .ctl/spec/, cross-project preferences → ~/.ctl/memory/). ` +
           `Reminds once per finish.\n`,
       );
     }
@@ -553,7 +556,7 @@ export default function (pi: HookAPI): void {
       typeof process.stderr?.write === "function"
     ) {
       process.stderr.write(
-        `\n📝 Specs stale. Run /ctl-spec-bootstrap to refresh.\n`,
+        `\n📝 Specs stale. Run /ctl-spec to refresh.\n`,
       );
     }
 
@@ -564,7 +567,7 @@ export default function (pi: HookAPI): void {
     ) {
       process.stderr.write(
         `\n🧠 ctl wrap-up: task '${wrap.task_id}' finished without a knowledge capture — ` +
-          `run /ctl-spec-update before closing (repo lessons → .ctl/spec/, ` +
+          `run /ctl-spec before closing (repo lessons → .ctl/spec/, ` +
           `cross-project preferences → ~/.ctl/memory/).\n`,
       );
     }

@@ -43,8 +43,12 @@ single source of truth for the full map.
 
 ## Phase map
 
-Phases run in this order; skip any whose preconditions are already met. Each
-phase is a separate skill that carries this same embedded core plus its own body.
+Phases run in this order; skip any whose preconditions are already met. Phases
+**1-3 and 5** are separate skills (ctl-grill-with-spec / ctl-to-prd / ctl-to-tasks
+/ ctl-diagnose); **4 (TDD)** is the `--tdd` interlock feature (not a skill); **7
+(handoff)** is the `ctl handoff` CLI feature (not a skill); **6 (architecture
+review)** and **8 (decision map)** survive as thinking guides under
+`.ctl/spec/guides/`, not active skills.
 
 1. **grill / first principles** — before a PRD or implementation, when the
    request is ambiguous, too broad, high-risk, or likely to build the wrong

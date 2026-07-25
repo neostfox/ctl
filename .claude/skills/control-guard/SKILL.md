@@ -143,10 +143,10 @@ concurrently to a shared path.
 ## Pipeline Routing (proposal-first)
 
 The governed pipeline: **triage (this protocol) → align (grill) → PRD → tasks →
-execute (tdd) → wrap-up (finish → spec-update)**. Each station's skill declares
-its station contract (upstream artifact → produces → downstream consumer); when
-routing, report the current station and its artifact so the human always knows
-where the pipeline stands.
+implement (under control-guard, --tdd opt-in) → wrap-up (finish → ctl-spec)**.
+Each station's skill declares its station contract (upstream artifact → produces
+→ downstream consumer); when routing, report the current station and its
+artifact so the human always knows where the pipeline stands.
 
 - **Trivial** (typo, single-file obvious fix) — skip the pipeline; edit directly
   (the gate records ungoverned writes) or use a quick task.

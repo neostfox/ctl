@@ -53,7 +53,7 @@ verdict.
 
 - **Upstream**: a **confirmed** PRD from `ctl-to-prd`, or — for a single obvious task — a confirmed alignment note from `ctl-grill-with-spec`.
 - **Produces**: task proposals for control-guard to `ctl task create` (provenance recorded, never gates).
-- **Downstream**: execution under control-guard (red→green via the `--tdd` interlock), then wrap-up (`ctl-spec-update`).
+- **Downstream**: execution under control-guard (red→green via the `--tdd` interlock), then wrap-up (`ctl-spec`).
 
 ## Decompose into tasks (phase body)
 

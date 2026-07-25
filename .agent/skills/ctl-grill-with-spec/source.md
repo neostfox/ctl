@@ -94,7 +94,7 @@ read scope · minimal write_allow · gates · risks) for control-guard.
 
 <!-- integration:omp -->
 
-The alignment station's single entry (the old `ctl-brainstorm` / `/ctl-new` is an
+The alignment station's single entry (successor to the retired `ctl-brainstorm` / `/ctl-new` is an
 alias of this skill). Run the interview with the host's question UI when
 available; record which cognitive artifacts the eventual task derived from with
 `ctl brainstorm` provenance (record-only — it never gates create/finish and makes
@@ -102,7 +102,7 @@ no claim about thinking quality). Writing the alignment note targets
 `.ctl/spec/alignment/` (spec tier — writable); `grill.md` or an ADR must fall
 inside the active task's `write_allow`, or the OMP PreToolUse ctl gate records
 (and for protected paths blocks) it. Hand the confirmed note to `ctl-to-prd`; a
-durable lesson to `/ctl-spec-update`.
+durable lesson to `/ctl-spec`.
 <!-- integration:opencode -->
 
 The alignment station's single entry (absorbs `ctl-brainstorm`). Record the
@@ -110,7 +110,7 @@ cognitive artifacts the eventual task derived from with `ctl brainstorm`
 provenance (record-only — never gates, no quality claim). The alignment note
 targets `.ctl/spec/alignment/` (spec tier — writable); `grill.md` or an ADR is a
 mutating write gated by `.opencode/plugins/ctl-gate.ts`. Hand the confirmed note
-to `ctl-to-prd`; a durable lesson to `ctl-spec-update`.
+to `ctl-to-prd`; a durable lesson to `ctl-spec`.
 
 **Recommended role** (autonomous dispatch — see control-guard): `explore` for the
 read-only investigation and alignment; `designer` when authoring `grill.md` or an ADR
@@ -127,4 +127,4 @@ writable under the gate); `grill.md` or an ADR must fall inside the active
 task's `write_allow`. Read-only investigation can be dispatched to a subagent
 (built-in `Explore`, `claude-code-guide`); keep writes inline so they carry the
 task's `CTL_TASK_ID` binding. Hand the confirmed note to `ctl-to-prd`; a durable
-lesson to `/ctl-spec-update`.
+lesson to `/ctl-spec`.

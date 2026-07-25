@@ -5,8 +5,9 @@ Read this guide when estimating task scope before proposing boundaries.
 ## Classification Table
 
 Classification decides **which pipeline station a request enters at** (triage →
-align → PRD → tasks → execute → wrap-up). Everything above Trivial goes through
-a proposal the user confirms before code is written.
+align → PRD → tasks → implement → wrap-up). Everything above Trivial goes through
+a proposal the user confirms before code is written; the `implement` station runs
+under control-guard, with `--tdd` available as an opt-in interlock.
 
 | Complexity | Criteria | Action |
 |---|---|---|

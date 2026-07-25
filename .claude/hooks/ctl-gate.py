@@ -91,8 +91,9 @@ def record_decision(tool: str, ti: dict, verdict: dict) -> None:
     """Append blocked/flagged tool calls to the NON-CANONICAL .ctl/decisions.jsonl.
 
     Records every DENY (allowed != true) and any verdict the gate flags with
-    record=true (e.g. a bash_write ALLOW, which is never path-scoped against
-    write_allow). This turns "what the gate blocked/flagged" into auditable
+    record=true (e.g. a bash_write ALLOW for an in-scope or undecidable
+    target; out-of-scope identifiable targets are denied, gh7). This turns
+    "what the gate blocked/flagged" into auditable
     evidence. Best-effort: a logging failure must NEVER block or delay the
     tool call, so every error here is swallowed.
     """

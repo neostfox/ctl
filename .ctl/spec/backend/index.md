@@ -23,7 +23,7 @@ domain/       → Pure reducer + state types + event definitions
 infrastructure/
   store/      → FileEventStore: JSONL read/append, task.json write
   boundary/   → PathNormalizer: escape/protected path rejection
-  gates/      → GateTemplate registry, M0 stub runner
+  gates/      → GateTemplate registry (built-in ∪ project [[gate]]), live runner
   schema_validator.rs → JSON Schema Draft 2020-12 validation
 adapters/
   manual/     → Reserved for M3 manual adapter

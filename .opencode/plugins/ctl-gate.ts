@@ -35,8 +35,10 @@ export interface GateResult {
   reason: string;
   task_id?: string;
   remedy?: string;
-  /** Gate hint: log this verdict even if allowed (e.g. a never-path-scoped
-   *  bash_write). Denies are logged regardless of this flag. */
+  /** Gate hint: log this verdict even if allowed (e.g. an in-scope or
+   *  undecidable bash_write that fell back to observe; out-of-scope
+   *  identifiable targets are denied, gh7). Denies are logged regardless
+   *  of this flag. */
   record?: boolean;
   /** Observe mode: a model-facing nudge on an ALLOWED verdict (out-of-scope
    *  or task-less write, out-of-window commit). Forwarded to stderr and the
@@ -132,8 +134,9 @@ export function buildGateArgs(input: {
 
 /**
  * Whether a verdict belongs in the non-canonical decision log: every DENY, plus
- * any allow the gate explicitly flags (`record === true`, e.g. a bash_write that
- * is never path-scoped against write_allow). Pure, so the policy is unit-tested.
+ * any allow the gate explicitly flags (`record === true`, e.g. a bash_write
+ * for an in-scope or undecidable target; out-of-scope identifiable targets
+ * are denied, gh7). Pure, so the policy is unit-tested.
  */
 export function shouldRecord(gate: GateResult): boolean {
   return !gate.allowed || gate.record === true;

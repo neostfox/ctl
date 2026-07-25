@@ -139,7 +139,7 @@ read scope · minimal write_allow · gates · risks) for control-guard.
 
 ## OMP Integration (platform-specific)
 
-The alignment station's single entry (the old `ctl-brainstorm` / `/ctl-new` is an
+The alignment station's single entry (successor to the retired `ctl-brainstorm` / `/ctl-new` is an
 alias of this skill). Run the interview with the host's question UI when
 available; record which cognitive artifacts the eventual task derived from with
 `ctl brainstorm` provenance (record-only — it never gates create/finish and makes
@@ -147,4 +147,4 @@ no claim about thinking quality). Writing the alignment note targets
 `.ctl/spec/alignment/` (spec tier — writable); `grill.md` or an ADR must fall
 inside the active task's `write_allow`, or the OMP PreToolUse ctl gate records
 (and for protected paths blocks) it. Hand the confirmed note to `ctl-to-prd`; a
-durable lesson to `/ctl-spec-update`.
+durable lesson to `/ctl-spec`.

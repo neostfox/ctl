@@ -3,7 +3,7 @@
 
 Calls `ctl hook context` and surfaces the active task's write scope so the
 model knows the boundaries up front, plus the GLOBAL memory index
-(`~/.ctl/memory/MEMORY.md` — the cross-project tier ctl-spec-update writes;
+(`~/.ctl/memory/MEMORY.md` — the cross-project tier ctl-spec writes;
 platform adapters reference it so every session starts with it). Enforcement
 itself is done by ctl-gate.py (PreToolUse); this hook is informational only.
 """
@@ -48,7 +48,7 @@ def global_memory_lines(index_path=None):
         return []
     lines = [
         "Global memory index (~/.ctl/memory/MEMORY.md — cross-project "
-        "preferences captured by ctl-spec-update; read a referenced file "
+        "preferences captured by ctl-spec; read a referenced file "
         "before applying it):"
     ]
     lines.extend(f"  {entry}" for entry in entries[:MAX_INDEX_LINES])

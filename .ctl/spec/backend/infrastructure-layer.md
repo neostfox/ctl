@@ -13,7 +13,7 @@ src/infrastructure/
   mod.rs               → Module declarations
   store/mod.rs         → FileEventStore
   boundary/normalizer.rs → PathNormalizer
-  gates/mod.rs         → GateTemplate registry + stub runner
+  gates/mod.rs         → GateTemplate registry + gate runner
   schema_validator.rs  → JSON Schema validation
 ```
 
@@ -149,11 +149,17 @@ if let Some(ref validator) = self.validator {
 
 ### Responsibilities
 
-1. **Define** the authoritative list of gate templates.
-2. **Lookup** templates by ID for validation.
-3. **Execute** gates (M0 stub: returns error; real execution deferred to M2).
+1. **Define** the built-in gate templates (`GATE_TEMPLATES`) and resolve the merged set (built-in ∪ project `[[gate]]`).
+2. **Resolve** a gate id against the merged set via `resolve_gate` (for validation).
+3. **Execute** gates under EXEC-002 supervision (the runner is **live** at V1 — not an M0 stub).
 
 ### Gate Template Registry
+
+`GATE_TEMPLATES` is the **built-in** list — the `cargo_*` gates that ship with ctl. It is **extended at load** by `[[gate]]` tables in `.ctl/config.toml`, which declare project gates in the same fixed `{command, args}` shape (never a shell). The merged set is what validation and execution resolve against:
+
+- built-in ids (`cargo_fmt_check`, `cargo_check`, `cargo_test`, `cargo_clippy`) are **reserved** — a project `[[gate]]` whose `id` collides with one is rejected at load (fail-closed, so a broken config never silently relaxes the gate set);
+- `EXEC-001` holds on both sides: every gate runs as a fixed `command + args` array, never an arbitrary shell string;
+- the EXEC-002 runner is **live** (ctl is at V1) — gates actually execute under supervision.
 
 ```rust
 pub static GATE_TEMPLATES: &[GateTemplate] = &[
@@ -161,21 +167,17 @@ pub static GATE_TEMPLATES: &[GateTemplate] = &[
     GateTemplate { id: "cargo_check",     command: "cargo", args: &["check"] },
     GateTemplate { id: "cargo_test",      command: "cargo", args: &["test"] },
     GateTemplate { id: "cargo_clippy",    command: "cargo", args: &["clippy", "--", "-D", "warnings"] },
+    // ... plus any [[gate]] entries loaded from .ctl/config.toml
 ];
-```
 
-### M0 Constraint
-
-`run_gate` is stubbed and always returns an error:
-
-```rust
-pub fn run_gate(gate_id: &str, _working_dir: &Path) -> Result<GateRunResult> {
-    let _template = find_template(gate_id).ok_or_else(|| anyhow!("Unknown gate template: {}", gate_id))?;
-    Err(anyhow!("Gate execution is disabled in M0 until EXEC-002 runner policy is implemented"))
+pub fn run_gate(gate_id: &str, working_dir: &Path) -> Result<GateRunResult> {
+    let template = resolve_gate(gate_id, working_dir)
+        .ok_or_else(|| anyhow!("Unknown gate '{}' — must be a built-in template or a [[gate]] entry in .ctl/config.toml", gate_id))?;
+    // ... execute command + args under EXEC-002 supervision
 }
 ```
 
-This enforces EXEC-001: no arbitrary shell execution.
+`resolve_gate` checks the built-in `GATE_TEMPLATES` first, then the project `[[gate]]` set loaded from `.ctl/config.toml`; if neither matches, the id is rejected — at validation time for task definitions, and again at execution time. This enforces EXEC-001 on both paths.
 
 ---
 
@@ -189,6 +191,6 @@ Never write `events.jsonl` directly. All writes go through `store.append()`.
 
 New protected paths must be added to `PathNormalizer::new()` AND documented in `ARCHITECTURE_GUARDRAILS.md`.
 
-### Mistake 3: Adding Gate Templates Without Registry
+### Mistake 3: Using Unresolvable Gate IDs
 
-Every gate ID used in task definitions must exist in `GATE_TEMPLATES`. Unknown IDs are rejected at application validation time.
+Every gate ID must resolve to a built-in `GATE_TEMPLATES` entry OR a project `[[gate]]` in `.ctl/config.toml`. Unresolved IDs are rejected at validation/load time — the validation message names both sources. (Reserve the `src/` `GATE_TEMPLATES` edit for gates that ship with ctl; project gates go in `.ctl/config.toml`.)

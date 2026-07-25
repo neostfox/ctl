@@ -149,4 +149,4 @@ writable under the gate); `grill.md` or an ADR must fall inside the active
 task's `write_allow`. Read-only investigation can be dispatched to a subagent
 (built-in `Explore`, `claude-code-guide`); keep writes inline so they carry the
 task's `CTL_TASK_ID` binding. Hand the confirmed note to `ctl-to-prd`; a durable
-lesson to `/ctl-spec-update`.
+lesson to `/ctl-spec`.

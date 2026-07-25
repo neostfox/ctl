@@ -57,7 +57,7 @@ When confidence ≥ 70%, classify the root cause:
 
 ## Step 5: Knowledge capture
 
-If the root cause reveals something worth preserving → `/ctl-spec-update`.
+If the root cause reveals something worth preserving → `/ctl-spec`.
 
 Target the right spec:
 

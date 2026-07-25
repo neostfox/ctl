@@ -144,7 +144,7 @@ cognitive artifacts the eventual task derived from with `ctl brainstorm`
 provenance (record-only — never gates, no quality claim). The alignment note
 targets `.ctl/spec/alignment/` (spec tier — writable); `grill.md` or an ADR is a
 mutating write gated by `.opencode/plugins/ctl-gate.ts`. Hand the confirmed note
-to `ctl-to-prd`; a durable lesson to `ctl-spec-update`.
+to `ctl-to-prd`; a durable lesson to `ctl-spec`.
 
 **Recommended role** (autonomous dispatch — see control-guard): `explore` for the
 read-only investigation and alignment; `designer` when authoring `grill.md` or an ADR

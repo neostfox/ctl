@@ -99,7 +99,7 @@ if event.seq <= prev_seq {
 |-----------|-------------|-----------------|
 | Empty objective | `application` | `"Objective must not be empty"` |
 | Empty `read_scope`/`write_allow`/`gates` | `application` | `"<field> must not be empty"` |
-| Unknown gate ID | `application` | `"Unknown gate template: {id}"` |
+| Unknown gate ID | `application` | `"Unknown gate '{id}' — must be a built-in template or a [[gate]] entry in .ctl/config.toml"` |
 | Illegal phase transition | `domain` | `"Cannot {action} from {phase}"` |
 | Task already exists | `application` | `"Task '{id}' already exists"` |
 | Task not found | `store` | `"Task '{id}' not found"` |

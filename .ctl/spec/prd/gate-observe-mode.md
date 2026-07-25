@@ -11,9 +11,11 @@ The PreToolUse write gate denied every Write/Edit outside the active task's
 experience showed the deny posture produced friction without matching
 enforcement value:
 
-- **The boundary was already only half-hard.** Bash was never path-scoped
-  (`classify_bash` gates on task state, not path), so the "hard write
-  boundary" existed only for the Write/Edit tools.
+- **The boundary was already only half-hard.** Bash was not path-scoped
+  (`classify_bash` gated on task state, not path), so the "hard write
+  boundary" existed only for the Write/Edit tools. (gh7 / issue #7 later added
+  best-effort bash target extraction + deny for identifiable out-of-scope
+  targets; obfuscated commands still fall through to observe-mode here.)
 - **Real verification happens later.** Gate evidence binds to the committed
   tree; the completion audit, reviewer independence, and the finish interlock
   are all post-commit. Write-time is the earliest, least-informed, most

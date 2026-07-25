@@ -74,7 +74,7 @@ model), then choose a **prevention mechanism** that makes recurrence structurall
 
 ## Step 5: Capture
 
-Hand the durable lesson to **ctl-spec-update** — a gotcha, a convention, or a new test —
+Hand the durable lesson to **ctl-spec** — a gotcha, a convention, or a new test —
 so the next session inherits it. A diagnosis that doesn't change the specs will be
 re-discovered.
 
