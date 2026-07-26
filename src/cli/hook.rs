@@ -132,12 +132,7 @@ pub(super) fn cmd_hook_context() -> Result<()> {
         }
     }
 
-    // Knowledge base digest (facts.jsonl) — inject a compact summary so every
-    // subsequent session sees accumulated knowledge. Fault-tolerant: missing
-    // file → no facts field, never crashes context injection.
-    let facts = app.spec_facts_digest().ok();
-
-    let mut output = serde_json::json!({
+    let output = serde_json::json!({
         "binary": "ctl",
         // Version visibility (B-lite): the governance rules live in this
         // binary, so every session should see WHICH binary answered.
@@ -146,10 +141,6 @@ pub(super) fn cmd_hook_context() -> Result<()> {
         "active_tasks": active,
         "spec_layers": spec_layers,
     });
-    if let Some(digest) = facts {
-        output["facts"] = serde_json::json!(digest);
-    }
-
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

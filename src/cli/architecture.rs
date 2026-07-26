@@ -453,7 +453,6 @@ pub(super) fn check_milestone_scope() -> Result<()> {
             "handoff",
             "hook",
             "init",
-            "memory",
             "next-action",
             "next-task",
             "prd",

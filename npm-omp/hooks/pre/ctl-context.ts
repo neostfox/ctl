@@ -328,18 +328,11 @@ export default function (pi: HookAPI): void {
         return `  📦 ${t.id}: ${t.objective}\n  ✏️ Write: ${scope}${deny}${gates}${drift}${blocked}${unknowns}${prov}`;
       });
 
-      const facts = ctx.facts as
-        | { total: number; categories: Record<string, number>; recent: Array<{ fact_id: string; statement: string }> }
-        | undefined;
-      const factsLine =
-        facts && facts.total > 0
-          ? `\n📚 Knowledge base: ${facts.total} fact(s) [${Object.entries(facts.categories).map(([k, v]) => `${k}: ${v}`).join(", ")}] | Recent: ${facts.recent.slice(0, 3).map((r) => `${r.fact_id} (${r.statement.slice(0, 60)})`).join("; ")}\n  Search: ctl spec fact list --search <query>`
-          : "";
 
       const boundary = [
         `📋 Active ctl task boundaries — stay within write scope:`,
         ...lines,
-        `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.${factsLine}`,
+        `\nTool calls are gated by the ctl state machine: writes outside scope, git commits without a completed task, and pushes are blocked. If the ctl gate is unavailable, mutating tools fail closed (blocked) until it responds.`,
       ].join("\n");
 
       return {

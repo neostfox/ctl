@@ -41,8 +41,6 @@ mod hook;
 use hook::*;
 mod write_gate;
 use write_gate::*;
-mod memory;
-use memory::*;
 
 #[derive(Parser)]
 #[command(name = "ctl")]
@@ -315,18 +313,12 @@ enum Commands {
         #[command(subcommand)]
         command: PrdCommands,
     },
-    /// Spec fact store (knowledge-accumulation-v1): capture and retrieve atomic
-    /// verified facts. `.ctl/facts.jsonl` is an append-only evidence index;
-    /// promote copies a fact into a curated spec markdown file.
+    /// Spec integrity tools. `doctor` scans `.ctl/spec/**/*.md` for stale
+    /// code-path references (files that no longer exist). (The fact store moved
+    /// to the workflow-side companion `scripts/knowledge.py`.)
     Spec {
         #[command(subcommand)]
         command: SpecCommands,
-    },
-    /// Global memory management (~/.ctl/memory/). Read-only inspections of the
-    /// cross-project knowledge tier — never writes or blocks. [ROADMAP #1]
-    Memory {
-        #[command(subcommand)]
-        command: MemoryCommands,
     },
     /// Bounded safety supervisor for unattended runs (ralph-safe-run-v1). A
     /// read-only dead-man's-switch around an external run — it NEVER spawns an
@@ -1140,24 +1132,7 @@ enum PrdCommands {
 }
 
 #[derive(Subcommand)]
-enum MemoryCommands {
-    /// Scan ~/.ctl/memory/*.md for project-path pollution — content that would
-    /// leak one repo's specifics into every project session. Warns, never blocks.
-    /// [ROADMAP #1/S]
-    Verify {
-        /// Print the findings as JSON
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum SpecCommands {
-    /// Atomic verified facts — the project knowledge base.
-    Fact {
-        #[command(subcommand)]
-        command: FactCommands,
-    },
     /// Scan `.ctl/spec/**/*.md` for stale code-path references — backtick-quoted
     /// file paths that no longer exist on disk. Read-only: reports spec rot,
     /// never edits. [ROADMAP #2/S]
@@ -1165,48 +1140,6 @@ enum SpecCommands {
         /// Print the findings as JSON
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum FactCommands {
-    /// Record a verified fact. The statement + source persist to
-    /// `.ctl/facts.jsonl` and surface in every subsequent session's context.
-    Add {
-        /// The fact statement (what was verified)
-        #[arg(long)]
-        statement: String,
-        /// Where it was verified (file:line, command, URL) — required provenance
-        #[arg(long)]
-        source: String,
-        /// Free-text category for filtering (e.g. "boundary", "gotcha")
-        #[arg(long)]
-        category: Option<String>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// List or search facts. Read-only.
-    List {
-        /// Filter by category (case-insensitive)
-        #[arg(long)]
-        category: Option<String>,
-        /// Search statement + source (case-insensitive substring)
-        #[arg(long)]
-        search: Option<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Append a fact as a formatted block into a curated spec markdown file
-    /// under `.ctl/spec/`. The fact stays in the raw store; this copies it
-    /// into processed knowledge.
-    Promote {
-        /// Fact id (e.g. F-003)
-        #[arg(long)]
-        id: String,
-        /// Target spec file, relative to `.ctl/spec/` (e.g. backend/error-handling.md)
-        #[arg(long)]
-        to: String,
     },
 }
 
@@ -1674,8 +1607,7 @@ pub fn run() -> Result<()> {
         Commands::Uncertainty { command } => cmd_uncertainty(command),
         Commands::Research { command } => cmd_research(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
-        Commands::Spec { command } => cmd_spec(command, dry_run),
-        Commands::Memory { command } => cmd_memory(command),
+        Commands::Spec { command } => cmd_spec(command),
     }
 }
 

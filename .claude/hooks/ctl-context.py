@@ -124,22 +124,6 @@ def main() -> None:
         "dispatch only read-only subagents and keep writes inline in the main agent."
     )
 
-    facts = ctx.get("facts")
-    if facts and facts.get("total", 0) > 0:
-        cats = ", ".join(
-            f"{k}: {v}" for k, v in sorted(facts.get("categories", {}).items())
-        )
-        recent = facts.get("recent", [])
-        recent_str = "; ".join(
-            f"{r['fact_id']} ({r['statement'][:60]})" for r in recent[:3]
-        )
-        lines.append(
-            f"Knowledge base: {facts['total']} fact(s) [{cats}] | Recent: {recent_str}"
-        )
-        lines.append(
-            "  Search facts: ctl spec fact list --search <query>"
-        )
-
     mem = global_memory_lines()
     if mem:
         lines.append("")

@@ -206,75 +206,9 @@ pub(super) fn render_prd_status(view: &crate::application::prd::PrdStatusView) {
     }
 }
 
-pub(super) fn cmd_spec(command: &SpecCommands, global_dry_run: bool) -> Result<()> {
+pub(super) fn cmd_spec(command: &SpecCommands) -> Result<()> {
     match command {
-        SpecCommands::Fact { command } => cmd_spec_fact(command, global_dry_run),
         SpecCommands::Doctor { json } => cmd_spec_doctor(*json),
-    }
-}
-
-pub(super) fn cmd_spec_fact(command: &FactCommands, global_dry_run: bool) -> Result<()> {
-    match command {
-        FactCommands::Add {
-            statement,
-            source,
-            category,
-            dry_run,
-        } => {
-            let dry = *dry_run || global_dry_run;
-            let app = app_open(dry)?;
-            if dry {
-                println!(
-                    "[dry-run] Would record fact: \"{}\" (source: {}, category: {})",
-                    statement,
-                    source,
-                    category.as_deref().unwrap_or("(none)")
-                );
-                return Ok(());
-            }
-            let fact = app.spec_fact_add(statement, source, category.as_deref())?;
-            println!(
-                "Recorded fact '{}' (category: {}) at {} — source: {}",
-                fact.fact_id,
-                category.as_deref().unwrap_or("uncategorized"),
-                fact.recorded_at,
-                fact.source
-            );
-            println!("  {}", fact.statement);
-            println!("Next: ctl spec fact list");
-            Ok(())
-        }
-
-        FactCommands::List {
-            category,
-            search,
-            json,
-        } => {
-            let app = app_open(false)?;
-            let facts = app.spec_fact_list(category.as_deref(), search.as_deref())?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&facts)?);
-                return Ok(());
-            }
-            if facts.is_empty() {
-                println!("No facts found.");
-                return Ok(());
-            }
-            println!("Knowledge base: {} fact(s)", facts.len());
-            for f in &facts {
-                let cat = f.category.as_deref().unwrap_or("uncategorized");
-                println!("  {} [{}] — {}", f.fact_id, cat, f.statement);
-                println!("    source: {}", f.source);
-            }
-            Ok(())
-        }
-
-        FactCommands::Promote { id, to } => {
-            let app = app_open(false)?;
-            let path = app.spec_fact_promote(id, to)?;
-            println!("Promoted fact '{}' into {}", id, path.display());
-            Ok(())
-        }
     }
 }
 

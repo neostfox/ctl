@@ -6,7 +6,6 @@ pub mod prd;
 mod research_service;
 mod run_service;
 pub mod schedule;
-pub mod spec;
 mod task_service;
 mod uncertainty_service;
 mod view_service;
