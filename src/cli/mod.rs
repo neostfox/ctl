@@ -1138,6 +1138,14 @@ enum SpecCommands {
         #[command(subcommand)]
         command: FactCommands,
     },
+    /// Scan `.ctl/spec/**/*.md` for stale code-path references — backtick-quoted
+    /// file paths that no longer exist on disk. Read-only: reports spec rot,
+    /// never edits. [ROADMAP #2/S]
+    Doctor {
+        /// Print the findings as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
