@@ -2,10 +2,9 @@ use super::{
     classify_bash, classify_write_target, command_has_opaque_wrapper, decision_entry,
     detect_shared_git_op, ellipsize, extract_bash_write_targets, format_brainstorm_provenance,
     format_decision_line, format_decisions, format_research_output, format_uncertainty_ledger,
-    has_opaque_wrapper, is_cargo_target_build, is_spec_path, iso8601_utc_to_epoch,
-    omp_agent_env_file, parse_project_default_gates, path_in_scope,
-    resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
-    wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
+    is_cargo_target_build, is_spec_path, iso8601_utc_to_epoch, omp_agent_env_file,
+    parse_project_default_gates, path_in_scope, resolve_active_governance, resolve_ctl_for_hook,
+    upsert_env_line, wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -153,14 +152,15 @@ fn spec_path_with_traversal_is_not_spec() {
     assert!(is_spec_path(&root, ".ctl/spec/intent.md"));
     assert!(is_spec_path(
         &root,
-        &root.join(".ctl").join("spec").join("x.json").to_string_lossy()
+        &root
+            .join(".ctl")
+            .join("spec")
+            .join("x.json")
+            .to_string_lossy()
     ));
     // Traversal that would land on the canonical ledger, Cargo.toml, .git,
     // or .ctl/config.toml must NOT be treated as a spec path.
-    assert!(!is_spec_path(
-        &root,
-        ".ctl/spec/../tasks/events.jsonl"
-    ));
+    assert!(!is_spec_path(&root, ".ctl/spec/../tasks/events.jsonl"));
     assert!(!is_spec_path(&root, ".ctl/spec/../../Cargo.toml"));
     assert!(!is_spec_path(&root, ".ctl/spec/../config.toml"));
     // Plain `..` and UNC also rejected.
@@ -251,7 +251,10 @@ fn write_target_symlink_redirect_to_protected_is_suspicious() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join(".ctl").join("tasks").join("t1")).unwrap();
     std::fs::write(
-        root.join(".ctl").join("tasks").join("t1").join("events.jsonl"),
+        root.join(".ctl")
+            .join("tasks")
+            .join("t1")
+            .join("events.jsonl"),
         "",
     )
     .unwrap();
