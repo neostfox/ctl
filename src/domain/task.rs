@@ -4,6 +4,9 @@ use crate::domain::lease::{LeaseError, LeaseGrant, LeaseState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+mod task_reducer;
+
+use task_reducer::{cognitive, lifecycle, run};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -921,163 +924,28 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
     }
 
     match event.event_type.as_str() {
-        "task_created" => {
-            // R5: Reject duplicate task_created (first event always has last_seq == 0)
-            if state.last_seq > 0 {
-                return Err("Cannot re-create task: already has events".into());
-            }
-            let boundary = decode_task_boundary(&event.payload)?;
-            state.phase = Phase::Planning;
-            state.objective = Some(boundary.objective);
-            state.read_scope = boundary.read_scope;
-            state.write_allow = boundary.write_allow;
-            state.write_deny = boundary.write_deny;
-            state.risk_triggers = boundary.risk_triggers;
-            state.gates = boundary.gates;
-            state.depends_on = boundary.depends_on;
-            // Research/Spike V1: kind is fixed at creation and never revised.
-            state.task_kind = decode_task_kind(&event.payload)?;
-            state.audit_tier = decode_audit_tier(&event.payload)?;
-        }
-        "task_proposed" => {
-            // gh6 full proposal-mode: a model-proposed task lands in Proposed
-            // (not Planning); it cannot be started until a human approves it.
-            if state.last_seq > 0 {
-                return Err("Cannot propose task: already has events".into());
-            }
-            let boundary = decode_task_boundary(&event.payload)?;
-            state.phase = Phase::Proposed;
-            state.objective = Some(boundary.objective);
-            state.read_scope = boundary.read_scope;
-            state.write_allow = boundary.write_allow;
-            state.write_deny = boundary.write_deny;
-            state.risk_triggers = boundary.risk_triggers;
-            state.gates = boundary.gates;
-            state.depends_on = boundary.depends_on;
-            state.task_kind = decode_task_kind(&event.payload)?;
-            state.audit_tier = decode_audit_tier(&event.payload)?;
-        }
-        "task_revised" => {
-            if state.phase != Phase::Planning && state.phase != Phase::Proposed {
-                return Err(format!(
-                    "Can only revise in Planning or Proposed, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            let boundary = decode_task_boundary(&event.payload)?;
-            state.objective = Some(boundary.objective);
-            state.read_scope = boundary.read_scope;
-            state.write_allow = boundary.write_allow;
-            state.write_deny = boundary.write_deny;
-            state.risk_triggers = boundary.risk_triggers;
-            state.gates = boundary.gates;
-            state.depends_on = boundary.depends_on;
-        }
-        "task_marked_ready" => {
-            if state.phase != Phase::Planning {
-                return Err("Can only mark ready from Planning".into());
-            }
-            let missing_objective = state
-                .objective
-                .as_ref()
-                .map(|objective| objective.is_empty())
-                .unwrap_or(true);
-            if missing_objective
-                || state.read_scope.is_empty()
-                || state.write_allow.is_empty()
-                || state.gates.is_empty()
-            {
-                return Err(
-                    "Missing objective, read_scope, write_allow, or gates for Ready".into(),
-                );
-            }
-            state.phase = Phase::Ready;
-        }
-        "task_approved" => {
-            // gh6 full proposal-mode: human-only (actor=human enforced at the
-            // REDUCER — stronger than the application-layer check; a non-human
-            // approval event fails replay). Proposed -> Ready.
-            if state.phase != Phase::Proposed {
-                return Err(format!(
-                    "Can only approve from Proposed, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            if event.actor != "human" {
-                return Err(format!(
-                    "task_approved requires actor=human; got '{}' — the model proposes, a human approves",
-                    event.actor
-                ));
-            }
-            state.phase = Phase::Ready;
-        }
-        "task_started" => {
-            if state.phase != Phase::Ready {
-                return Err(format!(
-                    "Can only start from Ready, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            state.phase = Phase::InProgress;
-        }
-        "task_submitted_for_review" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "Can only submit for review from InProgress, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            state.phase = Phase::Review;
-        }
-        "task_reopened" => {
-            if state.phase != Phase::Review {
-                return Err(format!(
-                    "Can only reopen from Review, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            state.phase = Phase::InProgress;
-        }
-        "task_completed" => {
-            if state.phase != Phase::Review {
-                return Err(format!(
-                    "Can only complete from Review, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            // STATE-012: Completion interlock — all required gates must have
-            // a latest passing result before completion.
-            for gate_id in &state.gates {
-                match state.gate_results.get(gate_id) {
-                    Some(result) if result.passed => {}
-                    _ => {
-                        return Err(format!(
-                            "Completion interlock: gate '{}' has no passing result",
-                            gate_id
-                        ));
-                    }
-                }
-            }
-            state.phase = Phase::Completed;
-        }
-        "task_cancelled" => {
-            if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
-                return Err(format!(
-                    "Cannot cancel from terminal phase: {:?}",
-                    state.phase
-                ));
-            }
-            state.phase = Phase::Cancelled;
-        }
-        "task_archived" => {
-            if state.phase != Phase::Completed && state.phase != Phase::Cancelled {
-                return Err(format!(
-                    "Can only archive from terminal phase, current: {:?}",
-                    state.phase
-                ));
-            }
-            state.is_archived = true;
-        }
+        "task_created" => lifecycle::task_created(state, event)?,
+
+        "task_proposed" => lifecycle::task_proposed(state, event)?,
+
+        "task_revised" => lifecycle::task_revised(state, event)?,
+
+        "task_marked_ready" => lifecycle::task_marked_ready(state, event)?,
+
+        "task_approved" => lifecycle::task_approved(state, event)?,
+
+        "task_started" => lifecycle::task_started(state, event)?,
+
+        "task_submitted_for_review" => lifecycle::task_submitted_for_review(state, event)?,
+
+        "task_reopened" => lifecycle::task_reopened(state, event)?,
+
+        "task_completed" => lifecycle::task_completed(state, event)?,
+
+        "task_cancelled" => lifecycle::task_cancelled(state, event)?,
+
+        "task_archived" => lifecycle::task_archived(state, event)?,
+
         "hold_entered" => {
             if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
                 return Err(format!(
@@ -1087,9 +955,11 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
             state.is_held = true;
         }
+
         "hold_exited" => {
             state.is_held = false;
         }
+
         "boundary_violation_recorded" => {
             if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
                 return Err(format!(
@@ -1099,6 +969,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
             state.is_held = true;
         }
+
         "gate_checked" => {
             // Record a gate execution result. Retains only the latest result per gate_id.
             // Fail-closed: reject missing or empty required fields, reject unknown gate_id.
@@ -1165,6 +1036,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 },
             );
         }
+
         "evidence_accepted" => {
             // Validate required fields
             let evidence_id = event
@@ -1188,6 +1060,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 return Err("Cannot accept evidence for terminal task".into());
             }
         }
+
         "evidence_rejected" => {
             let evidence_id = event
                 .payload
@@ -1199,244 +1072,28 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
         }
         // ── M4: Workspace events ──
-        "workspace_created" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "Can only create workspace in InProgress, current: {:?}",
-                    state.phase
-                ));
-            }
-            let worktree_path = event
-                .payload
-                .get("worktree_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if worktree_path.is_empty() {
-                return Err("workspace_created: worktree_path is required".into());
-            }
-        }
-        "workspace_cleaned" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "workspace_cleaned only valid in InProgress, current: {:?}",
-                    state.phase
-                ));
-            }
-            let worktree_path = event
-                .payload
-                .get("worktree_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if worktree_path.is_empty() {
-                return Err("workspace_cleaned: worktree_path is required".into());
-            }
-        }
-        "workspace_diff_computed" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "workspace_diff_computed only valid in InProgress, current: {:?}",
-                    state.phase
-                ));
-            }
-            // Diff computed is informational; no state mutation.
-            // Validate required arrays exist.
-            for field in [
-                "files_added",
-                "files_modified",
-                "files_deleted",
-                "high_risk",
-            ] {
-                if event
-                    .payload
-                    .get(field)
-                    .and_then(|v| v.as_array())
-                    .is_none()
-                {
-                    return Err(format!(
-                        "workspace_diff_computed: '{}' must be an array",
-                        field
-                    ));
-                }
-            }
-        }
-        "workspace_applied" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "workspace_applied only valid in InProgress, current: {:?}",
-                    state.phase
-                ));
-            }
-            let files = event
-                .payload
-                .get("files_applied")
-                .and_then(|v| v.as_array());
-            if files.is_none() {
-                return Err("workspace_applied: files_applied must be an array".into());
-            }
-        }
-        // ── M4: Run lifecycle events ──
-        "run_started" => {
-            if state.phase != Phase::InProgress {
-                return Err(format!(
-                    "run_started only valid in InProgress, current phase: {:?}",
-                    state.phase
-                ));
-            }
-            if state.active_run.is_some() {
-                return Err("Cannot start run: another run is already active".into());
-            }
-            let run_id = event
-                .payload
-                .get("run_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let adapter = event
-                .payload
-                .get("adapter")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let lease_id = event
-                .payload
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if run_id.is_empty() || adapter.is_empty() || lease_id.is_empty() {
-                return Err("run_started: run_id, adapter, and lease_id are required".into());
-            }
-            state.active_run = Some(RunInfo {
-                run_id: run_id.to_string(),
-                adapter: adapter.to_string(),
-                lease_id: lease_id.to_string(),
-            });
-        }
-        "run_completed" => {
-            if state.active_run.is_none() {
-                return Err("Cannot complete run: no active run".into());
-            }
-            state.active_run = None;
-        }
-        "run_failed" => {
-            // run_failed clears active_run regardless of state
-            state.active_run = None;
-        }
-        // ── M4: Lease events ──
-        "lease_created" => {
-            let lease_id = event
-                .payload
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if lease_id.is_empty() {
-                return Err("lease_created: lease_id is required".into());
-            }
-            if state.leases.contains_key(lease_id) {
-                return Err(format!("Duplicate lease_id: {}", lease_id));
-            }
-            let run_id = event
-                .payload
-                .get("run_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let resource_path = event
-                .payload
-                .get("resource_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let action = event
-                .payload
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let ttl_seconds = event
-                .payload
-                .get("ttl_seconds")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let max_uses = event
-                .payload
-                .get("max_uses")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            // Delegate to the typed transition; map its errors back to this
-            // aggregate's long-standing messages (byte-identical to pre-refactor).
-            let lease = LeaseState::grant(LeaseGrant {
-                lease_id: lease_id.to_string(),
-                run_id: run_id.to_string(),
-                resource_path: resource_path.to_string(),
-                action: action.to_string(),
-                ttl_seconds,
-                max_uses,
-                created_at_seq: event.seq,
-                // Task-aggregate leases carry no run-binding fields.
-                task_id: String::new(),
-                adapter: String::new(),
-                scopes: std::collections::BTreeSet::new(),
-            })
-            .map_err(|e| match e {
-                LeaseError::InvalidRunId
-                | LeaseError::InvalidResource
-                | LeaseError::InvalidAction => {
-                    "lease_created: run_id, resource_path, and action are required".to_string()
-                }
-                LeaseError::InvalidTtl | LeaseError::InvalidMaxUses => {
-                    "lease_created: ttl_seconds and max_uses must be > 0".to_string()
-                }
-                other => format!("lease_created: {}", other),
-            })?;
-            state.leases.insert(lease_id.to_string(), lease);
-        }
-        "lease_used" => {
-            let lease_id = event
-                .payload
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if lease_id.is_empty() {
-                return Err("lease_used: lease_id is required".into());
-            }
-            let lease = state
-                .leases
-                .get_mut(lease_id)
-                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            lease.consume().map_err(|e| match e {
-                LeaseError::NotActive => format!("Lease '{}' is not active", lease_id),
-                LeaseError::NoRemainingUses => {
-                    format!("Lease '{}' has no remaining uses", lease_id)
-                }
-                other => format!("Lease '{}': {}", lease_id, other),
-            })?;
-        }
-        "lease_expired" => {
-            let lease_id = event
-                .payload
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if lease_id.is_empty() {
-                return Err("lease_expired: lease_id is required".into());
-            }
-            let lease = state
-                .leases
-                .get_mut(lease_id)
-                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            lease.expire();
-        }
-        "lease_revoked" => {
-            let lease_id = event
-                .payload
-                .get("lease_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if lease_id.is_empty() {
-                return Err("lease_revoked: lease_id is required".into());
-            }
-            let lease = state
-                .leases
-                .get_mut(lease_id)
-                .ok_or_else(|| format!("Unknown lease_id: {}", lease_id))?;
-            lease.revoke();
-        }
-        // ── M4: Approval events ──
+        "workspace_created" => run::workspace_created(state, event)?,
+
+        "workspace_cleaned" => run::workspace_cleaned(state, event)?,
+
+        "workspace_diff_computed" => run::workspace_diff_computed(state, event)?,
+
+        "workspace_applied" => run::workspace_applied(state, event)?,
+
+        "run_started" => run::run_started(state, event)?,
+
+        "run_completed" => run::run_completed(state, event)?,
+
+        "run_failed" => run::run_failed(state, event)?,
+
+        "lease_created" => run::lease_created(state, event)?,
+
+        "lease_used" => run::lease_used(state, event)?,
+
+        "lease_expired" => run::lease_expired(state, event)?,
+
+        "lease_revoked" => run::lease_revoked(state, event)?,
+
         "approval_requested" => {
             let request_id = event
                 .payload
@@ -1483,6 +1140,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
                 },
             );
         }
+
         "approval_granted" => {
             let request_id = event
                 .payload
@@ -1505,6 +1163,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             approval.status = ApprovalStatus::Granted;
             approval.granted_at_seq = Some(event.seq);
         }
+
         "approval_denied" => {
             let request_id = event
                 .payload
@@ -1526,6 +1185,7 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             }
             approval.status = ApprovalStatus::Denied;
         }
+
         "approval_expired" => {
             let request_id = event
                 .payload
@@ -1542,363 +1202,23 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             approval.status = ApprovalStatus::Expired;
         }
         // ── BS-provenance V1: record-only artifact provenance ──
-        "brainstorm_artifact_recorded" => {
-            let brainstorm_id = require_str(&event.payload, "brainstorm_id")?;
-            check_trust_level(&event.payload)?;
-            let divergence =
-                decode_artifact(&event.payload, "divergence_path", "divergence_hash", true)?;
-            let convergence = decode_artifact(
-                &event.payload,
-                "convergence_path",
-                "convergence_hash",
-                false,
-            )?;
-            let source_run_id = optional_str(&event.payload, "source_run_id");
-            // One brainstorm per task. Re-recording the same id refreshes the
-            // originator artifacts (and preserves any critic disposition);
-            // binding a different id is rejected.
-            let (critic, critic_disposition, skip_reason, skip_decided_by) =
-                match &state.brainstorm_ref {
-                    Some(existing) if existing.id != brainstorm_id => {
-                        return Err(format!(
-                            "brainstorm_artifact_recorded: task already bound to brainstorm '{}'",
-                            existing.id
-                        ));
-                    }
-                    Some(existing) => (
-                        existing.critic.clone(),
-                        existing.critic_disposition.clone(),
-                        existing.skip_reason.clone(),
-                        existing.skip_decided_by.clone(),
-                    ),
-                    None => (None, CriticDisposition::Absent, None, None),
-                };
-            state.brainstorm_ref = Some(BrainstormRef {
-                id: brainstorm_id,
-                divergence,
-                convergence,
-                critic,
-                critic_disposition,
-                critic_independence: CRITIC_INDEPENDENCE_UNATTESTED.to_string(),
-                trust_level: BRAINSTORM_TRUST_LEVEL.to_string(),
-                source_run_id,
-                recorded_by: event.actor.clone(),
-                skip_reason,
-                skip_decided_by,
-            });
-        }
-        "critic_artifact_attached" => {
-            let brainstorm_id = require_str(&event.payload, "brainstorm_id")?;
-            check_trust_level(&event.payload)?;
-            // Independence can never be claimed in V1: reject any value other
-            // than `unattested`, so the ledger never asserts a critic was
-            // independent when no independent orchestrator exists.
-            if let Some(indep) = event
-                .payload
-                .get("critic_independence")
-                .and_then(|v| v.as_str())
-            {
-                if indep != CRITIC_INDEPENDENCE_UNATTESTED {
-                    return Err(format!(
-                        "critic_artifact_attached: critic_independence '{indep}' cannot be \
-                         recorded; only '{CRITIC_INDEPENDENCE_UNATTESTED}' is permitted in V1 \
-                         (no independent orchestrator)"
-                    ));
-                }
-            }
-            let critic = decode_artifact(&event.payload, "critic_path", "critic_hash", true)?;
-            let reference = state.brainstorm_ref.as_mut().ok_or_else(|| {
-                "critic_artifact_attached: no brainstorm recorded for this task".to_string()
-            })?;
-            if reference.id != brainstorm_id {
-                return Err(format!(
-                    "critic_artifact_attached: brainstorm id '{}' does not match recorded '{}'",
-                    brainstorm_id, reference.id
-                ));
-            }
-            reference.critic = critic;
-            reference.critic_disposition = CriticDisposition::Present;
-            reference.critic_independence = CRITIC_INDEPENDENCE_UNATTESTED.to_string();
-            // Attaching a critic supersedes any prior skip record.
-            reference.skip_reason = None;
-            reference.skip_decided_by = None;
-        }
-        "brainstorm_skipped" => {
-            let brainstorm_id = require_str(&event.payload, "brainstorm_id")?;
-            check_trust_level(&event.payload)?;
-            let skip_reason = require_str(&event.payload, "skip_reason")?;
-            let decided_by = require_str(&event.payload, "decided_by")?;
-            let reference = state.brainstorm_ref.as_mut().ok_or_else(|| {
-                "brainstorm_skipped: no brainstorm recorded for this task".to_string()
-            })?;
-            if reference.id != brainstorm_id {
-                return Err(format!(
-                    "brainstorm_skipped: brainstorm id '{}' does not match recorded '{}'",
-                    brainstorm_id, reference.id
-                ));
-            }
-            reference.critic = None;
-            reference.critic_disposition = CriticDisposition::Skipped;
-            reference.critic_independence = CRITIC_INDEPENDENCE_UNATTESTED.to_string();
-            reference.skip_reason = Some(skip_reason);
-            reference.skip_decided_by = Some(decided_by);
-        }
-        // ── Uncertainty Ledger V1: record-and-disclose unknowns ──
-        "uncertainty_recorded" => {
-            let id = require_str(&event.payload, "uncertainty_id")?;
-            let statement = require_str(&event.payload, "statement")?;
-            check_trust_level(&event.payload)?;
-            let source = optional_str(&event.payload, "source");
-            if state.uncertainties.iter().any(|u| u.id == id) {
-                return Err(format!(
-                    "uncertainty_recorded: uncertainty '{id}' already recorded"
-                ));
-            }
-            state.uncertainties.push(Uncertainty {
-                id,
-                statement,
-                source,
-                status: UncertaintyStatus::Open,
-                evidence_ref: None,
-                evidence_id: None,
-                oracle_kind: None,
-                reason: None,
-            });
-        }
-        // ── Oracle V1: record a first-class, oracle-typed evidence object ──
-        "evidence_recorded" => {
-            check_trust_level(&event.payload)?;
-            let id = require_str(&event.payload, "evidence_id")?;
-            let oracle_kind = decode_oracle_kind(&event.payload)?;
-            let artifact_ref =
-                decode_artifact(&event.payload, "artifact_path", "artifact_hash", true)?
-                    .ok_or_else(|| {
-                        "evidence_recorded: artifact_path and artifact_hash are required"
-                            .to_string()
-                    })?;
-            let source_ref = optional_str(&event.payload, "source_ref");
-            if state.evidences.iter().any(|e| e.id == id) {
-                return Err(format!(
-                    "evidence_recorded: evidence '{id}' already recorded"
-                ));
-            }
-            state.evidences.push(Evidence {
-                id,
-                oracle_kind,
-                source_ref,
-                artifact_ref,
-                // recorded_by is the envelope actor — an unattested principal, never
-                // a separate forgeable payload field that could contradict the actor.
-                recorded_by: event.actor.clone(),
-            });
-        }
+        "brainstorm_artifact_recorded" => cognitive::brainstorm_artifact_recorded(state, event)?,
+
+        "critic_artifact_attached" => cognitive::critic_artifact_attached(state, event)?,
+
+        "brainstorm_skipped" => cognitive::brainstorm_skipped(state, event)?,
+
+        "uncertainty_recorded" => cognitive::uncertainty_recorded(state, event)?,
+
+        "evidence_recorded" => cognitive::evidence_recorded(state, event)?,
+
         "uncertainty_disposition_recorded" => {
-            let id = require_str(&event.payload, "uncertainty_id")?;
-            check_trust_level(&event.payload)?;
-            let disposition = require_str(&event.payload, "disposition")?;
-            // Two evidence shapes: the legacy inline (path+hash) and the Oracle-V1
-            // reference (evidence_ref → a recorded evidence id). They are mutually
-            // exclusive on a resolve and resolved against state BEFORE the uncertainty
-            // is borrowed mutably.
-            let inline_evidence =
-                decode_artifact(&event.payload, "evidence_path", "evidence_hash", false)?;
-            let evidence_id = optional_str(&event.payload, "evidence_ref");
-            let reason = optional_str(&event.payload, "reason");
-            let has_any_evidence = inline_evidence.is_some() || evidence_id.is_some();
-            // Resolve a referenced evidence to owned values up front (disjoint from the
-            // mutable uncertainty borrow). Mutual exclusion enforced here.
-            let resolved_via_ref = match &evidence_id {
-                Some(eid) => {
-                    if inline_evidence.is_some() {
-                        return Err(
-                            "uncertainty_disposition_recorded: a 'resolved' must carry \
-                             EITHER evidence_ref OR inline evidence_path/evidence_hash, never both"
-                                .to_string(),
-                        );
-                    }
-                    let ev = state
-                        .evidences
-                        .iter()
-                        .find(|e| &e.id == eid)
-                        .ok_or_else(|| {
-                            format!(
-                                "uncertainty_disposition_recorded: evidence_ref '{eid}' does not \
-                             reference a recorded evidence in this task"
-                            )
-                        })?;
-                    Some((eid.clone(), ev.artifact_ref.clone(), ev.oracle_kind))
-                }
-                None => None,
-            };
-            let uncertainty = state
-                .uncertainties
-                .iter_mut()
-                .find(|u| u.id == id)
-                .ok_or_else(|| {
-                    format!("uncertainty_disposition_recorded: unknown uncertainty '{id}'")
-                })?;
-            // Terminal-is-terminal: a disposed uncertainty cannot be disposed
-            // again, so an assumption can never be silently upgraded to resolved.
-            if uncertainty.status != UncertaintyStatus::Open {
-                return Err(format!(
-                    "uncertainty_disposition_recorded: uncertainty '{id}' is already '{}'; \
-                     a disposition is terminal in V1",
-                    uncertainty.status.as_str()
-                ));
-            }
-            match disposition.as_str() {
-                "resolved" => {
-                    // resolved is the only disposition closed by external evidence —
-                    // either a recorded oracle-typed evidence (preferred) or legacy inline.
-                    //
-                    // Oracle-resolution semantics: a `model` oracle is advisory and must
-                    // not resolve an uncertainty (EPISTEMIC_CONTROL §5.1). That rule is
-                    // enforced at the command layer (record_uncertainty_disposition), the
-                    // sole path that appends canonical events — NOT here. The reducer stays
-                    // permissive on purpose: a committed pre-rule stream already resolved an
-                    // uncertainty via a model evidence_ref, and re-rejecting it on replay
-                    // would break the append-only ledger. The disclosure keeps such a
-                    // resolve honest by carrying oracle_kind=model (rendered ADVISORY) below.
-                    if let Some((eid, artifact_ref, oracle_kind)) = resolved_via_ref {
-                        uncertainty.status = UncertaintyStatus::Resolved;
-                        uncertainty.evidence_ref = Some(artifact_ref);
-                        uncertainty.evidence_id = Some(eid);
-                        uncertainty.oracle_kind = Some(oracle_kind);
-                        uncertainty.reason = reason;
-                    } else if let Some(artifact_ref) = inline_evidence {
-                        // Legacy inline evidence: oracle kind is unknown (predates Oracle V1).
-                        uncertainty.status = UncertaintyStatus::Resolved;
-                        uncertainty.evidence_ref = Some(artifact_ref);
-                        uncertainty.reason = reason;
-                    } else {
-                        return Err("uncertainty_disposition_recorded: 'resolved' requires \
-                             evidence — an evidence_ref to a recorded evidence, or legacy inline \
-                             evidence_path + evidence_hash (an unknown closed without external \
-                             evidence is not resolved)"
-                            .to_string());
-                    }
-                }
-                "accepted_as_assumption" => {
-                    // An assumption must remain visibly unresolved by external evidence.
-                    if has_any_evidence {
-                        return Err("uncertainty_disposition_recorded: \
-                             'accepted_as_assumption' must not carry evidence (it remains \
-                             unresolved by external evidence); use reason"
-                            .to_string());
-                    }
-                    uncertainty.status = UncertaintyStatus::AcceptedAsAssumption;
-                    uncertainty.reason = reason;
-                }
-                "invalidated" => {
-                    // "I was wrong / it no longer applies" has no oracle: a reason,
-                    // never evidence, so it cannot masquerade as a proof.
-                    if has_any_evidence {
-                        return Err("uncertainty_disposition_recorded: 'invalidated' must not \
-                             carry evidence; record why in reason"
-                            .to_string());
-                    }
-                    let reason = reason.ok_or_else(|| {
-                        "uncertainty_disposition_recorded: 'invalidated' requires a reason"
-                            .to_string()
-                    })?;
-                    uncertainty.status = UncertaintyStatus::Invalidated;
-                    uncertainty.reason = Some(reason);
-                }
-                other => {
-                    return Err(format!(
-                        "uncertainty_disposition_recorded: unknown disposition '{other}'"
-                    ));
-                }
-            }
+            cognitive::uncertainty_disposition_recorded(state, event)?
         }
-        // ── Research/Spike V1: record a tracked research artifact ──
-        "research_artifact_recorded" => {
-            check_trust_level(&event.payload)?;
-            // Kind binding: only a research task accrues a research footprint. The
-            // command layer pre-checks for a friendly message, but the invariant is
-            // re-asserted here so it also holds on replay of any historical ledger.
-            if state.task_kind != TaskKind::Research {
-                return Err(
-                    "research_artifact_recorded: only a research task may record research \
-                     artifacts (task kind is fixed at creation)"
-                        .to_string(),
-                );
-            }
-            // Terminal-is-terminal: a completed/cancelled task's disclosed output
-            // must not change after the fact.
-            if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
-                return Err(format!(
-                    "research_artifact_recorded: task is '{}'; a terminal task cannot record \
-                     further research artifacts",
-                    state.phase.as_str()
-                ));
-            }
-            let artifact_ref =
-                decode_artifact(&event.payload, "artifact_path", "artifact_hash", true)?
-                    .ok_or_else(|| {
-                        "research_artifact_recorded: artifact_path and artifact_hash are required"
-                            .to_string()
-                    })?;
-            // Scope binding: an artifact must live inside the task's declared
-            // write_allow (and outside write_deny) — the same boundary the write
-            // gate enforces. The path is already normalized repo-relative, so the
-            // test stays pure (no filesystem) and replay-safe.
-            if !artifact_within_write_scope(
-                &artifact_ref.path,
-                &state.write_allow,
-                &state.write_deny,
-            ) {
-                return Err(format!(
-                    "research_artifact_recorded: artifact '{}' is outside the task's write_allow \
-                     (or within write_deny)",
-                    artifact_ref.path
-                ));
-            }
-            let kind = decode_research_artifact_kind(&event.payload)?;
-            let source_run_id = optional_str(&event.payload, "source_run_id");
-            state.research_artifacts.push(ResearchArtifact {
-                artifact_ref,
-                kind,
-                source_run_id,
-            });
-        }
-        // ── Attestation V1: record a subagent dispatch on the parent task ──
-        "subagent_dispatched" => {
-            check_trust_level(&event.payload)?;
-            // Terminal-is-terminal: a completed/cancelled task's disclosed record
-            // must not change after the fact.
-            if matches!(state.phase, Phase::Completed | Phase::Cancelled) {
-                return Err(format!(
-                    "subagent_dispatched: task is '{}'; a terminal task cannot record \
-                     further dispatches",
-                    state.phase.as_str()
-                ));
-            }
-            // role/adapter are host-supplied labels (unattested) — required so a
-            // dispatch always names what was dispatched. The three artifacts are
-            // optional (record-and-disclose), each a (path, hash) pair with no
-            // half pairs.
-            let role = require_str(&event.payload, "role")?;
-            let adapter = require_str(&event.payload, "adapter")?;
-            let parent_run = optional_str(&event.payload, "parent_run");
-            let instruction = decode_artifact(
-                &event.payload,
-                "instruction_path",
-                "instruction_hash",
-                false,
-            )?;
-            let context = decode_artifact(&event.payload, "context_path", "context_hash", false)?;
-            let output = decode_artifact(&event.payload, "output_path", "output_hash", false)?;
-            state.dispatches.push(Dispatch {
-                role,
-                adapter,
-                parent_run,
-                instruction,
-                context,
-                output,
-                recorded_by: event.actor.clone(),
-            });
-        }
+
+        "research_artifact_recorded" => cognitive::research_artifact_recorded(state, event)?,
+
+        "subagent_dispatched" => cognitive::subagent_dispatched(state, event)?,
         _ => return Err(format!("Unknown event type: {}", event.event_type)),
     }
 
