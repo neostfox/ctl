@@ -1,7 +1,6 @@
 //! M0 audit matrix: comprehensive tests for schema validation, reducer invariants,
 //! replay determinism, hold mechanics, and baseline regression.
 
-#[cfg(test)]
 mod tests {
     use crate::domain::approval::ApprovalStatus;
     use crate::domain::event::Event;
