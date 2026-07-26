@@ -173,9 +173,13 @@ impl PathNormalizer {
         // Re-express relative to root so `is_protected` (which matches on
         // relative-path component prefixes) sees the same shape it sees for
         // lexical paths.
-        let canon_rel = canon
-            .strip_prefix(&root_canon)
-            .map_err(|_| anyhow!("Canonical path {} not under root {}", canon.display(), root_canon.display()))?;
+        let canon_rel = canon.strip_prefix(&root_canon).map_err(|_| {
+            anyhow!(
+                "Canonical path {} not under root {}",
+                canon.display(),
+                root_canon.display()
+            )
+        })?;
         Ok(canon_rel.to_path_buf())
     }
 
@@ -207,7 +211,6 @@ impl PathNormalizer {
             target.display()
         ))
     }
-
 
     /// Check whether a normalized path is under a protected root.
     /// Uses separator-boundary matching so ".git" does not match "gitignored".

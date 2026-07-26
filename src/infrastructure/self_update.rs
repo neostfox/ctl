@@ -187,10 +187,18 @@ fn self_replace(exe: &Path, new_bin: &Path) -> Result<()> {
     // Pre-swap sanity: refuse to swap in an empty/missing file. Catches a
     // partially-extracted archive before we touch the running binary.
     let new_size = std::fs::metadata(new_bin)
-        .with_context(|| format!("ctl update: stat-ing the new binary at {}", new_bin.display()))?
+        .with_context(|| {
+            format!(
+                "ctl update: stat-ing the new binary at {}",
+                new_bin.display()
+            )
+        })?
         .len();
     if new_size == 0 {
-        bail!("ctl update: new binary at {} is empty; refusing to swap", new_bin.display());
+        bail!(
+            "ctl update: new binary at {} is empty; refusing to swap",
+            new_bin.display()
+        );
     }
 
     #[cfg(unix)]

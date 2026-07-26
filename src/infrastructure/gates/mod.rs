@@ -300,7 +300,6 @@ fn kill_process_tree_orphans(pid: u32) {
         .status();
 }
 
-
 /// Poll-reap the managed direct child until it exits or `budget` elapses.
 /// Reaping the ROOT is the authoritative confirmation that the process ctl
 /// manages is gone — unlike a process-group probe, it cannot be fooled by a
