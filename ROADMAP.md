@@ -897,6 +897,117 @@ run 路径），M6 `start_run` 仅 `generate_uuid()` 盖一个不透明 `lease_i
 `.omp/spec/guides/`（fresh-clone 安全；skills 引用 `../../spec/guides`）。下游 `ctl init`
 不再引用到不存在的契约文件。
 
+## 待办清单（post-V1 backlog）
+
+来源:`SECURITY_AUDIT_2026-07.md`(2026-07 系统审计)+ 后续讨论。条目按类别分组,优先级 ★★★/★★/★ 标注,工作量 S/M/L。
+
+### 代码精简与重构
+
+当前 ctl 共 36,148 LOC,两个最大文件已涨到非可持续规模。0.0.13 release notes 已规划"per-domain split of the production bodies",V1 认识层进来后非但没拆反而又涨了 ~400 行。现在该动手。
+
+- **★★★ P1/S — 拆 `src/cli/mod.rs`(8265 LOC)成命令组模块**。机械重构,只调 `pub(super)` 可见性。
+  目标布局:`cli/{task,run,handoff,spec,brainstorm,research,board,gate,hook,apply,init}.rs`
+  + `cli/governance.rs`(GovState + resolve_active_governance + compute_gov_state)
+  + `cli/write_gate.rs`(classify_write_target + is_spec_path + path_in_scope)
+  + `cli/render.rs`(format_brainstorm_provenance / format_uncertainty_ledger / format_research_output / format_decisions / format_decision_line — 已是纯函数,零风险)
+  + `cli/mod.rs` 仅留顶层 `Commands` enum + dispatch(~500 LOC)。
+- **★★ P2/M — 拆 `src/application/mod.rs`(5948 LOC)成 service 模块**。
+  目标布局:`application/{task,run,workspace,brainstorm,uncertainty,research,handoff,drift,event_build,view}_service.rs`
+  + `application/mod.rs` 仅留 `ControlApp` struct + open/init + 共享 helper(~800 LOC)。
+- **★★ P3/M — 拆 `src/domain/task.rs`(2024 LOC)的 reducer arms**。
+  目标布局:`domain/task.rs` 留 TaskState + structs + apply dispatch(~600 LOC)
+  + `domain/task_reducer/{lifecycle,cognitive,run}.rs`。
+- **★ P4/S — `src/domain/audit_matrix.rs`(2536 LOC)按 0.0.13 pattern 拆**:
+  基线声明(~300 LOC,留 production) + 测试(进 `audit_matrix_tests.rs`)。
+- **★ P5/S — 顺手清理**:`has_opaque_wrapper` 未使用 import;
+  `cmd_hook_check_write` 整个废弃(已被 `cmd_hook_gate` 取代,且有文档化缺陷,删比修省事)。
+
+### 记忆系统加固
+
+ctl 的"记忆"不是一个系统,是 6 个独立载体 + 1 个全局目录,语义/完整性/生命周期完全不同。详见 `SECURITY_AUDIT_2026-07.md` 配套讨论。载体清单:
+
+| 载体 | 位置 | 完整性 | 写入者 |
+|---|---|---|---|
+| canonical 事件流 | `.ctl/tasks/<id>/events.jsonl` | sha256 + schema + 单写者锁 | ctl 自己 |
+| curated spec | `.ctl/spec/**/*.md` | **无** | AI agent(经 ctl-spec skill) |
+| atomic facts | `.ctl/facts.jsonl` | 结构化,无 hash | `ctl spec fact add` |
+| 全局偏好 | `~/.ctl/memory/<slug>.md` + `MEMORY.md` | **无**,纯 prose 规则 | AI agent |
+| handoff 快照 | `.ctl/handoffs/<id>.json` | schema 校验 + task_id 绑定 | `ctl handoff capture` |
+| 决策日志 | `.ctl/decisions.jsonl` | `canonical:false` + ts | host hook |
+
+ctl 自己只在 `src/cli/mod.rs:7980` 读 `~/.ctl/memory/` 的 mtime 做 wrap-up 提醒——**完全不写入、不校验、不知道内容**。
+
+- **★★★ #2/S — `ctl spec doctor`(只读)扫 `.ctl/spec/**/*.md` 里引用的代码路径(`` `src/...` ``、`` `cargo ...` ``)是否还存在,报 stale**。投入产出比最高。
+- **★★ #1/S — `ctl memory verify`(只读)扫 `~/.ctl/memory/*.md` 检测项目路径污染(`/src/`、`cargo`、文件扩展名等),warn 不 block**。防止一个 repo 的内容污染所有项目会话。
+- **★★ #4/M — `ctl knowledge`(或 `ctl memory show --all`)只读聚合查询**:canonical provenance + `.ctl/spec/` 目录树 + facts 摘要 + 最近 N 个 handoffs + 最近 decisions。统一入口。
+- **★ #3/M — 注入加预算与相关性排序**:`ctl-context.py` 当前无脑注入 MEMORY.md 前 30 行。改成调 `ctl memory digest --task <id> --budget <tokens>`,ctl 自己读 task objective/score memory 条目相关性,返回预算内摘要。涉及改 3 个平台 host hook。
+- **★ #5/S — `ctl spec fact retire --id F-XXX`**:软删除(打 `retired_epoch` 标记,保留 append-only 性质);`list` 默认隐藏,加 `--all` 才看。
+- **★ #6/S — `ctl memory list --stale` / `ctl memory retire <slug>`**:全局记忆生命周期。
+- **★ #7/S — facts → spec 双向回链**:`promote` 时在 spec 末尾加 `<!-- fact: F-XXX -->` 注释,或维护 `.ctl/spec/.fact-index.json`。事后能查"哪些 spec 段落基于哪个 fact"。
+
+### 安全审计残留风险
+
+完整明细见 [`SECURITY_AUDIT_2026-07.md` 残留风险与跟进](./SECURITY_AUDIT_2026-07.md#残留风险与跟进已识别但未改需要团队决策)。每条都已识别 file:line + 触发输入 + 修复方向,可直接拆 issue。下面是分类索引:
+
+#### A. 写边界加固(已修 A1;剩 A2-A4)
+
+- **★ A2/L — `apply_changes` 非事务化**。多文件 changeset 中途崩溃留下半应用状态,workspace_applied 事件也未写。真修需暂存目录 + 原子 rename + marker 文件 + 启动时回滚/前滚。位置:`src/infrastructure/workspace/mod.rs:203-228`。
+- **★ A3/S — scope 区分大小写与 FS/`is_protected` 不一致**。`path_in_scope` 用字节比较,Windows/macOS FS 是大小写不敏感。`write_allow=["Src"]` 在 Windows 上不匹配 `src/x.rs`。修需 `cfg(target_os)` 下做大小写不敏感组件比较。位置:`src/cli/mod.rs:7095-7103`。
+- **★ A4/S — `create_worktree` 不验证祖先链非 symlink**。`.ctl/tasks/<id>` 若被预置为 symlink,worktree 会落在 project_root 外。低概率,防线纵深。位置:`src/infrastructure/workspace/mod.rs:46-66`。
+
+#### B. self-update 设计权衡(共 5 项)
+
+- **★ B5/L — Windows kill-窗口残留风险**。完全闭合需 wrapper 脚本架构或 winapi 绑定加 `MOVEFILE_DELAY_UNTIL_REBOOT` fallback。
+- **★ B6/S — 静默降级**。`ctl self-update --version <older>` 不警告(只对 latest 跑 `is_newer` 守卫)。修:`--version` 时仍比对 current,降级要 `--allow-downgrade`。位置:`src/infrastructure/self_update.rs:239-247`。
+- **★ B7/S — staging 目录名可预测(PID)+ 默认 umask**。多用户主机上本地攻击者可预创建 `.ctl-update-<pid>` 赢得 TOCTOU。修用 `tempfile::TempDir`(随机名 0700)。位置:`src/infrastructure/self_update.rs:268-270`。
+- **★ B8/S — TOCTOU 在 tag 解析与 latest download 之间**。修从解析出的 tag URL 直接下载。位置:`src/infrastructure/self_update.rs:113-130`。
+- **★ B9/S — `extract` 走 PATH 上的 `tar`**。修 pin 绝对路径或进程内解压。位置:`src/infrastructure/self_update.rs:158-170`。
+
+#### C. Reducer 防御深度(应用层已挡,reducer 是最后防线,共 4 项)
+
+- **★★ C10/S — `run_started` arm 无 phase guard**。不像兄弟 `workspace_created` 要求 `Phase::InProgress`,`run_started` 只查 `active_run.is_some()`。位置:`src/domain/task.rs:1266-1296`。
+- **★★ C11/S — `hold_entered`/`boundary_violation_recorded` 无 phase guard**。终态任务上追加这类事件会翻 `is_held`,而 `task_archived` 不在豁免列表 → 终态任务可被永久不可归档。位置:`src/domain/task.rs:1081-1089`。
+- **★ C12/S — `command_id` 唯一性不在 append 强制**。重复 command_id 事件被 reducer 幂等 no-op 但仍写进账本。修 `validate_event` 在 `state.processed_commands` 命中时 reject。位置:`src/application/mod.rs:3296-3323`。
+- **★ C13/M — `cmd_hook_check_write` 读 `task.json` 投影做决策**。违反"投影永不做决策输入"。要么改走 replay,要么直接废弃(见 P5)。
+
+#### D. schema validator 完整性(长期换库,共 4 项)
+
+- **★★ D14/L — 手写 validator 不是完整 Draft 2020-12**。静默忽略 `$ref`/`$defs`/`pattern`/`oneOf`/`anyOf`/`not`/`dependentSchemas`/`prefixItems`/`maximum`/`maxItems`/`maxLength`/`exclusiveMinimum`/`multipleOf`/`else`/`contains`/`minProperties`/`maxProperties`/无 sibling properties 的 `unevaluatedProperties`。当前 6 个 schema 只用到已实现子集(已扫,健全),但任何引入未支持关键词的 schema 编辑会静默绕过。位置:`src/infrastructure/schema_validator.rs:43-290`。长期换 `jsonschema` crate(需评估 DEP-001..004)。
+- **★ D15/S — `date-time` 格式校验拒绝所有 fractional-second 时间戳**。`&rest[digits_end + 1..]` 多跳一字节。位置:`src/infrastructure/schema_validator.rs` 的 `is_valid_iso8601_datetime`。改成 `&rest[digits_end..]` + 加回归。
+- **★ D16/S — UUID 格式只查结构,不查 v4 version/variant 位**。位置:`src/infrastructure/schema_validator.rs:80-92`。
+- **★ D17/S — `$id` lookup 用子串匹配**。`id.starts_with(schema_id) || id.contains(schema_id)` 的第三分支无锚定。位置:`src/infrastructure/schema_validator.rs:30-34`。
+
+#### E. adapter 契约(需规格决策,共 4 项)
+
+- **★ E18/S — `validate_output` 接受非字符串 `touched_files` 元素**。下游用 `as_str().unwrap_or("")` 静默丢掉,记录空 changeset 的 run_completed。位置:`src/adapters/omp/mod.rs:71-77`、`src/adapters/opencode/mod.rs:71-78`。
+- **★ E19/S — `validate_output` 不读 exit_code**。agent 报告 `exit_code:1` 仍被 `run_ingest` 记录为 run_completed。位置:`src/application/mod.rs:3882-3896`。
+- **★★ E20/S — `run_start` 在校验 adapter 名之前就提交 worktree + lease_created**。未知 adapter 名留下孤儿 worktree 和 dangling lease 事件,无回滚。位置:`src/application/mod.rs:3722-3756`。
+- **★ E21/S — `manual` 文档化为 adapter 但不在 `SUPPORTED_ADAPTERS`**。两套 adapter 概念静默分歧。位置:`src/cli/mod.rs:1199-1200`、`src/adapters/manual/mod.rs`、`src/adapters/mod.rs:14`。
+
+#### F. gate runner 加固(性能/兼容 trade-off,共 5 项)
+
+- **★ F22/S — drain 缓冲无界**。`read_to_end` 无上限,`OUTPUT_CAP`(64KB)只在读完后才截。话痨 gate 可在 60s 窗口内写到 OOM。修在 read 循环内到 OUTPUT_CAP 即 break。位置:`src/infrastructure/gates/mod.rs:198-204, 387-393`。
+- **★★ F23/M — PATH/CARGO_HOME/NODE_PATH 不剥离**。任务能影响 ctl 父 env 时可注入木马 `cargo`/`npx` 总是退出 0,所有 gate 假绿。修 pin 到绝对已知好路径,或限制 PATH 到系统/工具链目录。位置:`src/infrastructure/gates/mod.rs:358-381`。
+- **★★ F24/S — Windows `taskkill` 继承全部 env 且 PATH-resolved**。把 F23 放大成每次 timeout 都执行任意代码。位置:`src/infrastructure/gates/mod.rs:294-298`。修用绝对系统路径 + 同 denylist。
+- **★ F25/M — gate 总在 project_root 跑,忽略任务隔离 worktree**。pre-merge gate 查的是 main 分支代码,不是任务在 worktree 里的修改。位置:`src/application/mod.rs:1182`、`4917-4927`、`4237`。
+- **★ F26/M — npx gate 在文档说"fail-closed 拒绝 registry 拉取"下仍可联网**。`filter_allowed_env` 只剥代理/token,不挡直接 egress。位置:`src/infrastructure/gates/mod.rs:67-95, 358-381`。
+
+#### G. 安装脚本一致性(小修)
+
+- **★ G27/S — install.ps1 PATH 去重逻辑只看精确字符串**。同路径不同大小写/尾斜杠会重复。位置:`scripts/install.ps1:80-90`。
+
+### 优先级建议
+
+若要按"实现成本 vs 用户感知收益"排序,前 5 个建议立刻动手:
+
+1. **P1/S** — Rust 文件拆分(`cli/mod.rs` → 命令组)。代码已涨到非可持续,越拖越大。
+2. **#2/S** — `ctl spec doctor` 只读命令。记忆系统里投入产出比最高的小修。
+3. **P2/M** — `application/mod.rs` 拆分。配合 P1 一起做。
+4. **#1/S** — `ctl memory verify` 只读命令。防累积污染。
+5. **C10+C11/S** — reducer 两个 phase guard 防御补强。应用层已挡,reducer 是最后防线,小修大安心。
+
+互不依赖,各自独立可交付。
+
 ## Dogfood Workflow
 
 最早验证路径：

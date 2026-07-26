@@ -1,3 +1,125 @@
+# Release Notes — ctl v0.0.15
+
+Follows **v0.0.14**. This is a security-and-docs point release from the
+2026-07 control-plane audit (`SECURITY_AUDIT_2026-07.md`). No behavior change
+for governed task/run/gate flows except where noted; the audit closed 4
+critical and 5 high logic holes and refreshed the deployment docs. 570 tests
+green (3 new regressions).
+
+## Included in 0.0.15 — Security audit fixes + doc refresh
+
+### Write boundary (critical)
+
+- **Spec-path traversal bypass closed.** `cmd_hook_gate`'s write/edit branch
+  ran `is_spec_path` BEFORE `classify_write_target`, and `is_spec_path` used
+  `Path::starts_with` which is component-wise but does NOT collapse
+  `ParentDir`. A target like `.ctl/spec/../tasks/events.jsonl` matched the
+  spec prefix lexically, returned `allowed:true`, and never reached the
+  protected-path hard deny — defeating the only hard deny in observe mode and
+  letting a Write overwrite the canonical event ledger. `is_spec_path`,
+  `path_in_scope`, and `cmd_hook_check_write` now route through
+  `classify_write_target` first. Regression tests: `spec_path_with_traversal_is_not_spec`,
+  `path_in_scope_rejects_traversal_target`.
+- **In-scope symlink redirect closed (audit follow-up A1).** `classify_write_target`
+  was purely lexical — it never called `fs::canonicalize` / `symlink_metadata`
+  on the target, so a symlink created inside an in-scope directory could
+  redirect a write at a protected path (e.g. `write_allow=["src"]`, agent
+  creates `src/ln -> .git/config`, then writes `src/ln` — the lexical form
+  `src/ln` is not protected, the OS write lands on `.git/config`). The gate
+  now calls a new `PathNormalizer::canonical_for_gate` after the lexical
+  check, which runs the same ancestry-symlink walk as `normalize` but with a
+  longer canonicalize fallback (walks up to the longest existing ancestor)
+  so legitimate new-directory writes — whose parent doesn't exist yet when
+  the gate runs — are not falsely rejected. Failure is fail-closed
+  (Suspicious). Regression tests: `write_target_in_repo_for_new_file_in_nonexistent_dir`,
+  `write_target_symlink_redirect_in_scope_is_suspicious` (Unix-only — Windows
+  symlink creation requires developer mode).
+- **Unknown-tool catch-all records + multiedit alias.** omp passed `multiedit`
+  raw to ctl (no host-side mapping like opencode/Claude), landing in the
+  `_ => allowed:true, default allow` arm with zero boundary checks. Added
+  `multiedit` to the `write|edit` match arm; the unknown-tool arm now stamps
+  `record:true` + a warning so the gap is visible in `.ctl/decisions.jsonl`.
+
+### Canonical-truth integrity (critical)
+
+- **Schema validation no longer fails open when `schemas/` is missing.** The
+  validator loaded schemas relative to CWD, so the INSTALLED binary — which
+  users run from their project root (which has `.ctl/` but no `schemas/`) —
+  silently skipped schema validation on every appended event. Schemas are now
+  compiled into the binary via `include_str!` (`EMBEDDED_SCHEMA_FILES`) as a
+  floor; disk schemas still take precedence for dev iteration. Closes the
+  production hole where extra fields / wrong types / bad enum values / UUID
+  format checks were all bypassed.
+- **`workspace_apply` now enforces the protected-path hard deny.** It
+  previously consulted `detect_high_risk`, whose prefix list
+  (`.omp/`, `.ctl/spec/`, `schemas/`, `Cargo.{toml,lock}`) is a strict subset
+  of `PathNormalizer::is_protected` — so a changeset touching the canonical
+  ledger (`.ctl/tasks/<id>/events.jsonl`), `.git/config`, or anything under
+  `.control/` was applied silently with no approval. `workspace_apply` now
+  rejects any `is_protected` path and points the user at `ctl apply` for a
+  reviewed per-path exception.
+
+### Self-update integrity (critical)
+
+- **Windows self-update Drop-guard rollback.** `self_replace` did a two-step
+  rename (running → `.old`, then new → running). A process kill in the
+  microsecond window between the renames left the install path empty. Added a
+  `Rollback` Drop-guard that restores the backup on panic; added a pre-swap
+  non-empty check; documented the residual kill-window (Windows has no atomic
+  replace for a running .exe without `MOVEFILE_DELAY_UNTIL_REBOOT` + reboot,
+  which would need new deps — see `SECURITY_AUDIT_2026-07.md` residual risk A5).
+
+### Install scripts (critical)
+
+- **install.ps1 checksum mismatch is now fatal.** The mismatch `throw` lived
+  inside the fetch try/catch and was silently downgraded to a `Write-Warning`;
+  installation then proceeded anyway. Fetch and verify are now separate: fetch
+  failure and verify mismatch both `throw` outside any catch, matching
+  `ctl self-update`'s "refusing to install unverified binary" policy.
+- **install.sh checksum fetch + missing-tool are now fatal.** `fetch ... || true`
+  silently swallowed fetch errors and the script skipped verification with no
+  message; "no sha256 tool" also fell through to install. Both are now
+  hard-denied.
+
+### Gate runner (high)
+
+- **Drain-thread join can no longer hang the supervisor on the success path.**
+  `read_to_end` only returns EOF when all pipe write-ends close; a grandchild
+  that inherited stdout/stderr kept the join blocked forever. The success path
+  had no kill at all. After reaping the root, the supervisor now does a
+  defensive process-tree sweep (`kill(-pgid, SIGKILL)` Unix / `taskkill /T /F`
+  Windows) before joining — a no-op when no descendants survive. Honors
+  AGENTS.md's "process tree terminated without hanging the supervisor" on the
+  success path too.
+
+### Docs (README.md, 8 fixes)
+
+- **Prerequisites rewritten.** "No runtime needed" was false for `--claude`
+  (python hooks) and `--omp` (Node). Now declares per-integration requirements
+  and notes ARM64 Windows uses x64 emulation.
+- **New "verify install" step** (`ctl --version` / `ctl doctor`) with
+  command-not-found remediation.
+- **New "故障排除 / troubleshooting" section** (8-row symptom → command → fix
+  table) before FAQ.
+- **Windows new-shell + Linux `~/.local/bin` PATH notes** added at the install
+  one-liners.
+- **Stale `v0.0.11` examples** in the collapsible block replaced with `vX.Y.Z`
+  placeholders that point at Releases (won't decay with future bumps).
+- **Uninstall + corporate-proxy guidance** added.
+- **Command reference fixed.** `--kanban` (never existed; clap rejects it)
+  removed; `--include-archived` and `--platform <name>` (both real) documented.
+- **Bare `ctl update` flagged as legacy binary self-update** (template sync is
+  `ctl update --merge`).
+
+### Residual risks (documented in `SECURITY_AUDIT_2026-07.md`, NOT fixed in 0.0.15)
+
+Items needing architecture decisions or new deps: write-gate symlink
+hardening, `apply_changes` transactionality, scope case-sensitivity on
+case-insensitive FSs, self-update downgrade guard + staging dir permissions,
+hand-rolled schema validator vs full Draft 2020-12, adapter `validate_output`
+exit_code/non-string handling, gate `PATH`/`CARGO_HOME` trojan, npx network
+egress, gate working-dir vs task worktree.
+
 # Release Notes — ctl v0.0.14
 
 Follows **v0.0.10**. `ctl --version` reports `CARGO_PKG_VERSION`; the release

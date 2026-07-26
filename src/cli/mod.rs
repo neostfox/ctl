@@ -6480,6 +6480,26 @@ fn cmd_hook_check_write(target_path: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Reject traversal/UNC/out-of-repo before the scope test, matching the
+    // gate proper (`cmd_hook_gate` treats these as Suspicious — hard deny).
+    // Without this, `src/../etc/passwd` would match the `src` scope via
+    // lexical `Path::starts_with` (component-wise but no ParentDir collapse)
+    // and be reported as in_scope.
+    if !matches!(
+        classify_write_target(&project_root, target_path),
+        WriteTarget::InRepo
+    ) {
+        let output = serde_json::json!({
+            "allowed": false,
+            "task_id": task_id,
+            "path": target_path,
+            "write_allow": write_allow,
+            "reason": "suspicious or out-of-repo path"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
     let resolved = if Path::new(target_path).is_relative() {
         project_root.join(target_path)
     } else {
@@ -7092,7 +7112,20 @@ fn shared_git_segment(segment: &str) -> Option<&'static str> {
 }
 
 /// Check if a path is within any of the allowed scopes.
+///
+/// Routes the target through `classify_write_target` first: `Path::starts_with`
+/// is component-wise but does NOT collapse `ParentDir`, so a target like
+/// `src/../etc/passwd` would otherwise match the `src` scope lexically and
+/// be reported as in-scope. `Protected` targets still match here because a
+/// granted `ctl apply` exception can authorize a protected path; only
+/// `Suspicious` (traversal/UNC/empty) and `OutOfRepo` short-circuit.
 fn path_in_scope(project_root: &Path, path: &str, scopes: &[String]) -> bool {
+    if matches!(
+        classify_write_target(project_root, path),
+        WriteTarget::Suspicious(_) | WriteTarget::OutOfRepo
+    ) {
+        return false;
+    }
     let resolved = if Path::new(path).is_relative() {
         project_root.join(path)
     } else {
@@ -7144,7 +7177,20 @@ fn first_overlapping_active_task(
 }
 
 /// Check if a path targets the spec directory (always writable for updates).
+///
+/// Routes the target through `classify_write_target` first: `Path::starts_with`
+/// is component-wise but does NOT collapse `ParentDir`, so a target like
+/// `.ctl/spec/../tasks/events.jsonl` would otherwise match the spec prefix
+/// lexically and bypass the protected-path hard deny (the only hard deny in
+/// observe mode). Only an `InRepo` target (no `..`, no UNC, no absolute
+/// escape, not protected) can be treated as a spec path.
 fn is_spec_path(project_root: &Path, path: &str) -> bool {
+    if !matches!(
+        classify_write_target(project_root, path),
+        WriteTarget::InRepo
+    ) {
+        return false;
+    }
     let resolved = if Path::new(path).is_relative() {
         project_root.join(path)
     } else {
@@ -7204,7 +7250,23 @@ fn classify_write_target(project_root: &Path, target: &str) -> WriteTarget {
     if norm.is_protected(&normalized) {
         return WriteTarget::Protected(normalized.to_string_lossy().into_owned());
     }
-    WriteTarget::InRepo
+    // Canonical-resolve through symlinks and re-check `is_protected` on the
+    // canonical target. The lexical check above misses a symlink INSIDE an
+    // in-scope dir that redirects a write at a protected path (e.g. an agent
+    // with `write_allow=["src"]` creates `src/ln -> .git/config`, then writes
+    // `src/ln` — the lexical path is `src/ln`, the canonical landing is
+    // `.git/config`). `canonical_for_gate` follows the leaf symlink (and
+    // rejects any symlink in a non-leaf component via `normalize`'s ancestry
+    // walk). Failure (escapes root, no existing ancestor canonicalizes) is
+    // treated as Suspicious — fail-closed.
+    let rel_str = normalized.to_string_lossy().into_owned();
+    match norm.canonical_for_gate(&rel_str) {
+        Ok(canon_rel) if norm.is_protected(&canon_rel) => {
+            return WriteTarget::Protected(canon_rel.to_string_lossy().into_owned());
+        }
+        Ok(_) => WriteTarget::InRepo,
+        Err(_) => WriteTarget::Suspicious("cannot canonicalize target (symlink/escape)"),
+    }
 }
 
 /// Short string for GovState variant (no Debug payload).
@@ -7273,9 +7335,8 @@ fn cmd_hook_gate(
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
-
     match tool {
-        "write" | "edit" => {
+        "write" | "edit" | "multiedit" => {
             let target = path.unwrap_or("");
 
             // Spec path always writable (except when held)
@@ -7734,11 +7795,20 @@ fn cmd_hook_gate(
             }
         }
         _ => {
-            // Unknown tool — default allow
+            // Unknown tool. Host hooks (Claude / opencode / omp) translate
+            // their known mutating tools onto `write|edit|bash|task`; an
+            // unknown name reaching here is either a host-side translation
+            // gap or a direct probe. We default-allow (so legitimate
+            // unmapped tools are not locked out) but stamp `record: true`
+            // so the call is visible in `.ctl/decisions.jsonl` for review,
+            // and surface a warning so operators can spot the gap.
             let output = serde_json::json!({
                 "allowed": true,
                 "state": gov_state_str(&state),
-                "reason": "unknown tool — default allow"
+                "record": true,
+                "reason": "unknown tool — default allow (boundary not enforceable for this tool name)",
+                "warning": "ctl does not know how to enforce the write boundary for this tool; if it mutates the filesystem, route it through the host hook's write/edit mapping or extend cmd_hook_gate's tool taxonomy",
+                "remedy": "if this tool writes files, map it onto `write` in the host hook (see .opencode/plugins/ctl-gate.ts extractGateInput for the pattern)"
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         }

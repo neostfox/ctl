@@ -2,8 +2,9 @@ use super::{
     classify_bash, classify_write_target, command_has_opaque_wrapper, decision_entry,
     detect_shared_git_op, ellipsize, extract_bash_write_targets, format_brainstorm_provenance,
     format_decision_line, format_decisions, format_research_output, format_uncertainty_ledger,
-    has_opaque_wrapper, is_cargo_target_build, iso8601_utc_to_epoch, omp_agent_env_file,
-    parse_project_default_gates, resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
+    has_opaque_wrapper, is_cargo_target_build, is_spec_path, iso8601_utc_to_epoch,
+    omp_agent_env_file, parse_project_default_gates, path_in_scope,
+    resolve_active_governance, resolve_ctl_for_hook, upsert_env_line,
     wrapup_pending, ActiveTask, CtlProbe, CtlReach, GovState, WriteTarget,
 };
 use std::path::{Path, PathBuf};
@@ -37,13 +38,29 @@ fn wrapup_pending_policy() {
     // A reminder for an older finish does not suppress a newer one.
     assert!(wrapup_pending(200, Some(150), Some(100)));
 }
-
 // ── classify_write_target (gate observe mode) ──
-// Purely lexical, so no files are created; the root just needs to be an
-// absolute path that exists as a string on every platform.
+// Each test gets its OWN existing temp directory as the project root (not a
+// shared one): the gate's canonical-resolve step hits the filesystem, and
+// parallel test execution + a shared dir + cleanup would race. Mirrors the
+// `unique_dir()` pattern in `boundary/normalizer.rs`.
 
 fn classify_root() -> PathBuf {
-    std::env::temp_dir().join("ctl_gate_classify_root")
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::SeqCst);
+    let root = std::env::temp_dir().join(format!(
+        "ctl_gate_classify_root_{}_{}",
+        std::process::id(),
+        n
+    ));
+    // Create the dir + a couple of subdirs the tests probe. Idempotent.
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::create_dir_all(root.join(".ctl"));
+    root
+}
+
+fn cleanup_classify_root(root: &Path) {
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -120,6 +137,134 @@ fn write_target_traversal_and_unc_are_suspicious() {
         classify_write_target(&root, ""),
         WriteTarget::Suspicious(_)
     ));
+}
+
+// ── Regression: spec-path / path_in_scope traversal bypass ──
+//
+// Path::starts_with is component-wise but does NOT collapse ParentDir, so a
+// target like `.ctl/spec/../tasks/events.jsonl` matched the `.ctl/spec`
+// prefix lexically and bypassed the protected-path hard deny. Both helpers
+// now route through classify_write_target first; the bypass must stay closed.
+
+#[test]
+fn spec_path_with_traversal_is_not_spec() {
+    let root = classify_root();
+    // Genuine spec paths still classify as spec.
+    assert!(is_spec_path(&root, ".ctl/spec/intent.md"));
+    assert!(is_spec_path(
+        &root,
+        &root.join(".ctl").join("spec").join("x.json").to_string_lossy()
+    ));
+    // Traversal that would land on the canonical ledger, Cargo.toml, .git,
+    // or .ctl/config.toml must NOT be treated as a spec path.
+    assert!(!is_spec_path(
+        &root,
+        ".ctl/spec/../tasks/events.jsonl"
+    ));
+    assert!(!is_spec_path(&root, ".ctl/spec/../../Cargo.toml"));
+    assert!(!is_spec_path(&root, ".ctl/spec/../config.toml"));
+    // Plain `..` and UNC also rejected.
+    assert!(!is_spec_path(&root, "../outside.txt"));
+    assert!(!is_spec_path(&root, "//server/share/x"));
+}
+
+#[test]
+fn path_in_scope_rejects_traversal_target() {
+    let root = classify_root();
+    let scopes = vec!["src".to_string()];
+    // Genuine in-scope path still matches.
+    assert!(path_in_scope(&root, "src/auth/login.rs", &scopes));
+    // Traversal target that would escape src must NOT match — previously
+    // `src/../etc/passwd` matched the `src` scope via lexical starts_with.
+    assert!(!path_in_scope(&root, "src/../etc/passwd", &scopes));
+    assert!(!path_in_scope(&root, "src/../../Cargo.toml", &scopes));
+    // UNC and absolute-outside-root also rejected.
+    assert!(!path_in_scope(&root, "//server/share/x", &scopes));
+    // A granted apply-exception on a protected path still matches: a
+    // reviewer-approved `ctl apply --path Cargo.toml` must not be voided
+    // by the new Suspicious/OutOfRepo guard.
+    let apply_scopes = vec!["Cargo.toml".to_string()];
+    assert!(path_in_scope(&root, "Cargo.toml", &apply_scopes));
+}
+
+// ── Regression: in-scope symlink redirect + new-directory write ──
+//
+// `classify_write_target` canonical-resolves the target through symlinks so
+// an in-scope symlink pointing at a protected path (e.g. `src/ln -> .git/config`)
+// is denied. It also keeps accepting new-file writes whose parent directory
+// does not exist yet (the host's Write tool creates it after the gate passes),
+// by walking up to the longest existing ancestor for canonicalization.
+
+#[test]
+fn write_target_in_repo_for_new_file_in_nonexistent_dir() {
+    // Multi-level new dir: `src` exists, `src/new/` does not. A new-file
+    // write `src/new/file.txt` must classify as InRepo (the longest existing
+    // ancestor `src` canonicalizes within root, the non-existent tail cannot
+    // be a symlink).
+    let root = classify_root();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    assert!(matches!(
+        classify_write_target(&root, "src/new/file.txt"),
+        WriteTarget::InRepo
+    ));
+    assert!(matches!(
+        classify_write_target(&root, "src/deep/nested/file.txt"),
+        WriteTarget::InRepo
+    ));
+    cleanup_classify_root(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn write_target_symlink_redirect_in_scope_is_suspicious() {
+    use std::os::unix::fs::symlink;
+    // Scout attack: agent with write_allow=["src"] creates `src/ln -> .git/config`
+    // (an in-scope write), then writes `src/ln`. The lexical form is `src/ln`
+    // (not protected); the gate must follow the symlink and refuse.
+    let root = classify_root();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git").join("config"), "").unwrap();
+    symlink("../.git/config", root.join("src").join("ln")).unwrap();
+    assert!(
+        matches!(
+            classify_write_target(&root, "src/ln"),
+            WriteTarget::Suspicious(_)
+        ),
+        "an in-scope symlink that redirects to a protected path must NOT classify as InRepo"
+    );
+    // A genuine in-scope write to an existing regular file still passes.
+    std::fs::write(root.join("src").join("real.rs"), "").unwrap();
+    assert!(matches!(
+        classify_write_target(&root, "src/real.rs"),
+        WriteTarget::InRepo
+    ));
+    cleanup_classify_root(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn write_target_symlink_redirect_to_protected_is_suspicious() {
+    use std::os::unix::fs::symlink;
+    // Variant: symlink points at a different protected path (the canonical ledger).
+    let root = classify_root();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join(".ctl").join("tasks").join("t1")).unwrap();
+    std::fs::write(
+        root.join(".ctl").join("tasks").join("t1").join("events.jsonl"),
+        "",
+    )
+    .unwrap();
+    symlink(
+        "../.ctl/tasks/t1/events.jsonl",
+        root.join("src").join("ledger"),
+    )
+    .unwrap();
+    assert!(matches!(
+        classify_write_target(&root, "src/ledger"),
+        WriteTarget::Suspicious(_)
+    ));
+    cleanup_classify_root(&root);
 }
 
 fn at(id: &str, paths: &[&str], held: bool) -> ActiveTask {

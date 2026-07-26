@@ -100,6 +100,115 @@ impl PathNormalizer {
         Ok(normalized)
     }
 
+    /// Canonical form of `path_str` for gate-time enforcement, expressed
+    /// relative to root. Equivalent to `normalize` for the structural checks
+    /// (UNC / absolute / `..` / ancestry symlink / root containment), but
+    /// more lenient on canonicalization: where `normalize` requires the
+    /// immediate parent directory to exist (its parent-canonicalize fallback
+    /// is one level), this walks up to the LONGEST EXISTING ANCESTOR. That
+    /// matters for the gate, which runs BEFORE the host's Write tool creates
+    /// intermediate directories — a `Write src/new/file.txt` arrives at the
+    /// gate with `src/new/` not yet on disk.
+    ///
+    /// Why the gate needs this: `classify_write_target` calls `is_protected`
+    /// on the lexical form, which by itself misses the case where a symlink
+    /// INSIDE an in-scope directory redirects a write at a protected target
+    /// (e.g. `write_allow=["src"]`, agent creates `src/ln -> .git/config`,
+    /// then writes `src/ln` — the lexical form is `src/ln`). `normalize`'s
+    /// ancestry walk already rejects this (an existing symlink in any path
+    /// component is refused); `canonical_for_gate` exposes that protection
+    /// without breaking new-directory writes.
+    pub fn canonical_for_gate(&self, path_str: &str) -> Result<PathBuf> {
+        // Structural + lexical walk — same as normalize.
+        if path_str.starts_with("\\\\") || path_str.starts_with("//") {
+            return Err(anyhow!("UNC paths are not allowed: {}", path_str));
+        }
+        let path = Path::new(path_str);
+        if path.is_absolute() {
+            return Err(anyhow!("Absolute paths are not allowed: {}", path_str));
+        }
+        let mut normalized = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::ParentDir => return Err(anyhow!(".. is not allowed")),
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(anyhow!("Absolute path components not allowed"))
+                }
+                Component::CurDir => continue,
+                Component::Normal(c) => normalized.push(c),
+            }
+        }
+        if normalized.as_os_str().is_empty() {
+            return Err(anyhow!("Empty path after normalization"));
+        }
+        // Ancestry symlink walk — same as normalize. Rejects any symlink in
+        // any existing component of the path. This catches the in-scope
+        // redirect attack at the leaf: writing `src/ln` where `ln -> .git/config`
+        // fails here, because `current.exists()` follows the link (true) and
+        // `symlink_metadata` reports the link itself.
+        let mut current = self.root.clone();
+        for comp in normalized.components() {
+            current.push(comp);
+            if current.exists() {
+                let meta = fs::symlink_metadata(&current)?;
+                if meta.file_type().is_symlink() {
+                    return Err(anyhow!(
+                        "Symlink/Junction detected in ancestry: {:?}",
+                        current
+                    ));
+                }
+            }
+        }
+        // Canonicalize with extended ancestor fallback. Where `normalize`
+        // fails when the immediate parent doesn't exist, walk up to the
+        // longest existing ancestor and rejoin. Non-existent components
+        // can't be symlinks (a symlink requires its parent dir to exist),
+        // so rejoining them to a canonical ancestor is safe.
+        let canon = self.canonicalize_longest_existing_ancestor(&current)?;
+        let root_canon = fs::canonicalize(&self.root)
+            .map_err(|_| anyhow!("Cannot canonicalize root: {}", self.root.display()))?;
+        if !canon.starts_with(&root_canon) {
+            return Err(anyhow!("Path escapes root directory: {}", path_str));
+        }
+        // Re-express relative to root so `is_protected` (which matches on
+        // relative-path component prefixes) sees the same shape it sees for
+        // lexical paths.
+        let canon_rel = canon
+            .strip_prefix(&root_canon)
+            .map_err(|_| anyhow!("Canonical path {} not under root {}", canon.display(), root_canon.display()))?;
+        Ok(canon_rel.to_path_buf())
+    }
+
+    /// Canonicalize `target` directly; on failure, walk up to the longest
+    /// existing ancestor at or below `self.root`, canonicalize it, and rejoin
+    /// the remaining (necessarily non-existent, therefore non-symlink)
+    /// components. Returns Err only when no ancestor — not even `self.root` —
+    /// can be canonicalized.
+    fn canonicalize_longest_existing_ancestor(&self, target: &Path) -> Result<PathBuf> {
+        if let Ok(c) = fs::canonicalize(target) {
+            return Ok(c);
+        }
+        let root_abs = self.root.clone();
+        for ancestor in target.ancestors().skip(1) {
+            // Never canonicalize above the project root — a symlink that
+            // points above root could sneak in via the rejoined tail.
+            if !ancestor.starts_with(&root_abs) && ancestor != root_abs {
+                break;
+            }
+            if let Ok(ancestor_canon) = fs::canonicalize(ancestor) {
+                let remaining = target
+                    .strip_prefix(ancestor)
+                    .map_err(|_| anyhow!("Internal error: ancestor not a prefix of target"))?;
+                return Ok(ancestor_canon.join(remaining));
+            }
+        }
+        Err(anyhow!(
+            "Cannot canonicalize target or any existing ancestor: {}",
+            target.display()
+        ))
+    }
+
+
     /// Check whether a normalized path is under a protected root.
     /// Uses separator-boundary matching so ".git" does not match "gitignored".
     /// Public because the hook gate (observe mode) must check protection

@@ -184,31 +184,81 @@ fn backup_path(exe: &Path) -> PathBuf {
 
 /// Replace the running binary at `exe` with the freshly extracted `new_bin`.
 fn self_replace(exe: &Path, new_bin: &Path) -> Result<()> {
+    // Pre-swap sanity: refuse to swap in an empty/missing file. Catches a
+    // partially-extracted archive before we touch the running binary.
+    let new_size = std::fs::metadata(new_bin)
+        .with_context(|| format!("ctl update: stat-ing the new binary at {}", new_bin.display()))?
+        .len();
+    if new_size == 0 {
+        bail!("ctl update: new binary at {} is empty; refusing to swap", new_bin.display());
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(new_bin, std::fs::Permissions::from_mode(0o755))
             .context("ctl update: chmod the new binary")?;
-        // On Unix renaming over a running executable is allowed: the live process
-        // keeps the old inode, new invocations get the new file.
+        // On Unix renaming over a running executable is allowed: the live
+        // process keeps the old inode, new invocations get the new file.
         std::fs::rename(new_bin, exe).context("ctl update: replacing the binary")?;
     }
     #[cfg(windows)]
     {
-        // Windows refuses to overwrite a running .exe, but it allows renaming it.
-        // Move the live binary aside, then put the new one in its place. The
-        // `.old` file stays locked until this process exits; the next run's
-        // cleanup_stale() removes it.
+        // Windows refuses to overwrite a running .exe but allows renaming it.
+        // The standard workaround is a two-step rename: move the live binary
+        // aside, then move the new one into its place.
+        //
+        // Residual risk: if the process is KILLED (Ctrl+C, OOM, BSOD, power
+        // loss) in the microsecond window between the two renames, the
+        // install path is left empty until the operator re-runs the
+        // installer. Windows has no atomic-replace for a running binary
+        // short of `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` (which would
+        // require a reboot) — see ADR 0002 for the trade-off. The Drop guard
+        // below covers the panic case; the Err case is rolled back inline.
         let backup = backup_path(exe);
         let _ = std::fs::remove_file(&backup);
         std::fs::rename(exe, &backup).context("ctl update: renaming the running binary aside")?;
+        // Rollback guard: if `new_bin → exe` fails for ANY reason (including
+        // panic mid-rename), restore `backup → exe` so the operator is never
+        // left without a binary due to an internal error. (Process kill
+        // during the window remains the residual documented risk above.)
+        let mut rollback = Rollback {
+            backup: backup.clone(),
+            exe: exe.to_path_buf(),
+            armed: true,
+        };
         if let Err(e) = std::fs::rename(new_bin, exe) {
-            // Roll back so the operator is not left without a binary.
-            let _ = std::fs::rename(&backup, exe);
+            let _ = std::fs::rename(&rollback.backup, exe);
+            rollback.armed = false;
             return Err(e).context("ctl update: installing the new binary");
         }
+        rollback.armed = false;
     }
     Ok(())
+}
+
+/// Drop-guard for the Windows self-update swap: if `self_replace` unwinds
+/// (panic) after moving the running binary aside but before moving the new
+/// binary into place, restore the backup so the install path is never empty.
+/// (Process kill / SIGKILL cannot be caught by Drop — see the comment in
+/// `self_replace` for that residual risk.)
+#[cfg(windows)]
+struct Rollback {
+    backup: PathBuf,
+    exe: PathBuf,
+    armed: bool,
+}
+
+#[cfg(windows)]
+impl Drop for Rollback {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort: if the new binary isn't at `exe`, restore the backup.
+            if !self.exe.exists() && self.backup.exists() {
+                let _ = std::fs::rename(&self.backup, &self.exe);
+            }
+        }
+    }
 }
 
 /// Entry point for `ctl update`.

@@ -57,19 +57,29 @@ try {
     Write-Host "ctl-install: downloading $url"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
 
-    # Checksum verification (best effort).
+    # Checksum: fetch the .sha256 sidecar (fatal if missing — refuse to
+    # install unverified, matching `ctl self-update`'s policy). A prior
+    # version wrapped both fetch and verify in one try/catch, which silently
+    # downgraded a real checksum mismatch into a Write-Warning and then
+    # installed the tampered binary anyway.
+    $shaFile = "$zip.sha256"
     try {
-        $shaFile = "$zip.sha256"
         Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaFile -UseBasicParsing
-        $expected = (((Get-Content $shaFile -Raw) -split '\s+')[0]).Trim().ToLower()
-        $actual   = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-        if ($expected -and $expected -ne $actual) {
-            throw "ctl-install: checksum mismatch (expected $expected, got $actual)"
-        }
-        Write-Host "ctl-install: checksum verified"
     } catch {
-        Write-Warning "ctl-install: checksum not verified: $($_.Exception.Message)"
+        throw "ctl-install: checksum file download failed ($($_.Exception.Message)); refusing to install unverified binary"
     }
+
+    # Verify the archive hash. A mismatch is FATAL — never fall through to
+    # Expand-Archive on a tampered download.
+    $expected = (((Get-Content $shaFile -Raw) -split '\s+')[0]).Trim().ToLower()
+    $actual   = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+    if (-not $expected) {
+        throw "ctl-install: checksum file is empty; refusing to install unverified binary"
+    }
+    if ($expected -ne $actual) {
+        throw "ctl-install: checksum mismatch (expected $expected, got $actual); refusing to install tampered binary"
+    }
+    Write-Host "ctl-install: checksum verified"
 
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     $src = Join-Path $tmp 'ctl.exe'

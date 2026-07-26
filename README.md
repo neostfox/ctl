@@ -38,10 +38,13 @@
 
 ## 前置要求
 
-- **运行二进制**：无需任何运行时，下载即用（见下方安装）。
+- **运行二进制**：`ctl` 本身是静态二进制，下载即用，无运行时依赖。
+- **Claude Code 集成**：需要 `python` 可执行（PreToolUse hook 是 Python 脚本；缺失则 gate 不会触发，`ctl init --claude` 会告警）。
+- **OMP 集成**：需要 Node.js（context hook 是 TypeScript）。
+- **opencode 集成**：需要 Bun（`ctl adapter doctor --verify` 会跑插件测试）。
 - **从源码构建**（可选）：Rust ≥ 1.74（stable）。
 
-支持平台：Linux（x64 / arm64）、macOS（Intel / Apple Silicon）、Windows（x64，原生，无需 WSL）。
+支持平台：Linux（x64 / arm64）、macOS（Intel / Apple Silicon）、Windows（x64，原生，无需 WSL；ARM64 Windows 走 x64 模拟，无原生构建）。
 
 ---
 
@@ -61,7 +64,20 @@ curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install
 irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
 ```
 
-安装脚本会自动识别系统/架构，从 [GitHub Releases](https://github.com/neostfox/ctl/releases) 下载对应二进制、校验 SHA256，并装入 PATH。
+安装脚本会自动识别系统/架构，从 [GitHub Releases](https://github.com/neostfox/ctl/releases) 下载对应二进制、**强制校验 SHA256（不匹配即拒绝安装）**，并装入 PATH。
+
+> **Windows 用户**：安装会修改**用户级** PATH（`%LOCALAPPDATA%\ctl\bin`）。**请新开一个 PowerShell/终端窗口**再运行 `ctl init`——当前窗口看不到新 PATH。
+
+> **Linux/macOS 用户**：若你没有 `/usr/local/bin` 写权限，脚本会装到 `~/.local/bin`。若该目录不在 PATH，把 `export PATH="$HOME/.local/bin:$PATH"` 写入 `~/.bashrc` / `~/.zshrc` 后 `source` 之。
+
+### 2. 验证安装
+
+```bash
+ctl --version     # 应输出 ctl 0.0.14
+ctl doctor       # 诊断本地账本/集成健康（无 .ctl/ 时会提示先 ctl init）
+```
+
+若提示 `ctl: command not found`：Windows 请**新开一个终端**让 PATH 生效；Linux/macOS 请确认 `~/.local/bin` 已在 PATH 中（见上方提示）。
 
 <details>
 <summary>可选项与其他安装方式</summary>
@@ -70,15 +86,17 @@ irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | 
 
 ```bash
 # bash
-curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version v0.0.11 --dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.sh | sh -s -- --version vX.Y.Z --dir ~/.local/bin
 # 或用环境变量
-CTL_VERSION=v0.0.11 CTL_INSTALL_DIR=~/.local/bin sh install.sh
+CTL_VERSION=vX.Y.Z CTL_INSTALL_DIR=~/.local/bin sh install.sh
 ```
 
 ```powershell
 # PowerShell
-$env:CTL_VERSION="v0.0.11"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
+$env:CTL_VERSION="vX.Y.Z"; irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | iex
 ```
+
+把 `vX.Y.Z` 换成 [Releases](https://github.com/neostfox/ctl/releases) 上的具体版本号（不要照抄，示例里用的版本号会随发布漂移）。
 
 **从源码构建：**
 
@@ -88,9 +106,13 @@ cargo build --release        # 产物：target/release/ctl
 
 **手动下载：** 直接到 [Releases](https://github.com/neostfox/ctl/releases) 取对应平台的 `ctl-<target>.tar.gz` / `.zip`。
 
+**公司网络/代理环境：** bash 设 `HTTPS_PROXY=http://proxy:port` 后再跑安装命令；PowerShell 用 `$env:HTTPS_PROXY='http://proxy:port'`，或下载脚本本地执行 `iex (Get-Content .\install.ps1 -Raw)`。安装与 `ctl self-update` 只访问 `raw.githubusercontent.com`、`github.com`、`objects.githubusercontent.com`（见 [ADR 0002](./docs/adr/0002-allow-narrow-network-egress-for-ctl-update.md)）。
+
+**卸载：** `ctl` 无独立卸载器，删除二进制即可——Windows 删 `%LOCALAPPDATA%\ctl\bin\ctl.exe`（`self-update` 会留 `ctl.exe.old`，可一并删）并从用户 PATH 移除该目录；Linux/macOS 删 `/usr/local/bin/ctl` 或 `~/.local/bin/ctl`。项目内的 ctl 状态在 `.ctl/`，平台注入在 `.claude/`、`.omp/`、`.opencode/`，按需删除。
+
 </details>
 
-### 2. 初始化
+### 3. 初始化
 
 在你的项目根目录，选择你要接入的 AI 编码平台（可多选）：
 
@@ -103,7 +125,9 @@ ctl init                             # 交互式选择
 `ctl init` 会创建 `.ctl/` 任务账本、写入默认配置、注入所选平台的治理 hook/skill/settings，
 并打印下一步指引。
 
-### 3. 跑一个受控任务
+### 4. 跑一个受控任务
+
+> 下面是完整生命周期的「底层命令」展示，便于理解机制；日常协作里这一整套通常由 AI agent 经内置 skill 驱动，你只在「确认边界」「确认归档」等节点介入（见 [如何使用](#如何使用)）。
 
 ```bash
 ctl task create --id 06-14-fix-login \
@@ -118,16 +142,19 @@ ctl task finish --id 06-14-fix-login
 ctl task archive --id 06-14-fix-login
 ```
 
-### 4. 查看任务看板
+### 5. 查看任务看板
 
 ```bash
 ctl board                            # 终端 Kanban（默认）
 ctl board --active                   # 只看未归档任务
 ctl board --table                    # 传统表格格式
 ctl board --json                     # 机器可读 JSON
+ctl board --include-archived         # 含已归档任务
 ```
 
-### 5. 更新与升级
+> 不带 `--merge` 的 `ctl update` 是**遗留的二进制自更新**（等同于 `ctl self-update` 的旧行为）；同步项目模板一律用 `ctl update --merge`。
+
+### 6. 更新与升级
 
 ```bash
 ctl update --merge                   # 同步项目内的 ctl 模板（安全合并，不改你的定制）
@@ -206,10 +233,10 @@ proposal → approval → scoped lease → implement → audit_hold
 ## 命令一览
 
 ```text
-ctl init [--claude] [--opencode] [--omp] [--all] [--yes]   多平台初始化
+ctl init [--claude] [--opencode] [--omp] [--platform <name>] [--all] [--yes]   多平台初始化
 ctl task create|ready|approve|start|submit|finish|archive|status   任务生命周期（approve = human-only ready, gh6）
 ctl task quick --write-allow <p>      create+ready+start 一步到位
-ctl board [--kanban|--table] [--active] [--json]   Kanban 看板 / 表格 / JSON
+ctl board [--table] [--active] [--include-archived] [--json]   Kanban 看板(默认) / 表格 / JSON
 ctl update --merge [--force|--skip]   同步项目模板（安全合并）
 ctl self-update [--check]             升级 ctl 二进制
 ctl handoff export --id <id>          导出只读任务快照
@@ -242,6 +269,27 @@ ctl research record|status
 | [AGENTS.md](./AGENTS.md) | 给 AI agent 的项目说明 |
 
 ---
+
+## 故障排除
+
+遇到问题先跑这两条只读命令,90% 的常见问题都能定位:
+
+```bash
+ctl doctor              # 诊断本地账本健康(投影漂移、孤儿 run、schema 校验失败等)
+ctl adapter doctor      # 诊断平台集成(hook/skill/插件是否就位);加 --verify 跑 opencode Bun 插件测试
+```
+
+| 症状 | 第一步 | 修复 |
+|---|---|---|
+| `ctl: command not found`(安装后) | `where ctl`(Win)/`which ctl`(unix) | Windows:**新开终端**让用户级 PATH 生效;Linux/macOS:确认 `~/.local/bin` 在 PATH(`export PATH="$HOME/.local/bin:$PATH"` 写入 `~/.bashrc`/`~/.zshrc`) |
+| Claude Code 的 gate 从不触发 | `python --version` | 缺 python——PreToolUse hook 是 Python 脚本。重跑 `ctl init --claude` 并读输出里的 python-availability 告警 |
+| OMP hook 不生效 | `node --version` | 缺 Node.js——OMP context hook 是 TypeScript |
+| opencode 集成状态未知 | `ctl adapter doctor --verify` | 看 `contract.*` / `platform.*` 各 check 的 PASS/FAIL/WARN/UNKNOWN;有 FAIL 才算失败 |
+| `No --gates given and no project default gate floor` | `ctl gate`(列模板) | 传 `--gates cargo_test`(或其他模板),或用 `/ctl-spec` 在 `.ctl/config.toml` 记录 `[project].default_gates` |
+| `gate not found: <name>` | `ctl gate` | gate 模板是固定注册表(`cargo_check/test/fmt_check/clippy`、`tsc_check/eslint_check/vitest_run`),拼写要对 |
+| schema 校验失败 | `ctl schema validate --file <path>` | 校验事件/投影的 JSON Schema;schemas 自 0.0.14 起已嵌入二进制,不再依赖磁盘上的 `schemas/` 目录 |
+| 事件账本不一致 | `ctl doctor` | 报告 drift / 孤儿 / 损坏并给手工恢复指引(控制层不自动改写状态) |
+| 写入被 hook 拒绝但路径看起来在 write_allow 内 | `ctl boundary explain --path <p>` | 多半是 `..`/绝对路径/UNC,或落在受保护路径(`.git`/`.ctl/tasks`/`Cargo.toml`/`schemas` 等);越界写入要走 `ctl apply` 申请受审例外 |
 
 ## FAQ
 

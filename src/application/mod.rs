@@ -3483,6 +3483,31 @@ impl ControlApp {
                         path
                     ));
                 }
+                // Protected-path hard deny: match the runtime write gate's
+                // single enforcement point. Previously this path only
+                // consulted `detect_high_risk`, whose prefix list
+                // (`.omp/`, `.ctl/spec/`, `schemas/`, `Cargo.{toml,lock}`) is
+                // a strict subset of `PathNormalizer::is_protected` — so a
+                // changeset touching the canonical ledger
+                // (`.ctl/tasks/<id>/events.jsonl`), `.git/config`, or
+                // anything under `.control/` was applied silently with no
+                // approval. Reject here; a reviewed exception for a protected
+                // path goes through `ctl apply` (audited per-path), not
+                // `ctl workspace apply`.
+                match normalizer.normalize(path) {
+                    Ok(np) if normalizer.is_protected(&np) => {
+                        return Err(anyhow!(
+                            "File '{}' is a protected path (canonical ledgers, \
+                             manifests, schemas, .git, .control are never writable \
+                             via workspace apply). Rule: PROTECTED-001. Use \
+                             `ctl apply --path {} --reason <why>` to request a \
+                             reviewed per-path exception.",
+                            path,
+                            path
+                        ));
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -5338,11 +5363,15 @@ fn hash_file(path: &std::path::Path) -> Result<String> {
 }
 
 fn new_validator_if_available() -> Option<SchemaValidator> {
-    if std::path::Path::new("schemas").exists() {
-        SchemaValidator::new("schemas/").ok()
-    } else {
-        None
-    }
+    // Always Some: SchemaValidator::new loads embedded schemas compiled into
+    // the binary as a floor, so it succeeds even when `schemas/` is absent
+    // from the working directory (the production case — installed ctl runs
+    // from the user's project root, which has no `schemas/` dir). Disk
+    // schemas, when present, take precedence for dev iteration. Returning
+    // None here would let validate_event silently skip schema checks.
+    // Kept as Option for API stability; if construction ever fails we surface
+    // the error at the call site rather than degrading to no validation.
+    SchemaValidator::new("schemas/").ok()
 }
 
 // ── M5: drift signal derivation (pure over already-loaded data) ──

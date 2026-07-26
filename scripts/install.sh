@@ -71,16 +71,18 @@ fetch() { # url out
 
 echo "ctl-install: downloading ${url}"
 fetch "$url" "${tmp}/${asset}" || err "download failed: ${url}"
-fetch "${url}.sha256" "${tmp}/${asset}.sha256" 2>/dev/null || true
-
-if [ -s "${tmp}/${asset}.sha256" ]; then
-  echo "ctl-install: verifying checksum"
-  ( cd "$tmp" && {
-      if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${asset}.sha256"
-      elif command -v shasum   >/dev/null 2>&1; then shasum -a 256 -c "${asset}.sha256"
-      else echo "ctl-install: no sha256 tool, skipping verify" >&2; fi
-    } ) || err "checksum verification failed"
+fetch "${url}.sha256" "${tmp}/${asset}.sha256" \
+  || err "checksum file download failed; refusing to install unverified binary"
+if [ ! -s "${tmp}/${asset}.sha256" ]; then
+  err "checksum file is empty; refusing to install unverified binary"
 fi
+
+echo "ctl-install: verifying checksum"
+( cd "$tmp" && {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${asset}.sha256"
+    elif command -v shasum   >/dev/null 2>&1; then shasum -a 256 -c "${asset}.sha256"
+    else err "no sha256 tool found (need sha256sum or shasum); refusing to install unverified binary"; fi
+  } ) || err "checksum verification failed"
 
 tar -xzf "${tmp}/${asset}" -C "$tmp" || err "extract failed"
 [ -f "${tmp}/${BIN}" ] || err "binary '${BIN}' not found in archive"

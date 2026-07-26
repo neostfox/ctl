@@ -7,9 +7,50 @@ pub struct SchemaValidator {
     schemas: Vec<Value>,
 }
 
+/// Schemas compiled into the binary at build time. These ship with every
+/// `ctl` release, so a validator is ALWAYS available — even when the
+/// installed binary runs from a directory with no `schemas/` on disk (the
+/// production case: users run ctl from their project root, which has a
+/// `.ctl/` but no `schemas/`). Without this floor, `validate_event` silently
+/// skipped schema checks whenever `schemas/` was missing, accepting arbitrary
+/// payload shapes (extra fields, wrong types, bad enum values) into the
+/// canonical append-only ledger. Disk schemas (when present, e.g. running
+/// from the source tree) take precedence for dev iteration — see `new`.
+const EMBEDDED_SCHEMA_FILES: &[(&str, &str)] = &[
+    (
+        "control.event-envelope.v1.schema.json",
+        include_str!("../../schemas/control.event-envelope.v1.schema.json"),
+    ),
+    (
+        "control.run-state.v1.schema.json",
+        include_str!("../../schemas/control.run-state.v1.schema.json"),
+    ),
+    (
+        "control.task-view.v1.schema.json",
+        include_str!("../../schemas/control.task-view.v1.schema.json"),
+    ),
+    (
+        "control.schedule-plan.v1.schema.json",
+        include_str!("../../schemas/control.schedule-plan.v1.schema.json"),
+    ),
+    (
+        "control.task-definition.v1.schema.json",
+        include_str!("../../schemas/control.task-definition.v1.schema.json"),
+    ),
+    (
+        "control.policy-decision.v1.schema.json",
+        include_str!("../../schemas/control.policy-decision.v1.schema.json"),
+    ),
+];
+
 impl SchemaValidator {
     pub fn new(schema_dir: &str) -> Result<Self> {
         let mut schemas = Vec::new();
+        // 1. Disk schemas (dev iteration): if `schemas/` is present on disk
+        //    (e.g. running from the ctl source tree), those copies are loaded
+        //    FIRST so they win the first-match `$id` lookup in
+        //    `validate_instance`. This lets a developer edit a schema and
+        //    re-run without recompiling.
         if Path::new(schema_dir).exists() {
             for entry in fs::read_dir(schema_dir)? {
                 let entry = entry?;
@@ -20,6 +61,15 @@ impl SchemaValidator {
                     schemas.push(schema);
                 }
             }
+        }
+        // 2. Embedded schemas (compile-time floor): always loaded so a
+        //    validator is always available. Duplicate `$id`s are harmless —
+        //    `validate_instance` returns the first match, which is the disk
+        //    copy when one exists.
+        for (name, content) in EMBEDDED_SCHEMA_FILES {
+            let schema: Value = serde_json::from_str(content)
+                .map_err(|e| anyhow!("parsing embedded schema '{name}': {e}"))?;
+            schemas.push(schema);
         }
         Ok(Self { schemas })
     }

@@ -210,6 +210,16 @@ fn supervise(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Root reaped. Sweep any descendants BEFORE joining the drain
+                // threads so a grandchild that inherited the pipe write-ends
+                // is torn down and `read_to_end` returns. Without this, the
+                // joins blocked forever if a gate's child spawned a
+                // background process that inherited stdout/stderr — the
+                // success path had no kill at all (AGENTS.md's "process tree
+                // terminated without hanging the supervisor" promise). With
+                // no surviving descendants (the common case) the kill is a
+                // no-op; the root has already exited.
+                kill_process_tree_orphans(pid);
                 let stdout = out_h.join().unwrap_or_default();
                 let stderr = err_h.join().unwrap_or_default();
                 return Ok(Supervised {
@@ -259,6 +269,37 @@ fn supervise(
         }
     }
 }
+
+/// Send a best-effort KILL to any descendant of an already-exited root child,
+/// so the drain-thread joins return promptly. Called on the success path
+/// after the root reaps (the timeout path uses `terminate_and_reap` which
+/// also reaps). With no surviving descendants this is a no-op.
+#[cfg(unix)]
+fn kill_process_tree_orphans(pid: u32) {
+    let p = pid as libc::pid_t;
+    // SAFETY: kill(2) only delivers a signal; no memory-safety effects.
+    // The root has already exited (caller confirmed via try_wait), so this
+    // only hits descendants still in the root's process group (the child
+    // leads its own group via `process_group(0)` at spawn).
+    unsafe {
+        libc::kill(-p, libc::SIGKILL);
+    }
+}
+
+/// Windows counterpart: `taskkill /T /F` sweeps the descendant tree. The
+/// root has already exited; best-effort, no Job Object, so a grandchild
+/// spawned mid-sweep may briefly outlive this — bounded by the OS
+/// re-parenting it to init.
+#[cfg(windows)]
+fn kill_process_tree_orphans(pid: u32) {
+    use std::process::{Command, Stdio};
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 
 /// Poll-reap the managed direct child until it exits or `budget` elapses.
 /// Reaping the ROOT is the authoritative confirmation that the process ctl
