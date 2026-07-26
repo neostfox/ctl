@@ -1534,12 +1534,6 @@ enum HookCommands {
     Context,
     /// Output active task breadcrumb as JSON for OMP hooks
     Breadcrumb,
-    /// Check if a path is within write_allow for the active task
-    CheckWrite {
-        /// Path to check
-        #[arg(long)]
-        path: String,
-    },
     /// Unified governance gate: check action against task state machine
     Gate {
         /// Tool name: write, edit, bash, read, search, find, task, other

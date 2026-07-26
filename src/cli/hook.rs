@@ -4,7 +4,6 @@ pub(super) fn cmd_hook(command: &HookCommands) -> Result<()> {
     match command {
         HookCommands::Context => cmd_hook_context(),
         HookCommands::Breadcrumb => cmd_hook_breadcrumb(),
-        HookCommands::CheckWrite { path } => cmd_hook_check_write(path),
         HookCommands::Gate {
             tool,
             path,
@@ -220,96 +219,6 @@ pub(super) fn cmd_hook_breadcrumb() -> Result<()> {
         "hold": hold,
         "objective": task.get("objective").and_then(|v| v.as_str()).unwrap_or(""),
         "write_allow": write_allow,
-    });
-
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
-}
-pub(super) fn cmd_hook_check_write(target_path: &str) -> Result<()> {
-    let project_root = std::env::current_dir()?;
-    let tasks_dir = project_root.join(".ctl").join("tasks");
-    if !tasks_dir.exists() {
-        let output = serde_json::json!({ "allowed": true, "reason": "no_tasks_dir" });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    }
-
-    // Find most recently modified in-progress task
-    let mut active: Option<(String, Vec<String>, std::time::SystemTime)> = None;
-    for entry in fs::read_dir(&tasks_dir)?.flatten() {
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().to_string();
-        let task_path = tasks_dir.join(&id).join("task.json");
-        let mtime = entry.metadata()?.modified()?;
-        if let Ok(content) = fs::read_to_string(&task_path) {
-            if let Ok(task) = serde_json::from_str::<serde_json::Value>(&content) {
-                let phase = task.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                if phase == "in_progress" && active.as_ref().is_none_or(|(_, _, t)| mtime > *t) {
-                    let write_allow: Vec<String> = task
-                        .get("write_allow")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    active = Some((id, write_allow, mtime));
-                }
-            }
-        }
-    }
-
-    let Some((task_id, write_allow)) = active.map(|(i, w, _)| (i, w)) else {
-        let output = serde_json::json!({ "allowed": true, "reason": "no_active_in_progress_task" });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    };
-
-    if write_allow.is_empty() {
-        let output = serde_json::json!({ "allowed": true, "reason": "empty_write_allow" });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    }
-
-    // Reject traversal/UNC/out-of-repo before the scope test, matching the
-    // gate proper (`cmd_hook_gate` treats these as Suspicious — hard deny).
-    // Without this, `src/../etc/passwd` would match the `src` scope via
-    // lexical `Path::starts_with` (component-wise but no ParentDir collapse)
-    // and be reported as in_scope.
-    if !matches!(
-        classify_write_target(&project_root, target_path),
-        WriteTarget::InRepo
-    ) {
-        let output = serde_json::json!({
-            "allowed": false,
-            "task_id": task_id,
-            "path": target_path,
-            "write_allow": write_allow,
-            "reason": "suspicious or out-of-repo path"
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    }
-
-    let resolved = if Path::new(target_path).is_relative() {
-        project_root.join(target_path)
-    } else {
-        Path::new(target_path).to_path_buf()
-    };
-
-    let in_scope = write_allow
-        .iter()
-        .any(|allow| resolved.starts_with(project_root.join(allow)));
-
-    let output = serde_json::json!({
-        "allowed": in_scope,
-        "task_id": task_id,
-        "path": target_path,
-        "write_allow": write_allow,
-        "reason": if in_scope { "in_scope" } else { "out_of_scope" }
     });
 
     println!("{}", serde_json::to_string_pretty(&output)?);
