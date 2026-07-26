@@ -46,6 +46,13 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-to-tasks/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-to-tasks/SKILL.md"),
         },
+        // Cognitive + knowledge orchestration (externalized from ctl Rust): routes
+        // when to record canonical cognitive state (ctl) and manage the knowledge
+        // base (scripts/knowledge.py companion).
+        EmbeddedFile {
+            relative_path: "skills/ctl-cognitive/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-cognitive/SKILL.md"),
+        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
         // than being regenerated per project by ctl-spec. Closes the
@@ -162,6 +169,10 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-spec/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-spec/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-cognitive/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-cognitive/SKILL.md"),
         },
         // Read-only subagent role(s). Writable roles are deferred until it is
         // verified (in a sandbox) whether subagent tool calls reach the gate;
@@ -396,8 +407,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 9,
-            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + 1 agent"
+            n, 10,
+            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + ctl-cognitive + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -408,6 +419,7 @@ mod tests {
             "skills/ctl-to-prd/SKILL.md",
             "skills/ctl-to-tasks/SKILL.md",
             "skills/ctl-spec/SKILL.md",
+            "skills/ctl-cognitive/SKILL.md",
             "agents/ctl-oracle.md",
         ] {
             assert!(
