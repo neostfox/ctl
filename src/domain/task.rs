@@ -1079,12 +1079,24 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
             state.is_archived = true;
         }
         "hold_entered" => {
+            if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
+                return Err(format!(
+                    "Cannot hold a terminal task (phase: {:?})",
+                    state.phase
+                ));
+            }
             state.is_held = true;
         }
         "hold_exited" => {
             state.is_held = false;
         }
         "boundary_violation_recorded" => {
+            if state.phase == Phase::Completed || state.phase == Phase::Cancelled {
+                return Err(format!(
+                    "Cannot record boundary violation on a terminal task (phase: {:?})",
+                    state.phase
+                ));
+            }
             state.is_held = true;
         }
         "gate_checked" => {
@@ -1264,6 +1276,12 @@ pub fn apply(state: &mut TaskState, event: &Event) -> Result<(), String> {
         }
         // ── M4: Run lifecycle events ──
         "run_started" => {
+            if state.phase != Phase::InProgress {
+                return Err(format!(
+                    "run_started only valid in InProgress, current phase: {:?}",
+                    state.phase
+                ));
+            }
             if state.active_run.is_some() {
                 return Err("Cannot start run: another run is already active".into());
             }
@@ -2020,5 +2038,104 @@ mod dispatch_tests {
             }),
         );
         assert!(apply(&mut state, &ev).is_err());
+    }
+}
+
+#[cfg(test)]
+mod phase_guard_tests {
+    use super::*;
+    use crate::domain::event::Event;
+
+    fn event(task_id: &str, seq: i64, event_type: &str, payload: serde_json::Value) -> Event {
+        Event {
+            schema: "control.event-envelope.v1".to_string(),
+            event_id: format!("evt-{seq}"),
+            command_id: format!("cmd-{seq}"),
+            task_id: task_id.to_string(),
+            seq,
+            occurred_at: "2026-06-20T00:00:00Z".to_string(),
+            actor: "human".to_string(),
+            event_type: event_type.to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn run_started_rejected_outside_in_progress() {
+        // C10: a forged run_started bypassing ControlApp::run_start must not
+        // leave a dangling active_run on a non-InProgress task.
+        let mut state = TaskState::new("t");
+        state.phase = Phase::Ready;
+        let ev = event(
+            "t",
+            1,
+            "run_started",
+            serde_json::json!({"run_id": "r1", "adapter": "omp", "lease_id": "l1"}),
+        );
+        assert!(
+            apply(&mut state, &ev).is_err(),
+            "run_started must require InProgress"
+        );
+        assert!(
+            state.active_run.is_none(),
+            "no dangling active_run on rejection"
+        );
+    }
+
+    #[test]
+    fn run_started_accepted_in_progress() {
+        let mut state = TaskState::new("t");
+        state.phase = Phase::InProgress;
+        let ev = event(
+            "t",
+            1,
+            "run_started",
+            serde_json::json!({"run_id": "r1", "adapter": "omp", "lease_id": "l1"}),
+        );
+        apply(&mut state, &ev).expect("accepted in InProgress");
+        assert!(state.active_run.is_some());
+    }
+
+    #[test]
+    fn hold_entered_rejected_on_completed_task() {
+        // C11: holding a terminal task would make it permanently unarchivable
+        // (task_archived is not hold-exempt).
+        let mut state = TaskState::new("t");
+        state.phase = Phase::Completed;
+        let ev = event("t", 1, "hold_entered", serde_json::json!({}));
+        assert!(apply(&mut state, &ev).is_err());
+        assert!(!state.is_held, "is_held must not flip on rejection");
+    }
+
+    #[test]
+    fn hold_entered_rejected_on_cancelled_task() {
+        let mut state = TaskState::new("t");
+        state.phase = Phase::Cancelled;
+        let ev = event("t", 1, "hold_entered", serde_json::json!({}));
+        assert!(apply(&mut state, &ev).is_err());
+    }
+
+    #[test]
+    fn boundary_violation_rejected_on_terminal_task() {
+        let mut state = TaskState::new("t");
+        state.phase = Phase::Completed;
+        let ev = event(
+            "t",
+            1,
+            "boundary_violation_recorded",
+            serde_json::json!({"path": "src/x.rs"}),
+        );
+        assert!(apply(&mut state, &ev).is_err());
+        assert!(!state.is_held);
+    }
+
+    #[test]
+    fn hold_entered_accepted_on_in_progress_task() {
+        // Positive case: holding an active task is the normal flow.
+        let mut state = TaskState::new("t");
+        state.phase = Phase::InProgress;
+        let ev = event("t", 1, "hold_entered", serde_json::json!({}));
+        apply(&mut state, &ev).expect("accepted in InProgress");
+        assert!(state.is_held);
     }
 }
