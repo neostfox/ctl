@@ -41,6 +41,8 @@ mod hook;
 use hook::*;
 mod write_gate;
 use write_gate::*;
+mod memory;
+use memory::*;
 
 #[derive(Parser)]
 #[command(name = "ctl")]
@@ -319,6 +321,12 @@ enum Commands {
     Spec {
         #[command(subcommand)]
         command: SpecCommands,
+    },
+    /// Global memory management (~/.ctl/memory/). Read-only inspections of the
+    /// cross-project knowledge tier — never writes or blocks. [ROADMAP #1]
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
     /// Bounded safety supervisor for unattended runs (ralph-safe-run-v1). A
     /// read-only dead-man's-switch around an external run — it NEVER spawns an
@@ -1132,6 +1140,18 @@ enum PrdCommands {
 }
 
 #[derive(Subcommand)]
+enum MemoryCommands {
+    /// Scan ~/.ctl/memory/*.md for project-path pollution — content that would
+    /// leak one repo's specifics into every project session. Warns, never blocks.
+    /// [ROADMAP #1/S]
+    Verify {
+        /// Print the findings as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum SpecCommands {
     /// Atomic verified facts — the project knowledge base.
     Fact {
@@ -1661,6 +1681,7 @@ pub fn run() -> Result<()> {
         Commands::Research { command } => cmd_research(command),
         Commands::Dispatch { command } => cmd_dispatch(command),
         Commands::Spec { command } => cmd_spec(command, dry_run),
+        Commands::Memory { command } => cmd_memory(command),
     }
 }
 
