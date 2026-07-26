@@ -871,11 +871,12 @@ run 路径），M6 `start_run` 仅 `generate_uuid()` 盖一个不透明 `lease_i
   还看到 drift level + next-action 建议、open uncertainties（带着哪些未决问题）、blockers（被哪些
   未完成依赖卡住）、provenance（来自哪个 PRD/alignment）。三平台 hook（Claude / OMP / opencode）
   同步渲染。纯上下文丰富——零决策变化、零边界放松，把已有确定性信号喂给模型。
-- **`ctl spec fact`（知识积累）✅** — 原子事实捕获 + 检索闭环。`add` 把对话中发现的客观事实（带
-  来源 provenance）追加到 `.ctl/facts.jsonl`（append-only evidence，非 canonical event）；
-  `list --search` 按类别/关键词检索；`promote --id F-003 --to <file>` 把事实提升为 curated spec
-  markdown。`ctl hook context` 注入事实摘要（总数 + 分类 + 最近 N 条）——**每个后续对话都看到积累的
-  知识**。两层：raw 事实流 + curated spec。record-and-disclose，不门控，L0 content。
+- **知识/记忆层（已外挂）✅** — 原子事实捕获 + 检索 + 全局记忆卫生**从 ctl Rust 移到 workflow
+  伴侣 `scripts/knowledge.py`**（`fact add/list/promote/summary` + `memory verify`）。ctl 不再 own
+  记忆/知识内容（它是 evidence，agent-owned）；编排下沉到 **`ctl-cognitive` skill**（决定何时记录
+  brainstorm/uncertainty/research 等 canonical 状态、何时经 script 管理知识库）。canonical 追加仍由
+  ctl（不变量：外部 actor 不能追加 canonical 事件）。`ctl spec doctor`（确定性 lint，非记忆）保留在
+  ctl。决策动机：保持 ctl Rust 精简（governance-only），把"没用"的内容管理下沉到 workflow 层。
 
 ## 已知缺口（reducer 就绪 / 生产未接线）
 
@@ -930,19 +931,19 @@ ctl 的"记忆"不是一个系统,是 6 个独立载体 + 1 个全局目录,语�
 |---|---|---|---|
 | canonical 事件流 | `.ctl/tasks/<id>/events.jsonl` | sha256 + schema + 单写者锁 | ctl 自己 |
 | curated spec | `.ctl/spec/**/*.md` | **无** | AI agent(经 ctl-spec skill) |
-| atomic facts | `.ctl/facts.jsonl` | 结构化,无 hash | `ctl spec fact add` |
+| atomic facts | `.ctl/facts.jsonl` | 结构化,无 hash | `scripts/knowledge.py fact add`（外挂） |
 | 全局偏好 | `~/.ctl/memory/<slug>.md` + `MEMORY.md` | **无**,纯 prose 规则 | AI agent |
 | handoff 快照 | `.ctl/handoffs/<id>.json` | schema 校验 + task_id 绑定 | `ctl handoff capture` |
 | 决策日志 | `.ctl/decisions.jsonl` | `canonical:false` + ts | host hook |
 
 ctl 自己只在 `src/cli/mod.rs:7980` 读 `~/.ctl/memory/` 的 mtime 做 wrap-up 提醒——**完全不写入、不校验、不知道内容**。
 
-- **★★★ #2/S — `ctl spec doctor`(只读)扫 `.ctl/spec/**/*.md` 里引用的代码路径(`` `src/...` ``、`` `cargo ...` ``)是否还存在,报 stale**。投入产出比最高。
-- **★★ #1/S — `ctl memory verify`(只读)扫 `~/.ctl/memory/*.md` 检测项目路径污染(`/src/`、`cargo`、文件扩展名等),warn 不 block**。防止一个 repo 的内容污染所有项目会话。
-- **★★ #4/M — `ctl knowledge`(或 `ctl memory show --all`)只读聚合查询**:canonical provenance + `.ctl/spec/` 目录树 + facts 摘要 + 最近 N 个 handoffs + 最近 decisions。统一入口。
-- **★ #3/M — 注入加预算与相关性排序**:`ctl-context.py` 当前无脑注入 MEMORY.md 前 30 行。改成调 `ctl memory digest --task <id> --budget <tokens>`,ctl 自己读 task objective/score memory 条目相关性,返回预算内摘要。涉及改 3 个平台 host hook。
-- **★ #5/S — `ctl spec fact retire --id F-XXX`**:软删除(打 `retired_epoch` 标记,保留 append-only 性质);`list` 默认隐藏,加 `--all` 才看。
-- **★ #6/S — `ctl memory list --stale` / `ctl memory retire <slug>`**:全局记忆生命周期。
+- **★★★ #2/S ✅ 已实现** — `ctl spec doctor` 扫 `.ctl/spec/**/*.md` 里引用的代码路径是否还存在,报 stale。保留在 ctl（确定性 lint,非记忆）。
+- **★★ #1/S ✅ 已外挂** — 移到 `scripts/knowledge.py memory verify`（ctl 不再 own 记忆内容）。
+- **★★ #4/M — `scripts/knowledge.py` 聚合查询**(只读):canonical provenance(经 ctl)+ `.ctl/spec/` 目录树 + facts 摘要 + 最近 N 个 handoffs + 最近 decisions。统一入口(外挂脚本,非 ctl 命令)。
+- **★ #3/M — 注入加预算与相关性排序**:hook 当前注入 facts 摘要无预算。改成 hook 调 `scripts/knowledge.py fact summary --budget <tokens> --task <id>`,按 task objective 检索相关 facts 返回预算内摘要。涉及 3 个平台 hook(`.claude`/`.omp`/`npm-omp`)。
+- **★ #5/S — `scripts/knowledge.py fact retire --id F-XXX`**:软删除(打 `retired_epoch` 标记,保留 append-only 性质);`list` 默认隐藏,加 `--all` 才看。
+- **★ #6/S — `scripts/knowledge.py memory list --stale` / `memory retire <slug>`**:全局记忆生命周期。
 - **★ #7/S — facts → spec 双向回链**:`promote` 时在 spec 末尾加 `<!-- fact: F-XXX -->` 注释,或维护 `.ctl/spec/.fact-index.json`。事后能查"哪些 spec 段落基于哪个 fact"。
 
 ### 安全审计残留风险
@@ -1003,7 +1004,7 @@ ctl 自己只在 `src/cli/mod.rs:7980` 读 `~/.ctl/memory/` 的 mtime 做 wrap-u
 1. **P1/S** — Rust 文件拆分(`cli/mod.rs` → 命令组)。代码已涨到非可持续,越拖越大。
 2. **#2/S** — `ctl spec doctor` 只读命令。记忆系统里投入产出比最高的小修。
 3. **P2/M** — `application/mod.rs` 拆分。配合 P1 一起做。
-4. **#1/S** — `ctl memory verify` 只读命令。防累积污染。
+4. **#1/S ✅** — 已外挂到 `scripts/knowledge.py memory verify`。
 5. **C10+C11/S** — reducer 两个 phase guard 防御补强。应用层已挡,reducer 是最后防线,小修大安心。
 
 互不依赖,各自独立可交付。
