@@ -7,7 +7,22 @@ mod domain;
 mod infrastructure;
 
 fn main() -> anyhow::Result<()> {
-    cli::run()
+    // The clap-derived CLI builds a deep command tree (~40 top-level
+    // subcommands, several with their own nested subcommands). That recursive
+    // construction overflows the OS default main-thread stack on Windows in
+    // *debug* builds — every subcommand exits 253 with no output, including
+    // `--version`. Release builds (smaller frames) and Linux (8 MB main stack)
+    // are unaffected, so CI never caught it. Run the whole CLI on a worker
+    // thread with a Linux-sized stack so the binary behaves identically across
+    // debug/release and platforms. (`std::thread` is permitted — `gates/` and
+    // `store/` already use it; it is not an async runtime.)
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(cli::run)
+        .map_err(|e| anyhow::anyhow!("failed to spawn ctl worker thread: {e}"))?;
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("ctl worker thread panicked"))?
 }
 
 #[cfg(test)]

@@ -73,7 +73,7 @@ irm https://raw.githubusercontent.com/neostfox/ctl/master/scripts/install.ps1 | 
 ### 2. 验证安装
 
 ```bash
-ctl --version     # 应输出 ctl 0.0.14
+ctl --version     # 应输出 ctl 0.0.15
 ctl doctor       # 诊断本地账本/集成健康（无 .ctl/ 时会提示先 ctl init）
 ```
 

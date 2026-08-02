@@ -52,7 +52,7 @@ handoffs/      = non-canonical agent/human judgment (.ctl/handoffs/<id>.json)
 
 ## Milestone Gate
 
-Current scope (0.0.11): **M0–M6 shipped + hard review layer (M-a…M-g) + V1 cognitive layer**.
+Current scope (0.0.15): **M0–M6 shipped + hard review layer (M-a…M-g) + V1 cognitive layer**.
 
 | Milestone | Focus | Key Constraint |
 |-----------|-------|----------------|

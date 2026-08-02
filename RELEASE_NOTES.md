@@ -92,6 +92,20 @@ green (3 new regressions).
   AGENTS.md's "process tree terminated without hanging the supervisor" on the
   success path too.
 
+### Cross-platform (critical — Windows debug)
+
+- **Every subcommand exited 253 on Windows in debug builds.** The clap-derived
+  CLI builds a deep command tree (~40 top-level subcommands, several with their
+  own nested subcommands); that recursive construction overflowed the OS default
+  main-thread stack on Windows in *debug* builds — `ctl --version`, `ctl doctor`,
+  `ctl gate`, and `ctl architecture check` all crashed with `thread 'main' has
+  overflowed its stack` and no output. Release builds (smaller frames) and Linux
+  (8 MB main stack) were unaffected, so CI never caught it. `main` now runs
+  `cli::run()` on a worker thread with a Linux-sized (8 MB) stack, so the binary
+  behaves identically across debug/release and platforms. (`std::thread` is
+  permitted by the dependency guardrails — `gates/` and `store/` already use it;
+  it is not an async runtime.) No behavior change; 566 tests still green.
+
 ### Docs (README.md, 8 fixes)
 
 - **Prerequisites rewritten.** "No runtime needed" was false for `--claude`
