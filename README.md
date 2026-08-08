@@ -106,7 +106,7 @@ cargo build --release        # 产物：target/release/ctl
 
 **手动下载：** 直接到 [Releases](https://github.com/neostfox/ctl/releases) 取对应平台的 `ctl-<target>.tar.gz` / `.zip`。
 
-**公司网络/代理环境：** bash 设 `HTTPS_PROXY=http://proxy:port` 后再跑安装命令；PowerShell 用 `$env:HTTPS_PROXY='http://proxy:port'`，或下载脚本本地执行 `iex (Get-Content .\install.ps1 -Raw)`。安装与 `ctl self-update` 只访问 `raw.githubusercontent.com`、`github.com`、`objects.githubusercontent.com`（见 [ADR 0002](./docs/adr/0002-allow-narrow-network-egress-for-ctl-update.md)）。
+**公司网络/代理环境：** bash 设 `HTTPS_PROXY=http://proxy:port` 后再跑安装命令；PowerShell 用 `$env:HTTPS_PROXY='http://proxy:port'`，或下载脚本本地执行 `iex (Get-Content .\install.ps1 -Raw)`。安装脚本从 `raw.githubusercontent.com`（脚本本体）与 `github.com` / `objects.githubusercontent.com`（二进制 + 校验和）拉取；`ctl self-update` 解析最新版本号时额外经 `api.github.com`，二进制本身仍从 `github.com` / `objects.githubusercontent.com` 下载（见 [ADR 0002](./docs/adr/0002-allow-narrow-network-egress-for-ctl-update.md)）。
 
 **卸载：** `ctl` 无独立卸载器，删除二进制即可——Windows 删 `%LOCALAPPDATA%\ctl\bin\ctl.exe`（`self-update` 会留 `ctl.exe.old`，可一并删）并从用户 PATH 移除该目录；Linux/macOS 删 `/usr/local/bin/ctl` 或 `~/.local/bin/ctl`。项目内的 ctl 状态在 `.ctl/`，平台注入在 `.claude/`、`.omp/`、`.opencode/`，按需删除。
 
@@ -261,6 +261,8 @@ ctl research record|status
 
 | 文档 | 内容 |
 |---|---|
+| [USAGE.md](./USAGE.md) | 完整使用手册（面向人）：概念、生命周期、边界、闸门、诊断、场景、命令速查 |
+| [AGENT_GUIDE.md](./AGENT_GUIDE.md) | AI Agent 操作指南：如何驱动 ctl、工作流技能、边界/hook 约束、HITL 节点 |
 | [DESIGN.md](./DESIGN.md) | 设计与愿景：控制论闭环、drift、子智能体、schema 冻结 |
 | [EPISTEMIC_CONTROL.md](./EPISTEMIC_CONTROL.md) | 认识状态层：record-and-disclose 边界、四级信任、不确定性本体 |
 | [ROADMAP.md](./ROADMAP.md) | 里程碑 M0–M6+ 与退出条件 |
