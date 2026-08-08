@@ -54,8 +54,9 @@ verdict.
 - **Upstream**: control-guard triage — any non-trivial request enters here first.
 - **Depth by fit**: classify on entry — `trivial` (control-guard edits directly,
   grill skipped); `single-task converged` (clear objective, ≤2 write_allow, no
-  design divergence → grill degrades to a 5-line intent confirm, then straight
-  to `ctl task create`); `multi-option / ambiguous / high-risk` (full interview
+  design divergence → grill degrades to a 5-line intent confirm — objective
+  restated · write_allow · gates · the one risk · your recommendation — then
+  straight to `ctl task create`); `multi-option / ambiguous / high-risk` (full interview
   below). The user can always request the full interview.
 - **Produces**: alignment note at `.ctl/spec/alignment/` (`draft` → `confirmed`);
   on the single-task path the note lives in-conversation — provenance is
@@ -71,6 +72,15 @@ answer, read — code, tests, configs, specs, task history; never ask the user f
 it. But scheme trade-offs, priorities, scope boundaries, risk tolerance, and
 acceptance criteria are the **user's to decide — confirm them even when you are
 confident**, by proposing an answer, not by staying silent.
+
+**Reach for First Principles at entry, not at note-time.** When the request
+arrives as a *solution* ("add X", "make Y a hard gate"), your first move is to
+restate it as the *problem* (FP Step 1) and challenge every inherited assumption
+(FP Step 3 — *domain requirement, or convention?*). The full framework (restate
+→ truths → challenge → build → validate) is in `references/first-principles.md`
+— load it when the request is vague, solution-framed, or feels over-engineered.
+It outputs artifacts (a restated problem, ranked assumptions, a minimum viable
+experiment), never a verdict.
 
 ### The interview loop — design tree + frontier (per round)
 
@@ -90,10 +100,11 @@ not heard yet.
 - Each round's answers reshape the tree and push the frontier outward. Recompute
   it and ask the next round. Prefer concrete options over open-ended prompts;
   never ask process questions ("should I search the code?") — just do the work.
-- The session converges when the **frontier is empty**: every branch visited,
-  nothing left silently assumed. On the single-task path, take the converged
-  proposal straight to `ctl task create` — do not force a PRD or a full
-  alignment-note write-up.
+- The session converges when the **frontier is empty** — operationally: no
+  remaining decision would change the task proposal you're about to hand to
+  control-guard. On the single-task path, the 5-line intent confirm IS the
+  converged proposal — take it straight to `ctl task create`; do not force a PRD
+  or a full alignment-note write-up.
 
 #### Facts are your job, never the user's
 
@@ -102,7 +113,11 @@ history), **find it yourself** — never ask the user for anything the repositor
 can answer. Dispatch a **read-only** sub-agent (`Explore` / `scout` / `explore`,
 per platform) to look it up, and **don't block on it**: a running lookup is an
 unsettled prerequisite, so only the questions downstream of it wait — ask the
-rest of the frontier now. The *decisions* (scope, priorities, risk tolerance,
+rest of the frontier now. **Distinguish dispatch latency**: for a *slow* lookup
+(a multi-file sub-agent scan), fire it and ask the independent frontier in the
+same turn — don't block; for an *instant* local lookup (a single file or config
+read), do it inline *before* asking, so a fast fact reshapes the question
+rather than asking-then-correcting. The *decisions* (scope, priorities, risk tolerance,
 acceptance criteria) are the user's — put each to them and wait.
 
 #### "Don't build until consensus" — discipline, NOT an enforced gate
@@ -110,8 +125,11 @@ acceptance criteria) are the user's — put each to them and wait.
 Present the populated design tree and **stop** for the user to confirm. Be blunt
 about how weak this is: ctl does **not** hard-block a write before consensus.
 Observe-mode *records* an ungoverned or early write to `.ctl/decisions.jsonl`;
-it does not prevent one (only protected paths, dependency step-ups, held tasks,
-and cross-task overlap are hard-denied). So "wait for confirmation" is **workflow
+it does not prevent one — only the **hard core** is denied (protected paths,
+unclassifiable targets, dependency step-ups, held tasks, cross-task overlap,
+multi-active ambiguity, destructive git during runs, ctl-unavailable; see
+`.ctl/spec/prd/gate-observe-mode.md` for the authoritative, non-exhaustive
+list). So "wait for confirmation" is **workflow
 discipline you are trusted to follow**, not a gate ctl enforces — and an early
 write becomes part of the observation log the review gates audit. Treat it as a
 strong norm, and know exactly how soft its enforcement is.
@@ -142,7 +160,7 @@ When converging directly to tasks, append the task proposal fields (objective ·
 read scope · minimal write_allow · gates · risks) for control-guard.
 
 **Challenge inherited assumptions.** For each assumption ask: *domain requirement, or convention from the existing architecture/framework?* Strike anything that is convention masquerading as a constraint.
-The expanded First Principles framework (restate → truths → challenge → build → validate) is in `references/first-principles.md` — load it on demand when the request is vague or a solution feels over-engineered.
+The framework's note-feeding mapping (truths → constraints, challenge → assumptions, build → approaches, validate → unknowns + experiment) is in `references/first-principles.md`.
 
 ### Where artifacts go
 
@@ -161,8 +179,10 @@ The expanded First Principles framework (restate → truths → challenge → bu
 ### Anti-patterns
 
 - ❌ Asking the user something the repository already answers.
-- ❌ Multiple DEPENDENT questions in one message (independent decisions may
-  batch as one multi-select), or a question without a recommended answer.
+- ❌ Multiple DEPENDENT questions in one round (independent decisions batch as
+  separate single-choice questions in one call — reserve multi-select for the
+  rare decision where several options apply at once), or a question without a
+  recommended answer.
 - ❌ Building, or creating the implementation task, before the user confirms.
 - ❌ Writing a domain/ADR doc without user confirmation or outside write scope.
 
