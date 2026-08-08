@@ -163,6 +163,7 @@ skills 管「在什么阶段想什么」；每个 skill 声明自己的 station 
 - `ctl-review`——read-only 评审子 agent。两种模式：(A) 变更前 edit review；(B) `submit` 后的 completion audit（跑闭环清单，要 build/test/lint **evidence** 而非断言）。这个 gate 是硬的。
 - `ctl-cognitive`——编排认知+知识层（brainstorm / uncertainty / research / handoff / prd / ralph）。
 - `ctl-spec`——`.ctl/spec/` 生命周期：首次 bootstrap，之后把设计决策/模式/坑/根因写进去。
+- `ctl-meta`——skill 面的自文档（**非 workflow 阶段 skill**）：讲清 skill 怎么从 `.agent/skills/<name>/source.md` 单源生成、managed-core 的 drift 契约、平台目标、怎么加/改 skill 面。要动 skill 面或搞清 ctl-二进制与 ctl-skills 分层时读它——见 `references/` 的渐进披露与 `ctl skills sync` 的 CI 门。
 
 ### 每个阶段都遵守的不变量
 
