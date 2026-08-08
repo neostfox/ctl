@@ -27,21 +27,49 @@ it. But scheme trade-offs, priorities, scope boundaries, risk tolerance, and
 acceptance criteria are the **user's to decide — confirm them even when you are
 confident**, by proposing an answer, not by staying silent.
 
-### The interview loop (micro-decisions)
+### The interview loop — design tree + frontier (per round)
 
-Interview relentlessly but narrowly:
+Interview relentlessly, but in **rounds**, not one question at a time. Model the
+effort as a **design tree**: each decision branches into the decisions that hang
+off it. The **frontier** is every decision whose prerequisites are already
+settled — the questions you can ask *now* without guessing at answers you have
+not heard yet.
 
-- Ask the **single highest-value open question**, then wait — OR batch
-  **independent** micro-decisions into one multi-select ask (recommended answer
-  preserved per item) to cut round-trips.
-- Every question carries: the decision needed · why it matters · **your
+- Each round, ask the **whole frontier together**: number each question
+  (Q1, Q2, …) and attach the decision needed · why it matters · **your
   recommended answer** · the trade-off if the user chooses otherwise.
-- Prefer concrete options over open-ended prompts; never ask process questions
-  ("should I search the code?") — just do the work.
-- **Converge-and-exit**: once goals, constraints, and approach are shared, stop.
-  On the single-task path, take the converged proposal straight to
-  `ctl task create` — do not force a PRD or a full alignment-note write-up.
-- **Do not build until the user confirms the shared understanding.**
+- A question whose answer depends on another **still-open** question belongs to
+  a **later round** — never ask upstream of an unsettled prerequisite.
+  **Independent** decisions batch into one round (this is the point of the
+  frontier: fewer round-trips); **dependent** ones never do.
+- Each round's answers reshape the tree and push the frontier outward. Recompute
+  it and ask the next round. Prefer concrete options over open-ended prompts;
+  never ask process questions ("should I search the code?") — just do the work.
+- The session converges when the **frontier is empty**: every branch visited,
+  nothing left silently assumed. On the single-task path, take the converged
+  proposal straight to `ctl task create` — do not force a PRD or a full
+  alignment-note write-up.
+
+#### Facts are your job, never the user's
+
+When a frontier question needs a fact (code, tests, configs, specs, task
+history), **find it yourself** — never ask the user for anything the repository
+can answer. Dispatch a **read-only** sub-agent (`Explore` / `scout` / `explore`,
+per platform) to look it up, and **don't block on it**: a running lookup is an
+unsettled prerequisite, so only the questions downstream of it wait — ask the
+rest of the frontier now. The *decisions* (scope, priorities, risk tolerance,
+acceptance criteria) are the user's — put each to them and wait.
+
+#### "Don't build until consensus" — discipline, NOT an enforced gate
+
+Present the populated design tree and **stop** for the user to confirm. Be blunt
+about how weak this is: ctl does **not** hard-block a write before consensus.
+Observe-mode *records* an ungoverned or early write to `.ctl/decisions.jsonl`;
+it does not prevent one (only protected paths, dependency step-ups, held tasks,
+and cross-task overlap are hard-denied). So "wait for confirmation" is **workflow
+discipline you are trusted to follow**, not a gate ctl enforces — and an early
+write becomes part of the observation log the review gates audit. Treat it as a
+strong norm, and know exactly how soft its enforcement is.
 
 ### Diverge first when the request is broad
 
@@ -69,6 +97,7 @@ When converging directly to tasks, append the task proposal fields (objective ·
 read scope · minimal write_allow · gates · risks) for control-guard.
 
 **Challenge inherited assumptions.** For each assumption ask: *domain requirement, or convention from the existing architecture/framework?* Strike anything that is convention masquerading as a constraint.
+The expanded First Principles framework (restate → truths → challenge → build → validate) is in `references/first-principles.md` — load it on demand when the request is vague or a solution feels over-engineered.
 
 ### Where artifacts go
 
@@ -118,8 +147,9 @@ inside an active task's scope. `explore` is the only read-only role.
 <!-- integration:claude -->
 
 The alignment station's single entry. Run the interview loop with
-`AskUserQuestion` — one micro-decision per call, or independent decisions
-batched as one multi-select call (recommended answer listed
+AskUserQuestion — ask the whole **frontier** (independent decisions only; a
+question depending on a still-open one waits for a later round) as one
+multi-select call (recommended answer listed
 first and marked "(Recommended)". Record which cognitive artifacts the eventual
 task derived from with `ctl brainstorm` provenance (record-only — never gates
 create/finish). The alignment note targets `.ctl/spec/alignment/` (spec tier —

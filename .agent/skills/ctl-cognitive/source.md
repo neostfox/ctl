@@ -3,7 +3,6 @@ name: ctl-cognitive
 description: "Orchestrates the cognitive + knowledge layer. Triggers when: a task carries brainstorm provenance (divergence/convergence artifacts), open uncertainties (proceeding on unverified assumptions), or research findings; or when a durable verified fact worth keeping is discovered. Records canonical cognitive state via ctl (brainstorm/uncertainty/research) and manages the non-canonical knowledge base via the scripts/knowledge.py companion. Do NOT trigger for: routine implementation (just write code), or governance gates (control-guard)."
 ---
 
-# ctl-cognitive (Claude Code)
 
 The workflow-side orchestrator for ctl's two-tier cognitive/knowledge model. ctl's
 Rust layer owns the **canonical** appends (the task ledger); this skill decides
@@ -66,4 +65,3 @@ degrade if reconstructed after the fact.
 - If unsure whether something is canonical (task ledger) or knowledge (facts
   store): if it describes THIS task's reasoning → canonical; if it's a reusable
   verified truth about the codebase → knowledge.
-

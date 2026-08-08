@@ -1,14 +1,11 @@
 ---
 name: control-guard
-description: "Control plane entry point (OMP). Proactively routes ctl task lifecycle — scope, gates, audit, finish — while the OMP PreToolUse hook enforces boundaries and injects context. Findings follow the Iron Law: Symptom → Source → Consequence → Remedy."
+description: "Control plane entry point. Proactively routes ctl task lifecycle — scope, gates, audit, finish — while the host's ctl gate enforces boundaries and injects context. Findings follow the Iron Law: Symptom → Source → Consequence → Remedy."
 ---
 
 # Control Guard (OMP)
 
-Auto-loaded every session. The **managed core** below is the platform-neutral
-control-guard protocol, byte-checked by CI against
-`.agent/protocols/control-guard.md` and the OpenCode skill. Do not edit it here in
-isolation. OMP-specific mechanics live in "OMP Integration" after the core.
+The **managed core** below is the platform-neutral control-guard protocol, byte-checked by CI against `.agent/protocols/control-guard.md` across platforms. Do not edit it here — it is generated from `.agent/skills/control-guard/source.md` by `ctl skills sync`. OMP-specific mechanics live after the core.
 
 <!-- ctl:control-guard-core:start version=4 -->
 # Control Guard — Core Protocol

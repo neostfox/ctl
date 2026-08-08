@@ -53,6 +53,24 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-cognitive/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-cognitive/SKILL.md"),
         },
+        // Self-documenting architecture skill: maps the layer model,
+        // single-source generation, the drift contract, and how to edit the
+        // skill surface. Generated from .agent/skills/ctl-meta/source.md.
+        EmbeddedFile {
+            relative_path: "skills/ctl-meta/SKILL.md",
+            content: include_str!("../../.omp/skills/ctl-meta/SKILL.md"),
+        },
+        // ── Progressive-disclosure references. Drop this whole block (and the
+        // references/ dirs under .agent/skills) when models no longer need the
+        // context economy. Supplementary depth; skills stay correct without it. ──
+        EmbeddedFile {
+            relative_path: "skills/control-guard/references/command-reference.md",
+            content: include_str!("../../.omp/skills/control-guard/references/command-reference.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
+            content: include_str!("../../.omp/skills/ctl-grill-with-spec/references/first-principles.md"),
+        },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
         // than being regenerated per project by ctl-spec. Closes the
@@ -174,6 +192,19 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-cognitive/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-cognitive/SKILL.md"),
         },
+        EmbeddedFile {
+            relative_path: "skills/ctl-meta/SKILL.md",
+            content: include_str!("../../.claude/skills/ctl-meta/SKILL.md"),
+        },
+        // ── Progressive-disclosure references (see .omp list for the drop-block note) ──
+        EmbeddedFile {
+            relative_path: "skills/control-guard/references/command-reference.md",
+            content: include_str!("../../.claude/skills/control-guard/references/command-reference.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
+            content: include_str!("../../.claude/skills/ctl-grill-with-spec/references/first-principles.md"),
+        },
         // Read-only subagent role(s). Writable roles are deferred until it is
         // verified (in a sandbox) whether subagent tool calls reach the gate;
         // a read-only role never writes, so it is safe under ctl today.
@@ -221,6 +252,19 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-to-tasks/SKILL.md",
             content: include_str!("../../.opencode/skills/ctl-to-tasks/SKILL.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-meta/SKILL.md",
+            content: include_str!("../../.opencode/skills/ctl-meta/SKILL.md"),
+        },
+        // ── Progressive-disclosure references (see .omp list for the drop-block note) ──
+        EmbeddedFile {
+            relative_path: "skills/control-guard/references/command-reference.md",
+            content: include_str!("../../.opencode/skills/control-guard/references/command-reference.md"),
+        },
+        EmbeddedFile {
+            relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
+            content: include_str!("../../.opencode/skills/ctl-grill-with-spec/references/first-principles.md"),
         },
     ]
 }
@@ -407,8 +451,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 10,
-            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + ctl-cognitive + 1 agent"
+            n, 13,
+            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + ctl-cognitive + ctl-meta + 2 references + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -420,6 +464,9 @@ mod tests {
             "skills/ctl-to-tasks/SKILL.md",
             "skills/ctl-spec/SKILL.md",
             "skills/ctl-cognitive/SKILL.md",
+            "skills/ctl-meta/SKILL.md",
+            "skills/control-guard/references/command-reference.md",
+            "skills/ctl-grill-with-spec/references/first-principles.md",
             "agents/ctl-oracle.md",
         ] {
             assert!(

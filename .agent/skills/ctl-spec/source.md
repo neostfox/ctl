@@ -3,7 +3,6 @@ name: ctl-spec
 description: "Project spec lifecycle in one skill: bootstrap .ctl/spec/ from source on first run or after major refactoring, then capture knowledge (design decisions, patterns, gotchas, root causes) into .ctl/spec/ (project) or ~/.ctl/memory/ (global cross-project) as work proceeds. Auto-triggered by control-guard after ctl init, task finish, or when ctl-diagnose reveals a pattern worth preserving. Writes only under .ctl/, ~/.ctl/memory/, CLAUDE.md, AGENTS.md — never project source."
 ---
 
-# ctl-spec (opencode)
 
 Two modes, one skill:
 
@@ -87,4 +86,3 @@ Before finishing a capture:
 - [ ] In the right file (backend/ vs guides/)?
 - [ ] Doesn't duplicate existing content?
 - [ ] A new team member would understand it?
-

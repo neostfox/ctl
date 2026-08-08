@@ -66,3 +66,4 @@ degrade if reconstructed after the fact.
 - If unsure whether something is canonical (task ledger) or knowledge (facts
   store): if it describes THIS task's reasoning → canonical; if it's a reusable
   verified truth about the codebase → knowledge.
+

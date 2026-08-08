@@ -96,3 +96,4 @@ the dispatcher can pass as `--note`.
 - ❌ Findings without all four Iron-Law fields, or without `file:line`.
 - ❌ Re-inventing severity tiers — they live in the rubric files.
 - ❌ Passing a completion audit that has 🔴 Critical findings.
+

@@ -85,3 +85,4 @@ re-discovered.
 - ❌ Treating a D/E-grade guess as if it were A-grade evidence.
 - ❌ Fixing the symptom and moving on when the bug has recurred before.
 - ❌ Diagnosing without capturing the lesson back into specs.
+
