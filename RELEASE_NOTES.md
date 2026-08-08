@@ -1,3 +1,49 @@
+# Release Notes — ctl (unreleased)
+
+Follows **v0.0.15**. Internal skill-surface authoring restructure plus new
+human/agent guides. **No behavior change for governed task/run/gate flows.**
+569 tests green; `ctl skills sync --check` and `ctl adapter doctor` clean.
+
+## Skills — single-source generation for the skill surface
+
+- **One canonical source per generated skill.** Every skill with a managed core
+  or cross-platform divergence is now generated from
+  `.agent/skills/<name>/source.md` by `ctl skills sync`; the platform
+  `SKILL.md` files (`.omp/` / `.claude/` / `.opencode/`) are committed generated
+  output, and `ctl skills sync --check` is a CI gate against hand-edits.
+- **`control-guard` unified** from three hand-authored platform copies into one
+  source; the managed core is still byte-drift-checked against
+  `.agent/protocols/control-guard.md` (`CONTROL_GUARD_PROTOCOL_VERSION = 4`
+  unchanged).
+- **`ctl-meta` added** — a self-documenting skill for the skill surface
+  (generation / drift / platform targeting / how to modify). Defers the layer
+  model to `workflow-skills.md` + `AGENTS.md` to keep a single source of truth.
+- **`ctl-grill-with-spec` engine upgrade** — adopted the design-tree + frontier
+  interview model from upstream `grilling` (Matt Pocock, L0 reference — adapted,
+  not vendored): ask the whole frontier per round, dependency-ordered, read-only
+  sub-agent for facts (non-blocking). States honestly that "don't build before
+  consensus" is unenforced discipline (observe-mode records early writes, does
+  not block), not a gate.
+- **Progressive-disclosure `references/`** — optional per-skill reference docs
+  copied to each platform and shipped via `ctl init` (embed blocks tagged for
+  one-pass removal once models no longer need the context economy). Initial set:
+  `control-guard/references/command-reference.md`,
+  `ctl-grill-with-spec/references/first-principles.md`.
+- **`ctl-review` / `ctl-diagnose` stay hand-authored** (OMP-only, no core, no
+  divergence — generation would be pure indirection).
+- **Generator parameterized** into `workflow` / `control-guard` / `plain`
+  families with `Family.core: Option<&CoreSpec>` (replacing empty-string
+  sentinels).
+
+## Docs
+
+- **`USAGE.md`** — human-facing manual (concepts, lifecycle, boundaries, gates,
+  scenarios, command cheatsheet).
+- **`AGENT_GUIDE.md`** — AI-agent operation guide (governance, workflow skills,
+  boundary/hook constraints, HITL nodes).
+- **README** — network-egress note corrected (`api.github.com` for version
+  resolution); docs table links the two new guides.
+
 # Release Notes — ctl v0.0.15
 
 Follows **v0.0.14**. This is a security-and-docs point release from the
