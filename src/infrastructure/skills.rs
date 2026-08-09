@@ -57,11 +57,15 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
         // context economy. Supplementary depth; skills stay correct without it. ──
         EmbeddedFile {
             relative_path: "skills/control-guard/references/command-reference.md",
-            content: include_str!("../../.omp/skills/control-guard/references/command-reference.md"),
+            content: include_str!(
+                "../../.omp/skills/control-guard/references/command-reference.md"
+            ),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
-            content: include_str!("../../.omp/skills/ctl-grill-with-spec/references/first-principles.md"),
+            content: include_str!(
+                "../../.omp/skills/ctl-grill-with-spec/references/first-principles.md"
+            ),
         },
         // Fixed review-rule files the skills reference. These are universal
         // (not project-specific), so they ship verbatim with `ctl init` rather
@@ -183,11 +187,15 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
         // ── Progressive-disclosure references (see .omp list for the drop-block note) ──
         EmbeddedFile {
             relative_path: "skills/control-guard/references/command-reference.md",
-            content: include_str!("../../.claude/skills/control-guard/references/command-reference.md"),
+            content: include_str!(
+                "../../.claude/skills/control-guard/references/command-reference.md"
+            ),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
-            content: include_str!("../../.claude/skills/ctl-grill-with-spec/references/first-principles.md"),
+            content: include_str!(
+                "../../.claude/skills/ctl-grill-with-spec/references/first-principles.md"
+            ),
         },
         // Read-only subagent role(s). Writable roles are deferred until it is
         // verified (in a sandbox) whether subagent tool calls reach the gate;
@@ -236,11 +244,15 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         // ── Progressive-disclosure references (see .omp list for the drop-block note) ──
         EmbeddedFile {
             relative_path: "skills/control-guard/references/command-reference.md",
-            content: include_str!("../../.opencode/skills/control-guard/references/command-reference.md"),
+            content: include_str!(
+                "../../.opencode/skills/control-guard/references/command-reference.md"
+            ),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-grill-with-spec/references/first-principles.md",
-            content: include_str!("../../.opencode/skills/ctl-grill-with-spec/references/first-principles.md"),
+            content: include_str!(
+                "../../.opencode/skills/ctl-grill-with-spec/references/first-principles.md"
+            ),
         },
     ]
 }

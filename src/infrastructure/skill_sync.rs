@@ -200,7 +200,10 @@ fn parse_source(text: &str) -> Result<Source> {
             }
             (body, integrations)
         }
-        None => (after_fm.trim().to_string(), std::collections::HashMap::new()),
+        None => (
+            after_fm.trim().to_string(),
+            std::collections::HashMap::new(),
+        ),
     };
     Ok(Source {
         frontmatter,
@@ -317,8 +320,7 @@ pub fn sync(project_root: &Path, check: bool) -> Result<SyncOutcome> {
         let rendered: Option<RenderedCore<'_>> = match spec.family.core {
             None => None,
             Some(cs) => {
-                let (content, version) = if let Some(v) =
-                    core_cache.get(cs.canonical_path).cloned()
+                let (content, version) = if let Some(v) = core_cache.get(cs.canonical_path).cloned()
                 {
                     v
                 } else {
@@ -478,7 +480,10 @@ mod tests {
         assert!(WORKFLOW_FAMILY.core.is_some());
         assert!(CONTROL_GUARD_FAMILY.core.is_some());
         // Platform asymmetry is intentional and preserved.
-        let cognitive = generated_skills().iter().find(|s| s.name == "ctl-cognitive").unwrap();
+        let cognitive = generated_skills()
+            .iter()
+            .find(|s| s.name == "ctl-cognitive")
+            .unwrap();
         assert_eq!(cognitive.platforms, &["omp", "claude"]);
     }
 
@@ -499,8 +504,9 @@ mod tests {
             .replace("\r\n", "\n");
             for dir in [".omp/skills", ".claude/skills", ".opencode/skills"] {
                 let dest = root.join(format!("{dir}/{skill}/references/{rname}"));
-                let on_disk =
-                    std::fs::read_to_string(&dest).unwrap().replace("\r\n", "\n");
+                let on_disk = std::fs::read_to_string(&dest)
+                    .unwrap()
+                    .replace("\r\n", "\n");
                 assert_eq!(on_disk, src, "{dest:?} drifted from source");
             }
         }
