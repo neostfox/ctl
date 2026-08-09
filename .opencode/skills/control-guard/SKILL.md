@@ -138,23 +138,19 @@ concurrently to a shared path.
 
 ## Pipeline Routing (proposal-first)
 
-The governed pipeline: **triage (this protocol) → align (grill) → PRD → tasks →
-implement (under control-guard, --tdd opt-in) → wrap-up (finish → ctl-spec)**.
-Each station's skill declares its station contract (upstream artifact → produces
-→ downstream consumer); when routing, report the current station and its
-artifact so the human always knows where the pipeline stands.
+The governed pipeline: **triage → align (grill) → [PRD + tasks inline] →
+implement (--tdd opt-in) → wrap-up (finish → ctl-spec)**. The full phase map and
+station contracts live in `workflow-skills.md`; only grill is a skill — PRD
+(`ctl prd init`) and task slicing (`ctl task create`) are inline disciplines run
+from the confirmed alignment note.
 
-- **Trivial** (typo, single-file obvious fix) — skip the pipeline; edit directly
-  (the gate records ungoverned writes) or use a quick task.
-- **Everything else** — before `ctl task create`, run the align station (grill):
-  a first-principles proposal and a micro-decision interview — one question at a
-  time, each with a recommended answer; facts come from the repo, direction
-  comes from the user. **Do not build until the user confirms.**
-- Multiple durable tasks → confirmed alignment goes through **PRD** (the
-  pipeline's first hard checkpoint) before **tasks**.
+- **Trivial** (typo, single-file fix) — skip the pipeline; edit directly or use
+  a quick task.
+- **Everything else** — align first (grill): a first-principles proposal +
+  micro-decision interview; facts from the repo, direction from the user. **Do
+  not build until the user confirms.**
 - A question answered by producing **evidence rather than code** → a
-  **research/spike** task: it completes by recording evidence + uncertainty
-  outcomes, not a diff.
+  **research/spike** task (records evidence + uncertainty, not a diff).
 
 ## Honest Disclosure
 
@@ -220,9 +216,9 @@ Subtasks: use opencode's native task/todo tracking within the parent's
 `write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
 var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The
 plugin contract is covered by `bun test --cwd .opencode`. Workflow phases (see
-`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align
-principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
-vertical task proposals. Opt into red→green with `ctl task create --tdd`;
+`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align from
+first principles, then `ctl task create` directly (or `ctl prd init` for a
+multi-task effort). Opt into red→green with `ctl task create --tdd`;
 context compaction is automatic (boundaries inject every call).
 
 ### Compile gate — LSP + record

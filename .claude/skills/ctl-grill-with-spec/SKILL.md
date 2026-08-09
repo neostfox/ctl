@@ -1,6 +1,6 @@
 ---
 name: ctl-grill-with-spec
-description: "Align before building — the single entry to the alignment station. Grills an ambiguous, broad, multi-option, or high-risk request into a confirmed alignment note via a micro-decision interview. Triggers when: the request is vague, too broad, has multiple valid approaches, is high-risk, or likely to produce the wrong thing; also on /ctl-new. Do NOT trigger for: an already well-scoped request (go to ctl-to-prd or ctl-to-tasks), a trivial single-file edit, code review (ctl-review), or debugging (ctl-diagnose)."
+description: "Align before building — the single entry to the alignment station. Grills an ambiguous, broad, multi-option, or high-risk request into a confirmed alignment note via a micro-decision interview. Triggers when: the request is vague, too broad, has multiple valid approaches, is high-risk, or likely to produce the wrong thing; also on /ctl-new. Do NOT trigger for: an already well-scoped request (go straight to ctl task create), a trivial single-file edit, code review (ctl-review), or debugging (ctl-diagnose)."
 ---
 
 # ctl-grill-with-spec (Claude Code)
@@ -61,9 +61,9 @@ verdict.
 - **Produces**: alignment note at `.ctl/spec/alignment/` (`draft` → `confirmed`);
   on the single-task path the note lives in-conversation — provenance is
   optional, recorded post-create if desired (record-only).
-- **Downstream**: `ctl-to-prd` consumes a **confirmed** note ONLY when multiple
-  durable tasks are needed; a single converged task skips PRD and goes to
-  `ctl task create` directly.
+- **Downstream**: a **confirmed** note becomes tasks directly — a single
+  converged task goes to `ctl task create`; a multi-task effort writes a PRD
+  (`ctl prd init`) from the note, then `ctl task create` per slice.
 
 ## The grill (alignment phase body)
 
@@ -170,7 +170,7 @@ The framework's note-feeding mapping (truths → constraints, challenge → assu
   `ctl brainstorm record --id <task-id> --brainstorm <bs-id> --divergence <note-path>`
   after `ctl task create`.
 - **Multi-task path**: write `.ctl/spec/alignment/<yyyy-mm-dd>-<slug>.md`
-  (spec tier — writable; `status: draft` until confirmed) — `ctl-to-prd` reads it.
+  (spec tier — writable; `status: draft` until confirmed) — read it when writing the PRD (`ctl prd init`).
 - Working notes once a task exists: `.ctl/tasks/<task-id>/grill.md` (inside
   `write_allow`).
 - A crystallized domain term or decision **only when the user confirms it**:
@@ -203,5 +203,5 @@ create/finish). The alignment note targets `.ctl/spec/alignment/` (spec tier —
 writable under the gate); `grill.md` or an ADR must fall inside the active
 task's `write_allow`. Read-only investigation can be dispatched to a subagent
 (built-in `Explore`, `claude-code-guide`); keep writes inline so they carry the
-task's `CTL_TASK_ID` binding. Hand the confirmed note to `ctl-to-prd`; a durable
+task's `CTL_TASK_ID` binding. Hand the confirmed note to `ctl task create` (or `ctl prd init` for a multi-task effort); a durable
 lesson to `/ctl-spec`.

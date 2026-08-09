@@ -66,7 +66,7 @@ markers, sourced from a canonical file under `.agent/protocols/`:
 | Skill | Family | Canonical core | Reference part? |
 |---|---|---|---|
 | control-guard | control-guard | `.agent/protocols/control-guard.md` | no |
-| ctl-grill-with-spec / ctl-to-prd / ctl-to-tasks | workflow | `.agent/protocols/workflow-skills.md` | yes (phase map after the marker) |
+| ctl-grill-with-spec | workflow | `.agent/protocols/workflow-skills.md` | yes (phase map after the marker) |
 
 The other skills (ctl-spec, ctl-cognitive, ctl-review, ctl-diagnose, ctl-meta)
 are **plain** — no managed core; the source body is the whole skill.
@@ -86,7 +86,7 @@ different platforms have different mechanisms:
 | Skill | OMP | Claude | OpenCode |
 |---|---|---|---|
 | control-guard | ✓ | ✓ | ✓ |
-| ctl-grill-with-spec / ctl-to-prd / ctl-to-tasks | ✓ | ✓ | ✓ |
+| ctl-grill-with-spec | ✓ | ✓ | ✓ |
 | ctl-spec | ✓ | ✓ | ✓ |
 | ctl-cognitive | ✓ | ✓ | — |
 | ctl-review | ✓ | — | — |

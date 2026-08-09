@@ -89,9 +89,9 @@ Subtasks: use opencode's native task/todo tracking within the parent's
 `write_allow`. When several tasks are active, bind one with the `CTL_TASK_ID` env
 var. Diagnose a blocked write with `ctl boundary explain --path <path>`. The
 plugin contract is covered by `bun test --cwd .opencode`. Workflow phases (see
-`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align
-principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks` to break it into
-vertical task proposals. Opt into red→green with `ctl task create --tdd`;
+`.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec` to align from
+first principles, then `ctl task create` directly (or `ctl prd init` for a
+multi-task effort). Opt into red→green with `ctl task create --tdd`;
 context compaction is automatic (boundaries inject every call).
 
 ### Compile gate — LSP + record
@@ -153,8 +153,8 @@ governable but keep coordinated multi-file implementation inline, inside the
 active task's `write_allow`, until the binding question is settled.
 
 Workflow phases (see `.agent/protocols/workflow-skills.md`): `ctl-grill-with-spec`
-to align from first principles, `ctl-to-prd` to synthesize a PRD, `ctl-to-tasks`
-to break it into vertical task proposals. Opt into red→green with
+to align from first principles, then `ctl task create` directly (or `ctl prd init`
+for a multi-task effort). Opt into red→green with
 `ctl task create --tdd`; context compaction is automatic (boundaries inject every call). Diagnose
 a blocked write with `ctl boundary explain --path <path>`.
 

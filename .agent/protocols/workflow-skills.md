@@ -44,11 +44,13 @@ single source of truth for the full map.
 ## Phase map
 
 Phases run in this order; skip any whose preconditions are already met. Phases
-**1-3 and 5** are separate skills (ctl-grill-with-spec / ctl-to-prd / ctl-to-tasks
-/ ctl-diagnose); **4 (TDD)** is the `--tdd` interlock feature (not a skill); **7
-(handoff)** is the `ctl handoff` CLI feature (not a skill); **6 (architecture
-review)** and **8 (decision map)** survive as thinking guides under
-`.ctl/spec/guides/`, not active skills.
+**1 and 5** are separate skills (ctl-grill-with-spec / ctl-diagnose); **2 (PRD)**
+and **3 (tasks)** are inline disciplines — a confirmed alignment note becomes tasks
+directly (`ctl task create`), or a PRD (`ctl prd init`) then tasks for a multi-task
+effort; **4 (TDD)** is the `--tdd` interlock feature (not a skill); **7 (handoff)**
+is the `ctl handoff` CLI feature (not a skill); **6 (architecture review)** and
+**8 (decision map)** survive as thinking guides under `.ctl/spec/guides/`, not active
+skills.
 
 1. **grill / first principles** — before a PRD or implementation, when the
    request is ambiguous, too broad, high-risk, or likely to build the wrong
@@ -78,7 +80,7 @@ review)** and **8 (decision map)** survive as thinking guides under
 8. **decision map** — situational, triggered from grill when an effort has
    **fog**: decisions that cannot resolve until frontier work advances. Maintains
    a project-level index (Destination · Frontier · Fog · Out of scope); fog
-   graduates into tasks incrementally via `ctl-to-tasks` rather than one upfront
+   graduates into tasks incrementally via `ctl task create` rather than one upfront
    slice pass. If grill surfaces no fog, skip it — the effort fits one session.
 
 ## Thinking frameworks, placed

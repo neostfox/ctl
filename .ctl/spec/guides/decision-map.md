@@ -9,7 +9,7 @@ made until work on the frontier advances.
 Build a map **only** when grill surfaces fog. The test: are there decisions that
 cannot be made until work on the frontier advances? If yes, the effort is too big
 to plan upfront — build a map. If every decision resolves in the alignment
-interview, the effort fits one session: go straight to `ctl-to-tasks` and skip
+interview, the effort fits one session: go straight to `ctl task create` and skip
 the map entirely.
 
 **No-fog early exit.** A small or well-understood effort does not get a map. A
@@ -38,7 +38,7 @@ When a fog item's blocker completes and the decision resolves, it **graduates**:
 
 ```
 fog item → resolve the decision (HITL, via grill if needed)
-         → ctl-to-tasks produces a slice (or ctl task create for a trivial one)
+         → `ctl task create` produces a slice (trivial or fog-graduated)
          → new task ID enters Frontier
          → fog item is struck from the map
 ```
@@ -71,7 +71,7 @@ The map does not duplicate ctl's mechanics — it orients a human across them:
 - `depends_on` + `ctl next-task` → the Frontier (machine-computed; map mirrors).
 - `ctl board` + `ctl drift` → per-task state and trouble (machine view).
 - `ctl handoff` → compresses a session (the map survives across sessions).
-- `ctl-to-tasks` → the graduation mechanism (fog → slice).
+- `ctl task create` → the graduation mechanism (fog → slice).
 
 The map adds the one thing none of these carry: **what is still unresolved and
 what has been ruled out**, at the project level.
