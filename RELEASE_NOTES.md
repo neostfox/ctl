@@ -34,6 +34,12 @@ human/agent guides. **No behavior change for governed task/run/gate flows.**
 - **Generator parameterized** into `workflow` / `control-guard` / `plain`
   families with `Family.core: Option<&CoreSpec>` (replacing empty-string
   sentinels).
+- **`ctl-to-prd` / `ctl-to-tasks` cut** (skill-layer thinning, issue #8): the
+  planning chain grill → PRD → tasks folds to grill alone. PRD synthesis and task
+  slicing are now **inline disciplines** (`ctl prd init`, `ctl task create`) —
+  dogfooding showed the two skills never drove a task across 3+ weeks / 10 real
+  tasks. The `ctl prd init/plan` CLI feature stays; only the advisory skills are
+  removed. Generated surface: 7 skills (was 9); `ctl skills sync` regenerates.
 
 ## Docs
 

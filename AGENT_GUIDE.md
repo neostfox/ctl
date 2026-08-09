@@ -78,8 +78,8 @@ ctl task（parent）  — 声明的 scope / gates / boundaries（ctl 账本）
 ```
 triage（本协议）
   → align（grill / ctl-grill-with-spec）   第一性原理对齐 + micro-decision 面谈
-  → PRD（ctl-to-prd）                        管线第一个硬检查点（多任务时）
-  → tasks（ctl-to-tasks）                    垂直切片
+  → PRD（ctl prd init）                     管线第一个硬检查点（多任务时，inline）
+  → tasks（ctl task create）                垂直切片（inline）
   → implement（control-guard，--tdd 可选）
   → wrap-up（finish → ctl-spec）
 ```
@@ -149,8 +149,8 @@ skills 管「在什么阶段想什么」；每个 skill 声明自己的 station 
 | 阶段 | skill / 特性 | 何时触发 | 产出 |
 |---|---|---|---|
 | 1. grill / 第一性原理 | `ctl-grill-with-spec` | PRD 或实现之前，需求模糊/过宽/高风险/可能做错时 | 对齐 artifact（观察事实、规则、假设、不可约约束、目标/非目标、未知、最小实验）——**不是真理声明** |
-| 2. PRD | `ctl-to-prd` | 上下文够了、要生成多个持久任务之前 | PRD，区分 **ObservedBasis**（你实际读到的）/ **ConfirmedBasis**（用户或项目权威确认的）/ **OpenUncertainty**（未决未知，绝不隐藏）；状态 draft·confirmed·superseded |
-| 3. tasks | `ctl-to-tasks` | 确认的 PRD/计划 → 任务 | 垂直切片，每个独立可验证，声明 objective/scope/gates/acceptance/**AFK/HITL** 标签/blocking uncertainties |
+| 2. PRD | `ctl prd init`（inline，非 skill） | 上下文够了、要生成多个持久任务之前 | PRD，区分 **ObservedBasis**（你实际读到的）/ **ConfirmedBasis**（用户或项目权威确认的）/ **OpenUncertainty**（未决未知，绝不隐藏）；状态 draft·confirmed·superseded |
+| 3. tasks | `ctl task create`（inline，非 skill） | 确认的 PRD/计划 → 任务 | 垂直切片，每个独立可验证，声明 objective/scope/gates/acceptance/**AFK/HITL** 标签/blocking uncertainties |
 | 4. TDD | `--tdd` 互锁（**特性，非 skill**） | 实现期 | 一次一个行为，red 证据先于 green 证据，green 后才 refactor |
 | 5. diagnose / Bayesian | `ctl-diagnose` | bug、flaky、意外结果、架构不确定 | 可证伪假设排序 + 证据分级；**没有 red-capable 反馈回路前不提 fix** |
 | 6. 架构评审 | 思考指南（`.ctl/spec/guides/`） | — | read-only，产出候选方案，不产出代码改动；用户选哪个候选变成新的受治任务 |

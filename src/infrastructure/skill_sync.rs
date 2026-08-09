@@ -144,18 +144,6 @@ fn generated_skills() -> &'static [SkillSpec] {
             platforms: ALL_KEYS,
         },
         SkillSpec {
-            name: "ctl-to-prd",
-            title: "ctl-to-prd",
-            family: &WORKFLOW_FAMILY,
-            platforms: ALL_KEYS,
-        },
-        SkillSpec {
-            name: "ctl-to-tasks",
-            title: "ctl-to-tasks",
-            family: &WORKFLOW_FAMILY,
-            platforms: ALL_KEYS,
-        },
-        SkillSpec {
             name: "ctl-spec",
             title: "ctl-spec",
             family: &PLAIN_FAMILY,
@@ -473,8 +461,6 @@ mod tests {
         for required in [
             "control-guard",
             "ctl-grill-with-spec",
-            "ctl-to-prd",
-            "ctl-to-tasks",
             "ctl-spec",
             "ctl-cognitive",
             "ctl-meta",

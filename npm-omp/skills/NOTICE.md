@@ -17,14 +17,13 @@ skill set above.
 
 ## Workflow skills foundation (L0 references)
 
-The workflow skills — `ctl-grill-with-spec`, `ctl-to-prd`, `ctl-to-tasks`,
-and the canonical core at
+The workflow skill — `ctl-grill-with-spec` — and the canonical core at
 `.agent/protocols/workflow-skills.md` — are **ctl-native rewrites** inspired by
 Matt Pocock's engineering skill workflow and by Trellis PR #335:
 
 | Source | Adapted into | Status |
 |---|---|---|
-| [mattpocock/skills](https://github.com/mattpocock/skills) — engineering skill workflow (setup → grill-with-docs → to-prd → to-issues → tdd → review → diagnose → improve-architecture → handoff) | the phase map and the grill / PRD / tasks skill shapes | L0 reference — not vendored |
+| [mattpocock/skills](https://github.com/mattpocock/skills) — engineering skill workflow (setup → grill-with-docs → to-prd → to-issues → tdd → review → diagnose → improve-architecture → handoff) | the phase map and the grill skill shape (PRD/tasks folded inline) | L0 reference — not vendored |
 | [mindfold-ai/Trellis PR #335](https://github.com/mindfold-ai/Trellis/pull/335) — First Principles / Bayesian thinking-framework placement | First Principles embedded in grill, Bayesian reasoning kept in `ctl-diagnose` (not floating "think better" skills) | L0 reference — not vendored |
 
 These external materials are treated as **L0 reference material**: ctl adapts the

@@ -103,10 +103,10 @@ bodies diverge.
 ```
 grill  → ctl-grill-with-spec   align from first principles (challenge inherited
                                assumptions; output artifacts, not truth)
-PRD    → ctl-to-prd            synthesize a PRD; separate ObservedBasis /
-                               ConfirmedBasis / OpenUncertainty (draft|confirmed|superseded)
-tasks  → ctl-to-tasks          vertical, independently verifiable slices; each
-                               declares scope, gates, AFK/HITL, blocking uncertainties
+PRD    → ctl prd init           inline discipline (multi-task): synthesize a PRD;
+                               separate ObservedBasis / ConfirmedBasis / OpenUncertainty
+tasks  → ctl task create        inline discipline: vertical, independently verifiable
+                               slices; each declares scope, gates, AFK/HITL, blocking uncertainties
 ```
 
 Red→green TDD and context handoff are **features, not skills**: opt a task into red→green with `--tdd` (the `tdd-red-green` interlock proves it on the ledger); compact context with `ctl handoff export` / `ctl handoff capture`.

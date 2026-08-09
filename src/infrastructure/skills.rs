@@ -38,14 +38,6 @@ pub fn all_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-grill-with-spec/SKILL.md",
             content: include_str!("../../.omp/skills/ctl-grill-with-spec/SKILL.md"),
         },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-prd/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-to-prd/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-tasks/SKILL.md",
-            content: include_str!("../../.omp/skills/ctl-to-tasks/SKILL.md"),
-        },
         // Cognitive + knowledge orchestration (externalized from ctl Rust): routes
         // when to record canonical cognitive state (ctl) and manage the knowledge
         // base (scripts/knowledge.py companion).
@@ -172,14 +164,6 @@ pub fn claude_embedded_files() -> Vec<EmbeddedFile> {
             relative_path: "skills/ctl-grill-with-spec/SKILL.md",
             content: include_str!("../../.claude/skills/ctl-grill-with-spec/SKILL.md"),
         },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-prd/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-to-prd/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-tasks/SKILL.md",
-            content: include_str!("../../.claude/skills/ctl-to-tasks/SKILL.md"),
-        },
         // OMP-native skills with no workflow-core: ported to Claude because they
         // have no other Claude path (unlike ctl-diagnose → ctl-oracle agent and
         // ctl-brainstorm/ctl-review folded into control-guard). ctl-spec bootstraps
@@ -244,14 +228,6 @@ pub fn opencode_embedded_files() -> Vec<EmbeddedFile> {
         EmbeddedFile {
             relative_path: "skills/ctl-grill-with-spec/SKILL.md",
             content: include_str!("../../.opencode/skills/ctl-grill-with-spec/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-prd/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-to-prd/SKILL.md"),
-        },
-        EmbeddedFile {
-            relative_path: "skills/ctl-to-tasks/SKILL.md",
-            content: include_str!("../../.opencode/skills/ctl-to-tasks/SKILL.md"),
         },
         EmbeddedFile {
             relative_path: "skills/ctl-meta/SKILL.md",
@@ -451,8 +427,8 @@ mod tests {
         let d = TmpDir::new("claude");
         let n = inject_claude(&d.path).unwrap();
         assert_eq!(
-            n, 13,
-            "claude injects 3 integration files + control-guard + 3 workflow skills + ctl-spec + ctl-cognitive + ctl-meta + 2 references + 1 agent"
+            n, 11,
+            "claude injects 3 integration files + control-guard + grill + ctl-spec + ctl-cognitive + ctl-meta + 2 references + 1 agent"
         );
         for f in [
             "hooks/ctl-context.py",
@@ -460,8 +436,6 @@ mod tests {
             "settings.json",
             "skills/control-guard/SKILL.md",
             "skills/ctl-grill-with-spec/SKILL.md",
-            "skills/ctl-to-prd/SKILL.md",
-            "skills/ctl-to-tasks/SKILL.md",
             "skills/ctl-spec/SKILL.md",
             "skills/ctl-cognitive/SKILL.md",
             "skills/ctl-meta/SKILL.md",
@@ -593,9 +567,10 @@ pub struct WorkflowSkill {
 }
 
 /// Every workflow skill, both platforms. Adding a workflow skill means adding its
-/// two rows here (and embedding the OMP copy in `all_embedded_files`); the drift
-/// test iterates this list. The three logical skills are the foundation set:
-/// grill-with-spec, to-prd, to-tasks.
+/// rows here (and embedding the OMP copy in `all_embedded_files`); the drift test
+/// iterates this list. The foundation skill is grill-with-spec; the planning
+/// disciplines (PRD via `ctl prd init`, task slicing via `ctl task create`) are
+/// inline — no longer separate skills.
 pub fn workflow_skills() -> &'static [WorkflowSkill] {
     &[
         WorkflowSkill {
@@ -610,48 +585,12 @@ pub fn workflow_skills() -> &'static [WorkflowSkill] {
             path: ".opencode/skills/ctl-grill-with-spec/SKILL.md",
             platform_marker: "opencode Integration",
         },
-        WorkflowSkill {
-            skill: "ctl-to-prd",
-            platform: "omp",
-            path: ".omp/skills/ctl-to-prd/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-to-prd",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-to-prd/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-to-tasks",
-            platform: "omp",
-            path: ".omp/skills/ctl-to-tasks/SKILL.md",
-            platform_marker: "OMP Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-to-tasks",
-            platform: "opencode",
-            path: ".opencode/skills/ctl-to-tasks/SKILL.md",
-            platform_marker: "opencode Integration",
-        },
         // Claude Code mirror: same managed core + phase body, only the
         // `## Claude Code Integration` section differs (drift-checked below).
         WorkflowSkill {
             skill: "ctl-grill-with-spec",
             platform: "claude",
             path: ".claude/skills/ctl-grill-with-spec/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-to-prd",
-            platform: "claude",
-            path: ".claude/skills/ctl-to-prd/SKILL.md",
-            platform_marker: "Claude Code Integration",
-        },
-        WorkflowSkill {
-            skill: "ctl-to-tasks",
-            platform: "claude",
-            path: ".claude/skills/ctl-to-tasks/SKILL.md",
             platform_marker: "Claude Code Integration",
         },
     ]
